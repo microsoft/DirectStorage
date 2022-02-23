@@ -1,14 +1,25 @@
-# Project
+# DirectStorage on Windows Samples
+DirectStorage is a feature intended to allow games to make full use of high-speed storage (such as NVMe SSDs) that can can deliver multiple gigabytes a second of small (eg 64kb) data reads with minimal CPU overhead.  Although it is possible to saturate a drive using traditional ReadFile-based IO the CPU overhead of increases non-linearly as the size of individual reads decreases.  Additionally, most games choose to store their assets compressed on disk in order to reduce the install footprint, with these assets being decompressed on the fly as load time.  The CPU overhead of this becomes increasingly expensive as bandwidth increases.
 
-> This repo has been populated by an initial template to help get you started. Please
-> make sure to update the content to build a great experience for community-building.
+Video game consoles such as the XBox Series X address these issues by offloading aspects of this to hardware - making use of the NVMe hardware queue to manage IO and hardware accelerated decompression.  As we expect to see more titles designed to take advantage of the possibilities offered by this architecture it becomes important that Windows has similar capabilities.
 
-As the maintainer of this project, please make a few updates:
+The DirectStorage API already exists on Xbox and in order to ease porting of titles between Xbox and Windows, the two APIs should be as compatible as possible.
 
-- Improving this README.MD file to provide a great experience
-- Updating SUPPORT.MD with content about this project's support experience
-- Understanding the security reporting process in SECURITY.MD
-- Remove this section from the README
+DirectStorage only supports read operations.
+
+We invite you to join us at our [discord server](http://discord.gg/directx). See the [related links](##-Related-links) section for our full list of DX12 and DirectStorage-related links.
+
+## API Samples
+In the Samples directory, you will find samples that attempt to demonstrate how use the DirectStorage apis. By doing this, we hope to make it easier to get started with DirectStorage.
+
+### DirectStorage samples
+1. [HelloDirectStorage](Samples/HelloDirectStorage/readme.md): This rudimentary sample serves to provide a quick and easy way to get acquainted with the DirectStorage runtime by reading the contents of a file and writing them out to a buffer on the GPU using DirectStorage.
+    
+    <img src="Samples/HelloDirectStorage/HelloDirectStorageRender.png" alt="HelloDirectStorage Render preview" height="200">
+
+2. [MiniEngine (with DirectStorage support)](Samples/Miniengine/DirectStorage/readme.md): The miniengine ModelViewer sample (original sample [here](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/MiniEngine)) has been updated to use DirectStorage for Windows to load its assets and demonstrates how to decompress assets with your existing CPU decompression codecs.
+    
+    <img src="Samples/MiniEngine/DirectStorage/ModelViewerRender.png" alt="ModelViewer Render preview" height="200">
 
 ## Contributing
 
@@ -31,3 +42,17 @@ trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.
+
+# Build
+Install [Visual Studio 2019](http://www.visualstudio.com/downloads)
+
+Open the following Visual Studio solutions and build
+```
+Samples\HelloDirectStorage.sln
+Samples\MiniEngine\ModelViewer\ModelViewer.sln
+```
+
+## Related links
+* [DirectX Landing Page](https://devblogs.microsoft.com/directx/landing-page/)
+* [PIX on Windows](https://devblogs.microsoft.com/pix/documentation/)
+
