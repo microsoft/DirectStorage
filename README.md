@@ -13,11 +13,11 @@ We invite you to join us at our [discord server](http://discord.gg/directx). See
 In the Samples directory, you will find samples that attempt to demonstrate how use the DirectStorage apis. By doing this, we hope to make it easier to get started with DirectStorage.
 
 ### DirectStorage samples
-1. [HelloDirectStorage](Samples/HelloDirectStorage/readme.md): This rudimentary sample serves to provide a quick and easy way to get acquainted with the DirectStorage runtime by reading the contents of a file and writing them out to a buffer on the GPU using DirectStorage.
+1. [HelloDirectStorage](Samples/HelloDirectStorage/README.md): This rudimentary sample serves to provide a quick and easy way to get acquainted with the DirectStorage runtime by reading the contents of a file and writing them out to a buffer on the GPU using DirectStorage.
     
     <img src="Samples/HelloDirectStorage/HelloDirectStorageRender.png" alt="HelloDirectStorage Render preview" height="200">
 
-2. [MiniEngine (with DirectStorage support)](Samples/Miniengine/DirectStorage/readme.md): The miniengine ModelViewer sample (original sample [here](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/MiniEngine)) has been updated to use DirectStorage for Windows to load its assets and demonstrates how to decompress assets with your existing CPU decompression codecs.
+2. [MiniEngine (with DirectStorage support)](Samples/MiniEngine/DirectStorage/README.md): The miniengine ModelViewer sample (original sample [here](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/MiniEngine)) has been updated to use DirectStorage for Windows to load its assets and demonstrates how to decompress assets with your existing CPU decompression codecs.
     
     <img src="Samples/MiniEngine/DirectStorage/ModelViewerRender.png" alt="ModelViewer Render preview" height="200">
 
