@@ -568,6 +568,7 @@ void InitializeDStorage()
         queueDesc.Capacity = DSTORAGE_MIN_QUEUE_CAPACITY;
         queueDesc.Priority = DSTORAGE_PRIORITY_NORMAL;
         queueDesc.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+        queueDesc.Name = "g_dsSystemMemoryQueue";
 
         ASSERT_SUCCEEDED(g_factory->CreateQueue(&queueDesc, IID_PPV_ARGS(&g_dsSystemMemoryQueue)));
     }
@@ -580,6 +581,7 @@ void InitializeDStorage()
         queueDesc.Capacity = DSTORAGE_MAX_QUEUE_CAPACITY;
         queueDesc.Priority = DSTORAGE_PRIORITY_NORMAL;
         queueDesc.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+        queueDesc.Name = "g_dsGpuQueue";
 
         ASSERT_SUCCEEDED(g_factory->CreateQueue(&queueDesc, IID_PPV_ARGS(&g_dsGpuQueue)));
     }
