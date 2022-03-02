@@ -5,7 +5,7 @@ This version of the miniengine ModelViewer sample (original sample [here](https:
 
 
 # Build
-Install [Visual Studio 2019](http://www.visualstudio.com/downloads)
+Install [Visual Studio](http://www.visualstudio.com/downloads) 2019 or higher.
 
 Open the following Visual Studio solution and build
 ```
@@ -150,6 +150,8 @@ Finally, the NumBlocksCompleted atomic can be used to determine if this particul
 The net result of all of this is that the sample has pretty good utilization of the CPU while decompressing, and can start working on initializing other parts of the renderer even as the DirectStorage is loading the GPU assets.  
 
 ## Related links
+* https://aka.ms/directstorage
 * [DirectX Landing Page](https://devblogs.microsoft.com/directx/landing-page/)
+* [Discord server](http://discord.gg/directx)
 * [PIX on Windows](https://devblogs.microsoft.com/pix/documentation/)
 

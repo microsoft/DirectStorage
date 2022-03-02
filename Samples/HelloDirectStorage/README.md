@@ -5,7 +5,7 @@ This rudimentary sample serves to provide a quick and easy way to get acquainted
 
 
 # Build
-Install [Visual Studio 2019](http://www.visualstudio.com/downloads)
+Install [Visual Studio](http://www.visualstudio.com/downloads) or higher.
 
 Open the following Visual Studio solution and build
 ```
@@ -19,6 +19,8 @@ Samples\HelloDirectStorage\x64\Debug\HelloDirectStorage.exe HelloDirectStorageRe
 ```
 
 ## Related links
+* https://aka.ms/directstorage
 * [DirectX Landing Page](https://devblogs.microsoft.com/directx/landing-page/)
+* [Discord server](http://discord.gg/directx)
 * [PIX on Windows](https://devblogs.microsoft.com/pix/documentation/)
 
