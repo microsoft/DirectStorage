@@ -374,9 +374,9 @@
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets" Condition="Exists('..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets')" />
     <Import Project="..\..\packages\directxtex_desktop_win10.2021.1.10.2\build\native\directxtex_desktop_win10.targets" Condition="Exists('..\..\packages\directxtex_desktop_win10.2021.1.10.2\build\native\directxtex_desktop_win10.targets')" />
-    <Import Project="..\..\packages\Microsoft.DirectStorage.1.0.0-dev.21111901\build\Microsoft.DirectStorage.targets" Condition="Exists('..\..\packages\Microsoft.DirectStorage.1.0.0-dev.21111901\build\Microsoft.DirectStorage.targets')" />
     <Import Project="..\..\packages\directxmesh_desktop_win10.2021.11.8.1\build\native\directxmesh_desktop_win10.targets" Condition="Exists('..\..\packages\directxmesh_desktop_win10.2021.11.8.1\build\native\directxmesh_desktop_win10.targets')" />
     <Import Project="..\..\packages\WinPixEventRuntime.1.0.220124001\build\WinPixEventRuntime.targets" Condition="Exists('..\..\packages\WinPixEventRuntime.1.0.220124001\build\WinPixEventRuntime.targets')" />
+    <Import Project="..\..\packages\Microsoft.Direct3D.DirectStorage.1.0.0-RC3\build\Microsoft.Direct3D.DirectStorage.targets" Condition="Exists('..\..\packages\Microsoft.Direct3D.DirectStorage.1.0.0-RC3\build\Microsoft.Direct3D.DirectStorage.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
@@ -384,8 +384,8 @@
     </PropertyGroup>
     <Error Condition="!Exists('..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets'))" />
     <Error Condition="!Exists('..\..\packages\directxtex_desktop_win10.2021.1.10.2\build\native\directxtex_desktop_win10.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\directxtex_desktop_win10.2021.1.10.2\build\native\directxtex_desktop_win10.targets'))" />
-    <Error Condition="!Exists('..\..\packages\Microsoft.DirectStorage.1.0.0-dev.21111901\build\Microsoft.DirectStorage.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\Microsoft.DirectStorage.1.0.0-dev.21111901\build\Microsoft.DirectStorage.targets'))" />
     <Error Condition="!Exists('..\..\packages\directxmesh_desktop_win10.2021.11.8.1\build\native\directxmesh_desktop_win10.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\directxmesh_desktop_win10.2021.11.8.1\build\native\directxmesh_desktop_win10.targets'))" />
     <Error Condition="!Exists('..\..\packages\WinPixEventRuntime.1.0.220124001\build\WinPixEventRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\WinPixEventRuntime.1.0.220124001\build\WinPixEventRuntime.targets'))" />
+    <Error Condition="!Exists('..\..\packages\Microsoft.Direct3D.DirectStorage.1.0.0-RC3\build\Microsoft.Direct3D.DirectStorage.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\Microsoft.Direct3D.DirectStorage.1.0.0-RC3\build\Microsoft.Direct3D.DirectStorage.targets'))" />
   </Target>
 </Project>
