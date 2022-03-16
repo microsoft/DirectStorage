@@ -7,6 +7,8 @@ The DirectStorage API already exists on Xbox and in order to ease porting of tit
 
 DirectStorage only supports read operations.
 
+You can find some good starting information in [Developer Guidance](Docs/DeveloperGuidance.md)
+
 We invite you to join us at our [discord server](http://discord.gg/directx). See the [related links](##-Related-links) section for our full list of Direct3D 12 and DirectStorage-related links.
 
 ## API Samples
@@ -46,4 +48,5 @@ Samples\MiniEngine\ModelViewer\ModelViewer.sln
 * https://aka.ms/directstorage
 * [DirectX Landing Page](https://devblogs.microsoft.com/directx/landing-page/)
 * [Discord server](http://discord.gg/directx)
+* [Developer Guidance](Docs/DeveloperGuidance.md)
 * [PIX on Windows](https://devblogs.microsoft.com/pix/documentation/)
