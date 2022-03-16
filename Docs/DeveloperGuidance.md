@@ -28,7 +28,7 @@ Requests can read from memory or files.  Each individual queue can only service 
 Each individual queue is also bound to its source type and destination device.  The source type can be file or memory.  The destination device specifies whether requests on this queue go to system memory or GPU memory.
 
 ## Request Destinations
-Each request must specify its request destination type.  For some destination types, DirectStorage has expectations of the layout of the data. For developers who are used to the Xbox DirectStorage, this is one of the large differences between the two APIs.  This is necessary because the graphics driver is responsible for determining the actual layout of the resources in memory, and so the assets must be stored on disk in an unswizzled format.
+Each request must specify its request destination type.  For some destination types, DirectStorage has expectations of the layout of the data. For developers who are used to Xbox DirectStorage, this is one of the large differences between the two APIs.  This is necessary because the graphics driver is responsible for determining the actual layout of the resources in memory, and so the assets must be stored on disk in an unswizzled format.
 
 ### DSTORAGE_REQUEST_DESTINATION_MEMORY
 This destination type is for requests that target system memory. DirectStorage treats this as a simple array of bytes that are written to a pointer/size.
