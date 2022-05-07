@@ -48,7 +48,7 @@ As for texture regions, the data is expected to be laid out as described by GetC
 This destination type is for populating a region of tiles in a tiled resource.  This takes a resource and a region (in the form of a start coordinate and size). The data is expected to be arranged as suitable for passing to CopyTiles().
 
 ## Compressed Assets
-The data that is read for each request myst be possible to decompress in its entirety. This means that it is not, in general, possible to apply a compression algorithm over a complete file, but instead each section of the file must be compressed in isolation. See the [MiniEngine (with DirectStorage support)](../Samples/MiniEngine/DirectStorage/README.md) sample for details of how a file containing data to be read by multiple requests might be arranged.
+The data that is read for each request must be possible to decompress in its entirety. This means that it is not, in general, possible to apply a compression algorithm over a complete file, but instead each section of the file must be compressed in isolation. See the [MiniEngine (with DirectStorage support)](../Samples/MiniEngine/DirectStorage/README.md) sample for details of how a file containing data to be read by multiple requests might be arranged.
 
 ## Staging Buffers and Copying
 
