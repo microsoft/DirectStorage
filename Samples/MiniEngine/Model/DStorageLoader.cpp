@@ -435,8 +435,7 @@ static void CALLBACK OnDecompress(
 
     // The size of the destination data is always ZLIB_BLOCK_SIZE, except for
     // the last block.
-    auto blockDstLength = isEndBlock ? (dr->Request.DstSize % ZLIB_BLOCK_SIZE) : ZLIB_BLOCK_SIZE;
-
+    auto blockDstLength = isEndBlock && (dr->Request.DstSize % ZLIB_BLOCK_SIZE)? (dr->Request.DstSize % ZLIB_BLOCK_SIZE): ZLIB_BLOCK_SIZE;
     // The decompression destination buffer is memory in an upload heap.  This
     // is write-combined memory which is performant only for sequential writes.
     // The zlib uncompress() function performs a mixture of both reads and
