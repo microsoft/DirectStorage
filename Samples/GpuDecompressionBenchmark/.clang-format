@@ -1,0 +1,43 @@
+BasedOnStyle: LLVM
+UseTab: Never
+IndentWidth: 4
+TabWidth: 4
+BreakBeforeBraces: Allman
+IndentCaseLabels: false
+ColumnLimit: 120
+AccessModifierOffset: -4
+PointerAlignment: Left
+BinPackArguments: false
+BinPackParameters: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowAllArgumentsOnNextLine: false
+AlignAfterOpenBracket: AlwaysBreak
+AlignEscapedNewlines: Left
+BreakStringLiterals: false
+IncludeBlocks: Regroup
+
+IncludeCategories:
+  - Regex:           '^"\.\./.*"'
+    Priority:        2
+  - Regex:           '^".*"'
+    Priority:        1
+  - Regex:           '^<[a-z_]+>'
+    Priority:        5
+  - Regex:           '^<.*>'
+    Priority:        3
+    
+NamespaceIndentation: All
+AlwaysBreakTemplateDeclarations: Yes
+BreakConstructorInitializers: BeforeComma
+SpaceAfterTemplateKeyword: false
+AllowShortIfStatementsOnASingleLine: false
+AllowShortBlocksOnASingleLine: false
+AllowShortFunctionsOnASingleLine: false
+
+# BeforeLambdaBody doesn't seem to work
+#BraceWrapping:
+#    BeforeLambdaBody: true 
+
+PenaltyReturnTypeOnItsOwnLine: 1000
+
+TypenameMacros: ['STDMETHODCALLTYPE']

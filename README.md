@@ -16,11 +16,15 @@ The Samples directory contains sample code that demonstrates how to use the Dire
 
 1. [HelloDirectStorage](Samples/HelloDirectStorage/README.md): This rudimentary sample serves to provide a quick and easy way to get acquainted with the DirectStorage runtime by reading the contents of a file and writing them out to a buffer on the GPU using DirectStorage.
     
-    <img src="Samples/HelloDirectStorage/HelloDirectStorageRender.png" alt="HelloDirectStorage Render preview" height="200">
+    <img src="Samples/HelloDirectStorage/HelloDirectStorageRender.png" alt="HelloDirectStorage screenshot" height="200">
 
-2. [MiniEngine (with DirectStorage support)](Samples/MiniEngine/DirectStorage/README.md): The miniengine ModelViewer sample (original sample [here](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/MiniEngine)) has been updated to use DirectStorage for Windows to load its assets and demonstrates how to decompress assets with your existing CPU decompression codecs.
+2. [BulkLoadDemo](Samples/BulkLoadDemo/README.md): This demonstrates using DirectStorage, GPU decompression and custom CPU decompression.
     
-    <img src="Samples/MiniEngine/DirectStorage/ModelViewerRender.png" alt="ModelViewer Render preview" height="200">
+    <img src="Samples/BulkLoadDemo/BulkLoadDemo-screenshot.png" alt="BulkLoadDemo screenshot" height="200">
+
+3. [GpuDecompressionBenchmark](Samples/GpuDecompressionBenchmark/README.md): This sample provides a quick way to see the DirectStorage runtime decompression performance by reading the contents of a file, compressing it and then decompressing multiple ways while measuring the bandwidth and CPU usage.  Decompression is performed using the GPU as well as the CPU for comparison.
+    
+    <img src="Samples/GpuDecompressionBenchmark/GpuDecompressionBenchmarkRender.png" alt="GpuDecompressionBenchmark screenshot" height="200">
 
 ## Contributing
 

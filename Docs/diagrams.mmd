@@ -1,0 +1,34 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#ffffff', 'nodeBorder':'#000000', 'clusterBorder':'#000000'}}}%%
+
+flowchart LR
+
+subgraph SSD
+%%SSDSourceUncompressed[("Source\n(uncompressed)")]
+%%SSDSourceCustomCompressed[("Source\n(custom compressed)")]
+SSDSourceCompressed[("Source\n(compressed)")]
+end
+
+subgraph SystemMemory
+ StagingBuffer[Staging Buffer]
+ SysMemDestination[[Destination]]
+ UploadHeap[Upload Heap]
+end
+
+subgraph VRAM
+ VRAMDestination[[Destination]]
+ InputStaging[Input Staging Buffer]
+ OutputStaging[Output Staging Buffer]
+end
+
+%% Uncompressed
+%%SSDSourceUncompressed --IOP--> StagingBuffer -- memcpy --> SysMemDestination
+%%SSDSourceUncompressed --IOP--> UploadHeap -- GPUCopy ---> VRAMDestination
+
+%% Custom Compressed
+%%SSDSourceCustomCompressed --IOP--> StagingBuffer -- Decompress --> SysMemDestination
+%%StagingBuffer -- Decompress --> UploadHeap -- GPUCopy ---> VRAMDestination
+
+%% Compressed
+StagingBuffer -- "Decompress" --> SysMemDestination
+SSDSourceCompressed --IOP--> StagingBuffer
+SSDSourceCompressed --IOP--> UploadHeap -- GPUCopy ---> InputStaging -- Decompress --> OutputStaging -- GPUCopy --> VRAMDestination
