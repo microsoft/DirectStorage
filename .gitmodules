@@ -1,0 +1,6 @@
+[submodule "GDeflate/vcpkg"]
+	path = GDeflate/vcpkg
+	url = https://github.com/microsoft/vcpkg
+[submodule "GDeflate/3rdparty/libdeflate"]
+	path = GDeflate/3rdparty/libdeflate
+	url = https://github.com/NVIDIA/libdeflate
