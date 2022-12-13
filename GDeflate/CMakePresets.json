@@ -1,0 +1,47 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 19,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "Debug",
+            "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+            "binaryDir": "${sourceDir}/build/${hostSystemName}/${presetName}",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "RelWithDebInfo",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "Release",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Debug",
+            "configurePreset": "Debug"
+        },
+        {
+            "name": "RelWithDebInfo",
+            "configurePreset": "RelWithDebInfo"
+        },
+        {
+            "name": "Release",
+            "configurePreset": "Release"
+        }
+    ]
+}

@@ -1,0 +1,19 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+    "name": "gdeflate",
+    "version": "1.0.0",
+    "dependencies": [
+        {
+            "name": "directx-dxc",
+            "platform": "windows"
+        },
+        {
+            "name": "directx-headers",
+            "platform": "windows"
+        },
+        {
+            "name": "wil",
+            "platform": "windows"
+        }
+    ]
+}

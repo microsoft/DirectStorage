@@ -26,6 +26,13 @@ The Samples directory contains sample code that demonstrates how to use the Dire
     
     <img src="Samples/GpuDecompressionBenchmark/GpuDecompressionBenchmarkRender.png" alt="GpuDecompressionBenchmark screenshot" height="200">
 
+## GDeflate Reference Implementation
+This directory contains codec source and sample code that demonstrates how to use [GDeflate](GDeflate/README.md).
+
+The repo uses submodules, so be sure to pass `--recurse-submodules` to the `git clone` command.
+
+If you forget to do this then you can run `git submodule update --init`
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
@@ -44,8 +51,9 @@ Install [Visual Studio](http://www.visualstudio.com/downloads) 2019 or higher.
 
 Open the following Visual Studio solutions and build
 ```
-Samples\HelloDirectStorage.sln
-Samples\MiniEngine\ModelViewer\ModelViewer.sln
+Samples\HelloDirectStorage\HelloDirectStorage.sln
+Samples\BulkLoadDemo\BulkLoadDemo.sln
+Samples\GpuDecompressionBenchmark\GpuDecompressionBenchmark.sln
 ```
 
 ## Related links
