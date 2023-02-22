@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -176,7 +176,7 @@
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets" Condition="Exists('..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets')" />
     <Import Project="..\..\packages\WinPixEventRuntime.1.0.220810001\build\WinPixEventRuntime.targets" Condition="Exists('..\..\packages\WinPixEventRuntime.1.0.220810001\build\WinPixEventRuntime.targets')" />
-    <Import Project="..\..\packages\directxtex_desktop_win10.2022.10.18.1\build\native\directxtex_desktop_win10.targets" Condition="Exists('..\..\packages\directxtex_desktop_win10.2022.10.18.1\build\native\directxtex_desktop_win10.targets')" />
+    <Import Project="..\..\packages\directxtex_desktop_win10.2023.1.31.1\build\native\directxtex_desktop_win10.targets" Condition="Exists('..\..\packages\directxtex_desktop_win10.2023.1.31.1\build\native\directxtex_desktop_win10.targets')" />
     <Import Project="..\..\packages\directxmesh_desktop_win10.2022.10.18.1\build\native\directxmesh_desktop_win10.targets" Condition="Exists('..\..\packages\directxmesh_desktop_win10.2022.10.18.1\build\native\directxmesh_desktop_win10.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
@@ -185,7 +185,7 @@
     </PropertyGroup>
     <Error Condition="!Exists('..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets'))" />
     <Error Condition="!Exists('..\..\packages\WinPixEventRuntime.1.0.220810001\build\WinPixEventRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\WinPixEventRuntime.1.0.220810001\build\WinPixEventRuntime.targets'))" />
-    <Error Condition="!Exists('..\..\packages\directxtex_desktop_win10.2022.10.18.1\build\native\directxtex_desktop_win10.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\directxtex_desktop_win10.2022.10.18.1\build\native\directxtex_desktop_win10.targets'))" />
+    <Error Condition="!Exists('..\..\packages\directxtex_desktop_win10.2023.1.31.1\build\native\directxtex_desktop_win10.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\directxtex_desktop_win10.2023.1.31.1\build\native\directxtex_desktop_win10.targets'))" />
     <Error Condition="!Exists('..\..\packages\directxmesh_desktop_win10.2022.10.18.1\build\native\directxmesh_desktop_win10.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\directxmesh_desktop_win10.2022.10.18.1\build\native\directxmesh_desktop_win10.targets'))" />
   </Target>
 </Project>
