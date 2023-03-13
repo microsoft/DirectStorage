@@ -570,9 +570,9 @@ void BulkLoadDemo::RenderUI(GraphicsContext& gfxContext)
         text.NewLine();
 
         text.DrawFormattedString("   Bandwidth: %7.2f GB/s\n", (total / time.count()) / 1000.0f / 1000.0f / 1000.0f);
-        text.DrawFormattedString("         RAM: %7.2f MiB\n", s.CpuByteCount / 1024.0f / 1024.0f);
-        text.DrawFormattedString("Texture VRAM: %7.2f MiB\n", s.TexturesByteCount / 1024.0f / 1024.0f);
-        text.DrawFormattedString("Buffer  VRAM: %7.2f MiB\n\n", s.BuffersByteCount / 1024.0f / 1024.0f);
+        text.DrawFormattedString("CPU Mem Data: %7.2f MiB\n", s.CpuByteCount / 1024.0f / 1024.0f);
+        text.DrawFormattedString("Texture Data: %7.2f MiB\n", s.TexturesByteCount / 1024.0f / 1024.0f);
+        text.DrawFormattedString(" Buffer Data: %7.2f MiB\n\n", s.BuffersByteCount / 1024.0f / 1024.0f);
 
         if (s.UncompressedByteCount > 0)
             text.DrawFormattedString("Uncompressed: %7.2f MB\n", s.UncompressedByteCount / 1000.0f / 1000.0f);
