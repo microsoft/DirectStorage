@@ -707,6 +707,8 @@ MarcFile::DataSize MarcFile::GetRequiredDataSize() const
     accumulateSize(m_header.UnstructuredGpuData);
     accumulateSize(m_header.CpuData);
 
+    size.TexturesByteCount = 0;
+
     for (uint32_t textureIndex = 0; textureIndex < m_cpuMetadata->NumTextures; ++textureIndex)
     {
         auto& texture = m_cpuMetadata->Textures[textureIndex];
@@ -714,9 +716,11 @@ MarcFile::DataSize MarcFile::GetRequiredDataSize() const
         for (uint32_t singleMipIndex = 0; singleMipIndex < texture.NumSingleMips; ++singleMipIndex)
         {
             accumulateSize(texture.SingleMips[singleMipIndex]);
+            size.TexturesByteCount += texture.SingleMips[singleMipIndex].UncompressedSize;
         }
 
         accumulateSize(texture.RemainingMips);
+        size.TexturesByteCount += texture.RemainingMips.UncompressedSize;
     }
 
     return size;
