@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 
-include("../3rdParty/libdeflate.cmake")
+include("../3rdparty/libdeflate.cmake")
 
 set(SOURCES
   GDeflateCompress.cpp
@@ -24,7 +24,7 @@ set(SOURCES
 )
 
 set(HEADERS
-  Config.h
+  config.h
   TileStream.h
   Utils.h
 )

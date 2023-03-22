@@ -47,7 +47,7 @@ void ShowHelp()
     std::cout << "\n";
 }
 
-enum class Operation
+enum class OperationType
 {
     None,
     Compress,
@@ -59,7 +59,7 @@ enum class Operation
 struct Options
 {
     bool ShowHelp = false;
-    Operation Operation = Operation::None;
+    OperationType Operation = OperationType::None;
     std::filesystem::path SourcePath;
     std::filesystem::path DestinationPath;
     std::filesystem::path ShaderPath;
@@ -81,19 +81,19 @@ static Options ParseOptions(int argc, char** argv)
 
     if ((strcasecmp(argv[1], "/compress") == 0) || (strcasecmp(argv[1], "-compress") == 0))
     {
-        options.Operation = Operation::Compress;
+        options.Operation = OperationType::Compress;
     }
     else if ((strcasecmp(argv[1], "/decompress") == 0) || (strcasecmp(argv[1], "-decompress") == 0))
     {
-        options.Operation = Operation::DecompressCPU;
+        options.Operation = OperationType::DecompressCPU;
     }
     else if ((strcasecmp(argv[1], "/decompressgpu") == 0) || (strcasecmp(argv[1], "-decompressgpu") == 0))
     {
-        options.Operation = Operation::DecompressGPU;
+        options.Operation = OperationType::DecompressGPU;
     }
     else if ((strcasecmp(argv[1], "/demo") == 0) || (strcasecmp(argv[1], "-demo") == 0))
     {
-        options.Operation = Operation::Demo;
+        options.Operation = OperationType::Demo;
     }
     else
     {
@@ -125,7 +125,7 @@ static Options ParseOptions(int argc, char** argv)
         }
     }
 
-    if (options.Operation == Operation::DecompressGPU || options.Operation == Operation::Demo)
+    if (options.Operation == OperationType::DecompressGPU || options.Operation == OperationType::Demo)
     {
 #ifdef WIN32
         // Detect if the shaders required for decompression are present.
@@ -513,19 +513,19 @@ int main(int argc, char** argv)
 
     std::vector<std::filesystem::path> sourcePaths = CollectSourcePaths(
         options.SourcePath,
-        (options.Operation == Operation::DecompressCPU || options.Operation == Operation::DecompressGPU));
+        (options.Operation == OperationType::DecompressCPU || options.Operation == OperationType::DecompressGPU));
 
     switch (options.Operation)
     {
-    case Operation::Compress:
+    case OperationType::Compress:
         return CompressContent(sourcePaths, options.DestinationPath);
-    case Operation::DecompressCPU:
+    case OperationType::DecompressCPU:
         return DecompressContent(sourcePaths, options.DestinationPath);
 #ifdef WIN32
-    case Operation::DecompressGPU:
+    case OperationType::DecompressGPU:
         return DecompressContentUsingGPU(sourcePaths, options.DestinationPath, options.ShaderPath);
 #endif
-    case Operation::Demo:
+    case OperationType::Demo:
         return DemoCompressionAndDecompression(sourcePaths, options.DestinationPath, options.ShaderPath);
     default:
         assert(false);
