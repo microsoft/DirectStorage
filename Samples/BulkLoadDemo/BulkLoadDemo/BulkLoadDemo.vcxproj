@@ -117,7 +117,7 @@
     <MiniArchive>$(OutDir)../miniarchive/miniarchive.exe</MiniArchive>
   </PropertyGroup>
   <Target Name="BuildMarcFiles" AfterTargets="PrepareForBuild" Inputs="@(MarcFile);$(MiniArchive)" Outputs="@(MarcFile -> '$(OutDir)%(Filename).marc')">
-    <Exec Command="@(MarcFile -> '$(MiniArchive) %(Identity) $(OutDir)%(Filename).marc %(Options)')" />
+    <Exec Command="@(MarcFile -> '&quot;$(MiniArchive)&quot; &quot;%(Identity)&quot; &quot;$(OutDir)%(Filename).marc&quot; %(Options)')" />
   </Target>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets" Condition="Exists('..\..\packages\zlib-msvc-x64.1.2.11.8900\build\native\zlib-msvc-x64.targets')" />
