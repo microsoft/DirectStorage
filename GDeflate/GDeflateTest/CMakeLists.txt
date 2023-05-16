@@ -12,7 +12,7 @@ target_compile_features(GDeflateTest PRIVATE cxx_std_17)
 
 find_program(NUGET_EXE NAMES nuget)
 exec_program(${NUGET_EXE}
-    ARGS install -Source https://api.nuget.org/v3/index.json "Microsoft.Direct3D.DirectStorage" -Version 1.2.0 -ExcludeVersion -OutputDirectory ${CMAKE_BINARY_DIR}/packages)
+    ARGS install -Source https://api.nuget.org/v3/index.json "Microsoft.Direct3D.DirectStorage" -Version 1.2.1 -ExcludeVersion -OutputDirectory ${CMAKE_BINARY_DIR}/packages)
 
 
 include_directories(${CMAKE_BINARY_DIR}/packages/Microsoft.Direct3D.DirectStorage/native/include)
