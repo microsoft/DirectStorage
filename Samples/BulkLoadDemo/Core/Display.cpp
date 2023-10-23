@@ -349,7 +349,8 @@ void Display::Shutdown( void )
 void Graphics::PreparePresentHDR(void)
 {
     GraphicsContext& Context = GraphicsContext::Begin(L"Present");
-
+    Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
     bool NeedsScaling = g_NativeWidth != g_DisplayWidth || g_NativeHeight != g_DisplayHeight;
 
     Context.SetRootSignature(s_PresentRS);
