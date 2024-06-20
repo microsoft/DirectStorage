@@ -59,6 +59,7 @@ struct Metadata
 {
     uint32_t UncompressedSize;
     uint32_t CompressedSize;
+    uint32_t LargestCompressedChunkSize;
     std::vector<ChunkMetadata> Chunks;
 };
 
@@ -73,6 +74,7 @@ Metadata GenerateUncompressedMetadata(wchar_t const* filename, uint32_t chunkSiz
     Metadata metadata;
     metadata.UncompressedSize = size;
     metadata.CompressedSize = size;
+    metadata.LargestCompressedChunkSize = chunkSizeBytes;
 
     uint32_t offset = 0;
 
@@ -224,6 +226,7 @@ Metadata Compress(
 
     Metadata metadata;
     metadata.UncompressedSize = size;
+    metadata.LargestCompressedChunkSize = 0;
 
     for (uint32_t i = 0; i < numChunks; ++i)
     {
@@ -241,6 +244,9 @@ Metadata Compress(
 
         totalCompressedSize += chunkMetadata.CompressedSize;
         offset += chunkMetadata.CompressedSize;
+
+        metadata.LargestCompressedChunkSize =
+            std::max(metadata.LargestCompressedChunkSize, chunkMetadata.CompressedSize);
     }
 
     outHandle.reset();
@@ -288,7 +294,14 @@ TestResult RunTest(
 
     // The staging buffer size must be set before any queues are created.
     std::cout << "  " << stagingSizeMiB << " MiB staging buffer: ";
-    check_hresult(factory->SetStagingBufferSize(stagingSizeMiB * 1024 * 1024));
+    uint32_t stagingBufferSizeBytes = stagingSizeMiB * 1024 * 1024;
+    check_hresult(factory->SetStagingBufferSize(stagingBufferSizeBytes));
+
+    if (metadata.LargestCompressedChunkSize > stagingBufferSizeBytes)
+    {
+        std::cout << " SKIPPED! " << std::endl;
+        return {0, 0};
+    }
 
     com_ptr<ID3D12Device> device;
     check_hresult(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&device)));
