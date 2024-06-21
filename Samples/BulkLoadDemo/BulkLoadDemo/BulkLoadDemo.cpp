@@ -262,7 +262,7 @@ void BulkLoadDemo::Update(float deltaT)
         break;
 
     case State::ShowingASet:
-        if (m_marcFiles->GetTimeSinceLoad() > 10s)
+        if ((m_marcFiles->GetTimeSinceLoad() - m_marcFiles->GetLoadTime()) > 10s)
         {
             m_state = State::Unloading;
         }
