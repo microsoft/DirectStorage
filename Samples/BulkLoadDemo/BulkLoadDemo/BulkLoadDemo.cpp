@@ -26,6 +26,350 @@
 #include <optional>
 #include <random>
 
+#include <comdef.h>
+#include <Wbemidl.h>
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <pdh.h>
+#include <pdhmsg.h>
+#pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#ifdef _WIN32
+#define PDH_NO_CALLBACK __stdcall
+#else
+#define PDH_NO_CALLBACK
+#endif
+
+std::string getStorageDetails()
+{
+    static std::string storageUsedSpace;
+    static bool isCached = false;
+
+    if (isCached)
+    {
+        return storageUsedSpace;
+    }
+
+    ULARGE_INTEGER freeBytesAvailable, totalBytes, totalFreeBytes;
+    if (GetDiskFreeSpaceEx(nullptr, &freeBytesAvailable, &totalBytes, &totalFreeBytes))
+    {
+        double usedSpaceGB =
+            static_cast<double>(totalBytes.QuadPart - freeBytesAvailable.QuadPart) / (1024 * 1024 * 1024);
+        double totalSpaceGB = static_cast<double>(totalBytes.QuadPart) / (1024 * 1024 * 1024);
+        double percentage = usedSpaceGB / totalSpaceGB * 100;
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << usedSpaceGB << "/" << totalSpaceGB << " GB (" << percentage
+            << "%)";
+        storageUsedSpace = oss.str();
+    }
+    else
+    {
+        storageUsedSpace = "Error retrieving storage information.";
+    }
+
+    isCached = true;
+    return storageUsedSpace;
+}
+
+std::string getRamDetails()
+{
+    static std::string ramDetails;
+    static bool isCached = false;
+
+    if (isCached)
+    {
+        return ramDetails;
+    }
+
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+    GlobalMemoryStatusEx(&statex);
+    double totalMemoryInGigabytes = statex.ullTotalPhys/(1024.00 * 1024.00 * 1024.00);
+    double usedMemoryInGigabytes = (statex.ullTotalPhys - statex.ullAvailPhys)/(1024.00 * 1024.00 * 1024.00);
+
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << usedMemoryInGigabytes << "/" << std::fixed << std::setprecision(2)
+        << totalMemoryInGigabytes << " GB";
+
+    HRESULT hres1;
+
+    hres1 = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hres1))
+    {
+        return "Failed to initialize COM library.";
+    }
+
+    hres1 = CoInitializeSecurity(
+        NULL,
+        -1,
+        NULL,
+        NULL,
+        RPC_C_AUTHN_LEVEL_DEFAULT,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        EOAC_NONE,
+        NULL);
+
+    IWbemLocator* pLoc = NULL;
+
+    hres1 = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+
+    if (FAILED(hres1))
+    {
+        CoUninitialize();
+        return "Failed to create IWbemLocator object.";
+    }
+
+    IWbemServices* pSvc = NULL;
+
+    hres1 = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+
+    if (FAILED(hres1))
+    {
+        pLoc->Release();
+        CoUninitialize();
+        return "Could not connect.";
+    }
+
+    hres1 = CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        RPC_C_AUTHN_LEVEL_CALL,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        EOAC_NONE);
+
+    if (FAILED(hres1))
+    {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return "Could not set proxy blanket.";
+    }
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hres1 = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t("SELECT * FROM Win32_PhysicalMemory"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator);
+
+    if (FAILED(hres1))
+    {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return "Query for operating system name failed.";
+    }
+
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+    std::string ramSpeed;
+
+    while (pEnumerator)
+    {
+        HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+
+        if (0 == uReturn)
+        {
+            break;
+        }
+
+        VARIANT vtProp;
+
+        hr = pclsObj->Get(L"Speed", 0, &vtProp, 0, 0);
+        ramSpeed = std::to_string(vtProp.uintVal) + " MHz";
+
+        VariantClear(&vtProp);
+        pclsObj->Release();
+    }
+
+    pSvc->Release();
+    pLoc->Release();
+    pEnumerator->Release();
+    CoUninitialize();
+
+    ramDetails = out.str() + " | " + ramSpeed;
+    isCached = true;
+    return ramDetails;
+}
+
+std::string getCPUDetails()
+{
+    int CPUInfo[4] = {-1};
+    char CPUBrandString[0x40];
+    __cpuid(CPUInfo, 0x80000000);
+    unsigned int nExIds = CPUInfo[0];
+
+    memset(CPUBrandString, 0, sizeof(CPUBrandString));
+
+    for (unsigned int i = 0x80000000; i <= nExIds; ++i)
+    {
+        __cpuid(CPUInfo, i);
+        if (i == 0x80000002)
+            memcpy(CPUBrandString, CPUInfo, sizeof(CPUInfo));
+        else if (i == 0x80000003)
+            memcpy(CPUBrandString + 16, CPUInfo, sizeof(CPUInfo));
+        else if (i == 0x80000004)
+            memcpy(CPUBrandString + 32, CPUInfo, sizeof(CPUInfo));
+    }
+
+    bool hyperthreading = false;
+    __cpuid(CPUInfo, 1);
+    if (CPUInfo[3] & (1 << 28))
+    {
+        hyperthreading = true;
+    }
+
+    unsigned int numThreads = std::thread::hardware_concurrency();
+    unsigned int numCores = hyperthreading ? numThreads / 2 : numThreads;
+    std::string cpuInfo = std::string(CPUBrandString) + " | " + std::to_string(numCores) + " Cores (" + std::to_string(numThreads) + " Threads)";
+    return cpuInfo;
+}
+
+
+float GetTotalGPUDedicatedMemoryUsage()
+{
+    static float cachedMemoryUsage = -1.0f;
+
+    if (cachedMemoryUsage >= 0)
+    {
+        return cachedMemoryUsage;
+    }
+
+    PDH_STATUS pdhStatus;
+    DWORD dwBufferSize = 0;
+    DWORD dwBufferCount = 0;
+    PPERF_DATA_BLOCK pPerfData = NULL;
+
+    LPSTR szCounterList = NULL;
+    LPSTR szInstanceList = NULL;
+    DWORD dwCounterListLength = 0;
+    DWORD dwInstanceListLength = 0;
+    pdhStatus = PdhEnumObjectItemsA(
+        NULL,
+        NULL,
+        "GPU Adapter Memory",
+        szCounterList,
+        &dwCounterListLength,
+        szInstanceList,
+        &dwInstanceListLength,
+        PERF_DETAIL_WIZARD,
+        0);
+    if (pdhStatus != PDH_MORE_DATA)
+    {
+        std::cout << "PdhEnumObjectItemsA failed with " << pdhStatus << std::endl;
+        return 0.0f;
+    }
+
+    szCounterList = new char[dwCounterListLength];
+    szInstanceList = new char[dwInstanceListLength];
+    pdhStatus = PdhEnumObjectItemsA(
+        NULL,
+        NULL,
+        "GPU Adapter Memory",
+        szCounterList,
+        &dwCounterListLength,
+        szInstanceList,
+        &dwInstanceListLength,
+        PERF_DETAIL_WIZARD,
+        0);
+    if (pdhStatus != ERROR_SUCCESS)
+    {
+        std::cout << "PdhEnumObjectItemsA failed with " << pdhStatus << std::endl;
+        delete[] szCounterList;
+        delete[] szInstanceList;
+        return 0.0f;
+    }
+
+    float totalDedicatedMemoryUsage = 0;
+    LPSTR szThisInstance = szInstanceList;
+    while (*szThisInstance != '\0')
+    {
+        PDH_HQUERY hQuery;
+        PDH_HCOUNTER hCounter;
+        DWORD dwType;
+        PDH_FMT_COUNTERVALUE pdhValue;
+
+        PdhOpenQueryA(NULL, NULL, &hQuery);
+
+        std::string dedicatedPath = std::string("\\GPU Adapter Memory(") + szThisInstance + ")\\Dedicated Usage";
+
+        PDH_STATUS status = PdhValidatePathA(dedicatedPath.c_str());
+        if (status == ERROR_SUCCESS)
+        {
+            PdhAddCounterA(hQuery, dedicatedPath.c_str(), NULL, &hCounter);
+            PdhCollectQueryData(hQuery);
+            Sleep(100);
+            PdhGetFormattedCounterValue(hCounter, PDH_FMT_DOUBLE, &dwType, &pdhValue);
+            totalDedicatedMemoryUsage += static_cast<float>(pdhValue.doubleValue) / (1024 * 1024 * 1024);
+            PdhRemoveCounter(hCounter);
+        }
+        else
+        {
+            std::cout << "Counter path " << dedicatedPath << " does not exist." << std::endl;
+        }
+
+        PdhCloseQuery(hQuery);
+        szThisInstance += strlen(szThisInstance) + 1;
+    }
+
+    delete[] szCounterList;
+    delete[] szInstanceList;
+
+    cachedMemoryUsage = totalDedicatedMemoryUsage;
+    return totalDedicatedMemoryUsage;
+}
+
+std::string getGPUDetails()
+{
+    IDXGIFactory1* pFactory;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)(&pFactory));
+    if (FAILED(hr))
+    {
+        return "Failed to create DXGI factory";
+    }
+
+    IDXGIAdapter1* pAdapter1;
+    IDXGIAdapter3* pAdapter3;
+    std::wstring gpuNameW;
+    DXGI_ADAPTER_DESC1 desc;
+    for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter1) != DXGI_ERROR_NOT_FOUND; ++i)
+    {
+        pAdapter1->GetDesc1(&desc);
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+        {
+            pAdapter1->Release();
+            continue;
+        }
+        gpuNameW = desc.Description;
+
+        hr = pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3), (void**)(&pAdapter3));
+        if (SUCCEEDED(hr))
+        {
+            break;
+        }
+    }
+
+    pFactory->Release();
+    std::string gpuName(gpuNameW.begin(), gpuNameW.end());
+    //This needs to be 1024*1024*1000 and it's 100% accurate. Not 1024*1024*1024.
+    double vramGB = static_cast<double>(desc.DedicatedVideoMemory) / (1024 * 1024 * 1000);
+    double vramUsedGB = GetTotalGPUDedicatedMemoryUsage();
+    double vramUsagePercentage = vramUsedGB / vramGB * 100;
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    ss << gpuName << " | " << vramUsedGB << "/" << vramGB << " GB (" << vramUsagePercentage << "%)";
+
+    return ss.str();
+}
+
 using namespace Math;
 
 class BulkLoadDemo : public GameCore::IGameApp
@@ -568,7 +912,15 @@ void BulkLoadDemo::RenderUI(GraphicsContext& gfxContext)
             m_maxCpuUsage);
         text.SetTextSize(24.0f);
         text.NewLine();
+        std::string cpuDetails = getCPUDetails();
+        std::string ramDetails = getRamDetails();
+        std::string gpuDetails = getGPUDetails();
+        std::string storageDeviceDetails = getStorageDetails();
 
+        text.DrawFormattedString("         CPU: %s\n", cpuDetails.c_str());
+        text.DrawFormattedString("         RAM: %s\n", ramDetails.c_str());
+        text.DrawFormattedString("         GPU: %s\n", gpuDetails.c_str());
+        text.DrawFormattedString("     Storage: %s\n", storageDeviceDetails.c_str());
         text.DrawFormattedString("   Bandwidth: %7.2f GB/s\n", (total / time.count()) / 1000.0f / 1000.0f / 1000.0f);
         text.DrawFormattedString("CPU Mem Data: %7.2f MiB\n", s.CpuByteCount / 1024.0f / 1024.0f);
         text.DrawFormattedString("Texture Data: %7.2f MiB\n", s.TexturesByteCount / 1024.0f / 1024.0f);
@@ -590,6 +942,7 @@ void BulkLoadDemo::RenderUI(GraphicsContext& gfxContext)
 
         text.DrawFormattedString("              %7u models\n", s.NumLoadedModels);
         text.DrawFormattedString("              %7d textures\n", s.NumTextureHandles);
+
     }
 
     text.End();
