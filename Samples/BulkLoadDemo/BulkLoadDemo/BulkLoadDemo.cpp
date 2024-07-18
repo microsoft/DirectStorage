@@ -232,7 +232,6 @@ std::string getCPUDetails()
     return cpuInfo;
 }
 
-
 float GetTotalGPUDedicatedMemoryUsage()
 {
     static float cachedMemoryUsage = -1.0f;
