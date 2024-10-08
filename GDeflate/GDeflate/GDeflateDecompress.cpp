@@ -100,7 +100,7 @@ namespace GDeflate
                 static_cast<size_t>(kDefaultTileSize),
                 nullptr);
 
-            if ( decompressResult != LIBDEFLATE_SUCCESS && !context.failed)
+            if ( decompressResult != LIBDEFLATE_SUCCESS)
             {
                 context.failed = true;
                 break;

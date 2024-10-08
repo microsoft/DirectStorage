@@ -154,7 +154,7 @@ namespace GDeflate
                     &compressedPage,
                     1);
 
-                if (result == 0 && !context.failed)
+                if (result == 0)
                 {
                     context.failed = true;
                     break;
