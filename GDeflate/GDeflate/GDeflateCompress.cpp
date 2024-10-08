@@ -94,6 +94,8 @@ namespace GDeflate
 
         std::atomic_uint32_t globalIndex;
         uint32_t numItems;
+
+        std::atomic_bool failed;
     };
 
     static bool DoCompress(
@@ -116,6 +118,7 @@ namespace GDeflate
         context.inputSize = inSize;
         context.numItems = static_cast<uint32_t>((inSize + kDefaultTileSize - 1) / kDefaultTileSize);
         context.tiles.resize(context.numItems);
+        context.failed = false;
 
         auto TileCompressionJob = [&context, level]()
         {
@@ -144,12 +147,18 @@ namespace GDeflate
 
                 libdeflate_gdeflate_out_page compressedPage{scratch, scratchSize};
 
-                libdeflate_gdeflate_compress(
+                size_t result = libdeflate_gdeflate_compress(
                     compressor.get(),
                     context.inputPtr + tilePos,
                     uncompressedSize,
                     &compressedPage,
                     1);
+
+                if (result == 0 && !context.failed)
+                {
+                    context.failed = true;
+                    break;
+                }
 
                 tile.data.resize(compressedPage.nbytes);
                 memcpy(tile.data.data(), compressedPage.data, compressedPage.nbytes);
@@ -182,6 +191,10 @@ namespace GDeflate
             if (worker.joinable())
                 worker.join();
         }
+
+        // Compression failed
+        if (context.failed)
+            return false;
 
         // Compression is done. Prepare the output stream.
 
