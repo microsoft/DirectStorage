@@ -75,6 +75,11 @@ This destination is intended for populating mip tails - or entire textures - in 
 
 As for texture regions, the data is expected to be laid out as described by GetCopyableFootprints(). DirectStorage will call CopyTextureRegion() for each subresource.
 
+### DSTORAGE_REQUEST_DESTINATION_MULTIPLE_SUBRESOURCES_RANGE
+This destination is intended for populating a specified number of contiguous subresources in a single request. This request takes a resource, the first subresource to populate in the resource, and the number of subresources to copy. The index of the first subresource plus the number of subresources to copy shouldn't exceed the total number of subresources.
+
+As for texture regions, the data is expected to be laid out as described by GetCopyableFootprints(). DirectStorage will call CopyTextureRegion() for each subresource.
+
 ### DSTORAGE_REQUEST_DESTINATION_TILES
 This destination type is for populating a region of tiles in a tiled resource.  This takes a resource and a region (in the form of a start coordinate and size). The data is expected to be arranged as suitable for passing to CopyTiles().
 
