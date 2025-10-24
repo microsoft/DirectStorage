@@ -30,7 +30,7 @@ float4x3 LoadSamples(int2 ST, uint2 Stride)
 }
 
 [RootSignature(Present_RootSig)]
-float4 main(float4 Pos : SV_Position, float2 UV : TexCoord0) : SV_Target0
+float3 main(float4 Pos : SV_Position, float2 UV : TexCoord0) : SV_Target0
 {
     // We subtract 0.5 because that represents the center of the pixel.  We need to know where
     // we lie between two pixel centers, and we will use frac() for that.  We subtract another
@@ -53,5 +53,5 @@ float4 main(float4 Pos : SV_Position, float2 UV : TexCoord0) : SV_Target0
     Result = ApplyDisplayProfile(Result, DISPLAY_PLANE_FORMAT);
 #endif
 
-    return float4(Result, 1);
+    return Result;
 }

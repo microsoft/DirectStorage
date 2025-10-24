@@ -26,9 +26,9 @@ SamplerState BilinearClamp : register(s0);
 
 cbuffer CB0 : register(b0)
 {
-    uint SrcMipLevel; // Texture level of source mip
-    uint NumMipLevels; // Number of OutMips to write: [1, 4]
-    float2 TexelSize; // 1.0 / OutMip1.Dimensions
+    uint SrcMipLevel;	// Texture level of source mip
+    uint NumMipLevels;	// Number of OutMips to write: [1, 4]
+    float2 TexelSize;	// 1.0 / OutMip1.Dimensions
 }
 
 // The reason for separating channels is to reduce bank conflicts in the
@@ -39,7 +39,7 @@ groupshared float gs_G[64];
 groupshared float gs_B[64];
 groupshared float gs_A[64];
 
-void StoreColor(uint Index, float4 Color)
+void StoreColor( uint Index, float4 Color )
 {
     gs_R[Index] = Color.r;
     gs_G[Index] = Color.g;
@@ -47,9 +47,9 @@ void StoreColor(uint Index, float4 Color)
     gs_A[Index] = Color.a;
 }
 
-float4 LoadColor(uint Index)
+float4 LoadColor( uint Index )
 {
-    return float4(gs_R[Index], gs_G[Index], gs_B[Index], gs_A[Index]);
+    return float4( gs_R[Index], gs_G[Index], gs_B[Index], gs_A[Index]);
 }
 
 float3 ApplySRGBCurve(float3 x)
@@ -71,8 +71,8 @@ float4 PackColor(float4 Linear)
 }
 
 [RootSignature(Common_RootSig)]
-[numthreads(8, 8, 1)]
-void main(uint GI : SV_GroupIndex, uint3 DTid : SV_DispatchThreadID)
+[numthreads( 8, 8, 1 )]
+void main( uint GI : SV_GroupIndex, uint3 DTid : SV_DispatchThreadID )
 {
     // One bilinear sample is insufficient when scaling down by more than 2x.
     // You will slightly undersample in the case where the source dimension

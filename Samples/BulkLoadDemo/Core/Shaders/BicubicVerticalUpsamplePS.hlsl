@@ -37,7 +37,7 @@ float3 GetColor(uint s, uint t)
 }
 
 [RootSignature(Present_RootSig)]
-float4 main(float4 position : SV_Position, float2 uv : TexCoord0) : SV_Target0
+float3 main(float4 position : SV_Position, float2 uv : TexCoord0) : SV_Target0
 {
     float2 t = uv * TextureSize + 0.5;
     float2 f = frac(t);
@@ -58,8 +58,8 @@ float4 main(float4 position : SV_Position, float2 uv : TexCoord0) : SV_Target0
         W.w * GetColor(st.x, t3);
 
 #ifdef GAMMA_SPACE
-        return float4(Color,1);
+        return Color;
 #else
-        return float4(ApplyDisplayProfile(Color, DISPLAY_PLANE_FORMAT), 1);
+        return ApplyDisplayProfile(Color, DISPLAY_PLANE_FORMAT);
 #endif
 }

@@ -34,25 +34,25 @@
 // are--the sRGB curve needs to be removed before involving the colors in linear mathematics such
 // as physically based lighting.
 
-float3 ApplySRGBCurve(float3 x)
+float3 ApplySRGBCurve( float3 x )
 {
     // Approximately pow(x, 1.0 / 2.2)
     return select(x < 0.0031308, 12.92 * x, 1.055 * pow(x, 1.0 / 2.4) - 0.055);
 }
 
-float3 RemoveSRGBCurve(float3 x)
+float3 RemoveSRGBCurve( float3 x )
 {
     // Approximately pow(x, 2.2)
-    return select(x < 0.04045, x / 12.92, pow((x + 0.055) / 1.055, 2.4));
+    return select(x < 0.04045, x / 12.92, pow( (x + 0.055) / 1.055, 2.4 ));
 }
 
 // These functions avoid pow() to efficiently approximate sRGB with an error < 0.4%.
-float3 ApplySRGBCurve_Fast(float3 x)
+float3 ApplySRGBCurve_Fast( float3 x )
 {
     return select(x < 0.0031308, 12.92 * x, 1.13005 * sqrt(x - 0.00228) - 0.13448 * x + 0.005719);
 }
 
-float3 RemoveSRGBCurve_Fast(float3 x)
+float3 RemoveSRGBCurve_Fast( float3 x )
 {
     return select(x < 0.04045, x / 12.92, -7.43605 * x - 31.24297 * sqrt(-0.53792 * x + 1.279924) + 35.34864);
 }
@@ -60,12 +60,12 @@ float3 RemoveSRGBCurve_Fast(float3 x)
 // The OETF recommended for content shown on HDTVs.  This "gamma ramp" may increase contrast as
 // appropriate for viewing in a dark environment.  Always use this curve with Limited RGB as it is
 // used in conjunction with HDTVs.
-float3 ApplyREC709Curve(float3 x)
+float3 ApplyREC709Curve( float3 x )
 {
     return select(x < 0.0181, 4.5 * x, 1.0993 * pow(x, 0.45) - 0.0993);
 }
 
-float3 RemoveREC709Curve(float3 x)
+float3 RemoveREC709Curve( float3 x )
 {
     return select(x < 0.08145, x / 4.5, pow((x + 0.0993) / 1.0993, 1.0 / 0.45));
 }
@@ -117,7 +117,7 @@ float3 RemoveREC2084Curve(float3 N)
 // Note:  Rec.709 and sRGB share the same color primaries and white point.  Their only difference
 // is the transfer curve used.
 
-float3 REC709toREC2020(float3 RGB709)
+float3 REC709toREC2020( float3 RGB709 )
 {
     static const float3x3 ConvMat =
     {
@@ -139,7 +139,7 @@ float3 REC2020toREC709(float3 RGB2020)
     return mul(ConvMat, RGB2020);
 }
 
-float3 REC709toDCIP3(float3 RGB709)
+float3 REC709toDCIP3( float3 RGB709 )
 {
     static const float3x3 ConvMat =
     {
@@ -150,7 +150,7 @@ float3 REC709toDCIP3(float3 RGB709)
     return mul(ConvMat, RGB709);
 }
 
-float3 DCIP3toREC709(float3 RGBP3)
+float3 DCIP3toREC709( float3 RGBP3 )
 {
     static const float3x3 ConvMat =
     {
