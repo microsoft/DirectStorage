@@ -3819,6 +3819,8 @@ static uint32_t zstdgpu_MatchLengthCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_
     ZSTDGPU_UNUSED(seqIdx);
     ZSTDGPU_UNUSED(maxCopySize); //< NOTE(pamartis): Unused only on CPP side.
 
+    DeviceMemoryBarrierWithGroupSync();
+
     // NOTE(pamartis): when offset is large enough to fit the entire length, we do as wide copy as possible
     if (seqOffs >= seqMLen)
     {
@@ -3852,7 +3854,6 @@ static uint32_t zstdgpu_MatchLengthCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_
         }
         while (len < seqMLen);
     }
-    DeviceMemoryBarrierWithGroupSync();
 
     return outByteIdx;
 }
@@ -3949,7 +3950,6 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                     {
                         srt.inoutUnCompressedFramesData[blockByteCur + byteIdx] = srt.inDecompressedLiterals[litCur + byteIdx];
                     }
-                    DeviceMemoryBarrierWithGroupSync();
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
@@ -3983,7 +3983,6 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                         const uint32_t byteOfs = litCur + byteIdx;
                         srt.inoutUnCompressedFramesData[blockByteCur + byteIdx] = (srt.inCompressedData[byteOfs >> 2] >> ((byteOfs & 3u) << 3u)) & 0xffu;
                     }
-                    DeviceMemoryBarrierWithGroupSync();
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
@@ -4019,7 +4018,6 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                     {
                         zstdgpu_TypedStoreU8(srt.inoutUnCompressedFramesData, blockByteCur + byteIdx, symbol);
                     }
-                    DeviceMemoryBarrierWithGroupSync();
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
@@ -4035,8 +4033,8 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
             }
         }
 #endif
-
-    }
+        // We don't have to worry about doing DeviceMemoryBarrierWithGroupSync() across blocks.
+    } // end loop over compressed blocks
 }
 
 #ifdef _MSC_VER
