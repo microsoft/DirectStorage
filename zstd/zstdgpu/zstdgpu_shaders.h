@@ -8,7 +8,7 @@
  *
  * Advanced Technology Group (ATG)
  * Author(s):   Pavel Martishevsky (pamartis@microsoft.com)
- * 
+ *
  * Contains definitions of various routines shared between CPU and GPU.
  */
 
@@ -3813,13 +3813,20 @@ static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstd
     srt.inoutDecompressedSequenceOffs[seqIdx] = offset;
 }
 
-static uint32_t zstdgpu_MatchLengthCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) outData, uint32_t outByteIdx, uint32_t outByteEnd, uint32_t seqOffs, uint32_t seqMLen, uint32_t i, uint32_t seqIdx, uint32_t maxCopySize)
+static uint32_t zstdgpu_MatchLengthCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) outData, uint32_t outByteIdx, uint32_t outByteEnd, uint32_t seqOffs, uint32_t seqMLen, uint32_t i, uint32_t seqIdx, uint32_t maxCopySize, ZSTDGPU_PARAM_INOUT(uint32_t) readableOutputGlobalEnd)
 {
     ZSTDGPU_UNUSED(i);
     ZSTDGPU_UNUSED(seqIdx);
     ZSTDGPU_UNUSED(maxCopySize); //< NOTE(pamartis): Unused only on CPP side.
 
-    DeviceMemoryBarrierWithGroupSync();
+    // NOTE(jweinste): Avoid waits on UAV stores when llen and mlen are small and match offset is large.
+    // This check may be inaccurate, but it should be conservative.
+    const uint32_t toReadNowGlobalEnd = (outByteIdx - seqOffs) + seqMLen;
+    if (readableOutputGlobalEnd < toReadNowGlobalEnd) // these values should be workgroup-uniform
+    {
+        DeviceMemoryBarrierWithGroupSync();
+        readableOutputGlobalEnd = outByteIdx;
+    }
 
     // NOTE(pamartis): when offset is large enough to fit the entire length, we do as wide copy as possible
     if (seqOffs >= seqMLen)
@@ -3853,6 +3860,7 @@ static uint32_t zstdgpu_MatchLengthCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_
             len += copyLen;
         }
         while (len < seqMLen);
+        readableOutputGlobalEnd = outByteIdx; // see barrier in do...while
     }
 
     return outByteIdx;
@@ -3897,6 +3905,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
         const uint32_t blockByteBeg = dstFrameOffsAndSize.offs + (blockOfs - firstFrameBlockOfs);
         const uint32_t blockByteEnd = dstFrameOffsAndSize.offs + (srt.inBlockSizePrefix[blockIdx] - firstFrameBlockOfs);
 
+        uint32_t readableOutputGlobalEnd = blockByteBeg;
 #if 0
         for (uint32_t blockByteIdx = blockByteBeg + i; blockByteIdx < blockByteEnd; blockByteIdx += maxCopySize)
         {
@@ -3953,7 +3962,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
-                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize);
+                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize, readableOutputGlobalEnd);
                 }
 
             // NOTE(pamartis): copy remaining literals. If above condtion `seqStreamIdx == ~0u` is true,
@@ -3986,7 +3995,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
-                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize);
+                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize, readableOutputGlobalEnd);
                 }
 
             // NOTE(pamartis): copy remaining literals. If above condtion `seqStreamIdx == ~0u` is true,
@@ -4021,7 +4030,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                     blockByteCur += copyLen;
                     litCur += copyLen;
 
-                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize);
+                    blockByteCur = zstdgpu_MatchLengthCopy(srt.inoutUnCompressedFramesData, blockByteCur, blockByteEnd, offs, mlen, i, seqIdx, maxCopySize, readableOutputGlobalEnd);
                 }
 
             // NOTE(pamartis): copy remaining literals. If above condtion `seqStreamIdx == ~0u` is true,
