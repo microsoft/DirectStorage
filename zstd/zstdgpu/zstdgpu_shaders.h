@@ -3890,6 +3890,8 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
 
     const zstdgpu_OffsetAndSize dstFrameOffsAndSize = srt.inUnCompressedFramesRefs[frameIdx];
 
+    uint32_t readableOutputGlobalEnd = 0;
+
     for (uint32_t cmpBlockIdx = cmpBlockBeg; cmpBlockIdx < cmpBlockEnd; ++cmpBlockIdx)
     {
         const uint32_t blockIdx = srt.inGlobalBlockIndexPerCmpBlock[cmpBlockIdx];
@@ -3905,7 +3907,6 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
         const uint32_t blockByteBeg = dstFrameOffsAndSize.offs + (blockOfs - firstFrameBlockOfs);
         const uint32_t blockByteEnd = dstFrameOffsAndSize.offs + (srt.inBlockSizePrefix[blockIdx] - firstFrameBlockOfs);
 
-        uint32_t readableOutputGlobalEnd = blockByteBeg;
 #if 0
         for (uint32_t blockByteIdx = blockByteBeg + i; blockByteIdx < blockByteEnd; blockByteIdx += maxCopySize)
         {
@@ -4042,8 +4043,8 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
             }
         }
 #endif
-        // We don't have to worry about doing DeviceMemoryBarrierWithGroupSync() across blocks.
-    } // end loop over compressed blocks
+
+    }
 }
 
 #ifdef _MSC_VER
