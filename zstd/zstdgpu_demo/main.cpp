@@ -738,7 +738,10 @@ static void zstdgpu_DefaultUploadCallback(void *zstdCompressedFramesBytes, uint3
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
-ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu* outGpuResources, zstdgpu_PerRequestContext req);
+ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
+
+ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
+ZSTDGPU_API void zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
 
 // Entry point
 #ifndef _GAMING_XBOX
@@ -758,12 +761,14 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool chkCpu = false;
     bool simGpu = false;
     bool d3dDbg = false;
+    bool d3dGfx = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
     wchar_t *zstFilePathStorage = NULL;
     uint32_t gpuVenId = 0x1414; // means -- find any vendor id, but not 0x1414
     uint32_t gpuDevId = ~0u;    // means -- find any device id
     uint32_t repCount = 10;
+    uint32_t prfLevel = 0;
 
 #ifndef _GAMING_XBOX
     {
@@ -773,6 +778,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             bool nextGpuVenId = false;
             bool nextGpuDevId = false;
             bool nextRepCount = false;
+            bool nextPrfLevel = false;
             for (argi = 1; argi < argc; ++argi)
             {
                 if (nextZst)
@@ -796,15 +802,21 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount)
+                else if (nextRepCount || nextPrfLevel)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
                     uint32_t value = (uint32_t)wcstol(argv[argi], &end, 10);
                     if (*end == L'\0' && ERANGE != errno)
-                        repCount = value;
+                    {
+                        if (nextRepCount)
+                            repCount = value;
+                        else if (nextPrfLevel)
+                            prfLevel = value;
+                    }
 
                     nextRepCount = false;
+                    nextPrfLevel = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -834,6 +846,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     d3dDbg = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--d3d-gfx"))
+                {
+                    d3dGfx = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--run-cnt"))
                 {
                     nextRepCount = true;
@@ -841,6 +857,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 else if (0 == wcscmp(argv[argi], L"--ext-mem"))
                 {
                     extMem = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--prf-lvl"))
+                {
+                    nextPrfLevel = true;
                 }
             }
             if (1 == argc)
@@ -853,8 +873,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--gpu-ven-id <id (hex)>   [Optional] VendorId (base16) to use when choosing GPU to run on.\n");
                 debugPrint(L"\t--gpu-dev-id <id (hex)>   [Optional] DeviceId (base16) to use when choosing GPU to run on.\n");
                 debugPrint(L"\t--d3d-dbg                 [Optional] Enables D3D12 debug layer.\n");
+                debugPrint(L"\t--d3d-gfx                 [Optional] Enables D3D12 Graphics queue (DIRECT), otherwise COMPUTE (by default).\n");
                 debugPrint(L"\t--run-cnt <count>         [Optional] The number of times to repeat the experiment.\n");
                 debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them.\n");
+                debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
             }
             if (NULL == zstFilePathStorage)
             {
@@ -934,7 +956,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 #ifdef _GAMING_XBOX
     d3d12aid_CmdQueue_Create(&cmdQueue, device, kBackBufferCount, 1u, D3D12_COMMAND_LIST_TYPE_DIRECT);
 #else
-    d3d12aid_CmdQueue_Create(&cmdQueue, device, kBackBufferCount, 1u, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+    d3d12aid_CmdQueue_Create(&cmdQueue, device, kBackBufferCount, 1u, d3dGfx ? D3D12_COMMAND_LIST_TYPE_DIRECT : D3D12_COMMAND_LIST_TYPE_COMPUTE);
 #endif
 
     #define ZSTDGPU_TS_LIST()   \
@@ -1223,7 +1245,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 
                     d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesMemory, 0 /** works only when submissions aren't overlapped*/);
                 }
-
+                zstdgpu_ReadbackTimestamps(perRequestContext, cmdList);
                 if (simGpu || chkGpu)
                 {
                     zstdgpu_ReadbackGpuResults(perRequestContext, cmdList);
@@ -1295,14 +1317,43 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     cmdQueue.queue->GetTimestampFrequency(&freqGpuClocks);
                 }
-                #define ZSTDGPU_TS(name)                                                                                        \
-                    if (name##_Stamp != ~0u)                                                                                    \
-                    {                                                                                                           \
-                        const uint64_t clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, name##_Stamp);   \
-                        const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                                 \
-                        debugPrint(L"%u frame: " #name " took %llu us\n", frameIndex, usec);                                    \
+                const wchar_t *timestampScopeNames[16];
+                uint64_t timestampScopeClocks[16];
+                uint64_t clks = 0;
+                #define ZSTDGPU_TS(name)                                                                        \
+                    if (name##_Stamp != ~0u && prfLevel > 0)                                                    \
+                    {                                                                                           \
+                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, name##_Stamp);  \
+                        const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                 \
+                        debugPrint(L"%u frame: %7llu us - '" #name "' \n", frameIndex, usec);                  \
                     }
-                    ZSTDGPU_TS_LIST()
+
+                #define ZSTDGPU_DETAIL_TS(stage) \
+                    if (prfLevel > 1)            \
+                    {                            \
+                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                              \
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);                      \
+                        for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                                          \
+                        {                                                                                                                                           \
+                            debugPrint(L"%u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
+                        }                                                                                                                                           \
+                    }
+                    ZSTDGPU_TS(Stage0)
+                    ZSTDGPU_DETAIL_TS(0)
+                    ZSTDGPU_TS(Readback0)
+                    ZSTDGPU_TS(Stage1)
+                    ZSTDGPU_DETAIL_TS(1)
+                    ZSTDGPU_TS(Readback1)
+                    ZSTDGPU_TS(Stage2)
+                    ZSTDGPU_DETAIL_TS(2)
+                    if (prfLevel == 0)
+                    {
+                        clks = d3d12aid_Timestamps_GetDelta(&timestamps, kBackBufferIndex, Stage0_Stamp, Stage2_Stamp + 1);
+                        const uint64_t ns = (clks * 1000000000) / freqGpuClocks;
+                        const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
+                        debugPrint(L"%u frame: Decompression throughput %lf (GB/s)\n", frameIndex, decompressionThroughput);
+                    }
+                #undef ZSTDGPU_DETAIL_TS
                 #undef ZSTDGPU_TS
             }
 

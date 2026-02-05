@@ -1029,7 +1029,7 @@ D3D12AID_API uint64_t d3d12aid_CmdQueue_SubmitMultiCmdLists(d3d12aid_CmdQueue *q
         allocReuseFenceValues[allocatorIdx] = submitFenceValue;
 
         /** 2. choose next available allocator index */
-        allocIndices[i] = (allocatorIdx + D3D12AID_CMD_QUEUE_LIST_MAX_COUNT_PER_FRAME) % D3D12AID_CMD_QUEUE_ALLOC_MAX_COUNT;
+        allocIndices[i] = (allocatorIdx + queue->cmdListCount) % queue->cmdAllocCount;
     }
     return submitFenceValue;
 }

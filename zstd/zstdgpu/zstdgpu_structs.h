@@ -1406,19 +1406,19 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
     \
     ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , UnCompressedFramesData        , 0)
 
-#define ZSTDGPU_SRT_LIST()                                                                                            \
-    ZSTDGPU_SRT(InitResources                          , ZSTDGPU_INIT_RESOURCES_SRT())                                \
-    ZSTDGPU_SRT(ParseFrames                            , ZSTDGPU_PARSE_FRAMES_SRT())                                  \
-    ZSTDGPU_SRT(ParseCompressedBlocks                  , ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT())                       \
-    ZSTDGPU_SRT(InitFseTable                           , ZSTDGPU_INIT_FSE_TABLE_SRT())                                \
-    ZSTDGPU_SRT(DecompressHuffmanWeights               , ZSTDGPU_DECOMPRESS_HUFFMAN_WEIGHTS_SRT())                    \
-    ZSTDGPU_SRT(DecodeHuffmanWeights                   , ZSTDGPU_DECODE_HUFFMAN_WEIGHTS_SRT())                        \
-    ZSTDGPU_SRT(InitHuffmanTable_And_DecompressLiterals, ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT())    \
-    ZSTDGPU_SRT(DecompressSequences                    , ZSTDGPU_DECOMPRESS_SEQUENCES_SRT())                          \
-    ZSTDGPU_SRT(FinaliseSequenceOffsets                , ZSTDGPU_FINALISE_SEQUENCE_OFFSETS_SRT())                     \
-    ZSTDGPU_SRT(MemsetMemcpy                           , ZSTDGPU_MEMSET_MEMCPY_SRT())                                 \
-    ZSTDGPU_SRT(ExecuteSequences                       , ZSTDGPU_EXECUTE_SEQUENCES_SRT())                             \
-    ZSTDGPU_SRT(ComputeDestSequenceOffsets             , ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT())
+#define ZSTDGPU_SRT_LIST()                                                                                          \
+    ZSTDGPU_SRT(InitResources                           , ZSTDGPU_INIT_RESOURCES_SRT())                             \
+    ZSTDGPU_SRT(ParseFrames                             , ZSTDGPU_PARSE_FRAMES_SRT())                               \
+    ZSTDGPU_SRT(ParseCompressedBlocks                   , ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT())                    \
+    ZSTDGPU_SRT(InitFseTable                            , ZSTDGPU_INIT_FSE_TABLE_SRT())                             \
+    ZSTDGPU_SRT(DecompressHuffmanWeights                , ZSTDGPU_DECOMPRESS_HUFFMAN_WEIGHTS_SRT())                 \
+    ZSTDGPU_SRT(DecodeHuffmanWeights                    , ZSTDGPU_DECODE_HUFFMAN_WEIGHTS_SRT())                     \
+    ZSTDGPU_SRT(InitHuffmanTableAndDecompressLiterals   , ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()) \
+    ZSTDGPU_SRT(DecompressSequences                     , ZSTDGPU_DECOMPRESS_SEQUENCES_SRT())                       \
+    ZSTDGPU_SRT(FinaliseSequenceOffsets                 , ZSTDGPU_FINALISE_SEQUENCE_OFFSETS_SRT())                  \
+    ZSTDGPU_SRT(MemsetMemcpy                            , ZSTDGPU_MEMSET_MEMCPY_SRT())                              \
+    ZSTDGPU_SRT(ExecuteSequences                        , ZSTDGPU_EXECUTE_SEQUENCES_SRT())                          \
+    ZSTDGPU_SRT(ComputeDestSequenceOffsets              , ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT())
 
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      ZSTDGPU_RO_BUFFER(type)                    in##name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      ZSTDGPU_RW_BUFFER(type)                    inout##name;
