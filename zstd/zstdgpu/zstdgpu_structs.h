@@ -743,21 +743,19 @@ static inline void zstdgpu_Forward_BitBuffer_ByteAlign(ZSTDGPU_PARAM_INOUT(zstdg
     zstdgpu_Forward_BitBuffer_Pop(inoutBuffer, inoutBuffer.bitcnt & 7);
 }
 
-//#define ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF 1
-#define ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET 1
+// #define ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF 1 // reversebits/v_bfrev_b32 idea, doesn't compile because of bitcntLast
+// #define ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET 1 // doesn't seem to matter
 
 typedef struct zstdgpu_Backward_BitBuffer_V0
 {
     ZSTDGPU_RO_BUFFER(uint32_t) buffer;
 
     uint64_t bitbuf;    // VGPRs storing valid bits that are not consumed yet
-    uint32_t nextDword; // VGPR storing the offset in dwords to the start of the next dword fetch
+    uint32_t lastReadDword;
     uint32_t bitcnt;    // VGPR storing the number of valid bits in `bitbuf`
     uint32_t bitcntLast;
-    uint32_t lastDword;   // VGPR as it store any memory block size varying per lane
     uint32_t baseDword;
     bool     hadlastrefill;
-    bool     hadlastrefillHuffman;
 } zstdgpu_Backward_BitBuffer_V0;
 
 typedef struct zstdgpu_Backward_BitBuffer
@@ -803,10 +801,6 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
 
     // Secondly, we search for the highest set bit to see how many bits are valid
     bitcnt = zstdgpu_FindFirstBitHiU32(bitbuf);
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
-    bitbuf <<= 32u - bitcnt;
-    bitbuf = reversebits(bitbuf);
-#else
     //bitmsk = ~0u >> (32u - bitcnt);
     bitmsk = (1u << bitcnt) - 1u;
     bitbuf &= bitmsk;
@@ -817,22 +811,14 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
         bitcnt  -= lobitcnt;
         bitbuf >>= lobitcnt;
     }
-#endif
 
     outBuffer.buffer = buffer;
     outBuffer.bitbuf = (uint64_t)bitbuf;
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET
-    // in "reversed" offset mode we only increment "nextDword"
-    outBuffer.nextDword = 0;
-#else
-    outBuffer.nextDword = lastDword;
-#endif
+    outBuffer.lastReadDword = lastDword;
     outBuffer.bitcnt = bitcnt;
     outBuffer.bitcntLast = bitcntLast;
-    outBuffer.lastDword = lastDword;
     outBuffer.baseDword = baseDword;
     outBuffer.hadlastrefill = baseDword == lastDword;
-    outBuffer.hadlastrefillHuffman = false;
     //outBuffer.bytesz = bytesz;
 }
 
@@ -857,26 +843,14 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Refill(ZSTDGPU_PARAM_INOUT(zstd
     if (inoutBuffer.bitcnt < bitcnt)
     {
         ZSTDGPU_ASSERT(inoutBuffer.hadlastrefill == false);
-
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET
-        inoutBuffer.nextDword += 1;
-        const uint32_t nextDword = inoutBuffer.lastDword - inoutBuffer.nextDword;
-#else
-        ZSTDGPU_ASSERT(inoutBuffer.nextDword > 0);
-        inoutBuffer.nextDword -= 1;
-        const uint32_t nextDword = inoutBuffer.nextDword;
-#endif
-        ZSTDGPU_ASSERT(nextDword >= inoutBuffer.baseDword);
+        ZSTDGPU_ASSERT(inoutBuffer.baseDword < inoutBuffer.lastReadDword);
+        const uint32_t nextDword = --inoutBuffer.lastReadDword;
 
         // how many bits we need to remove
         const uint32_t lobitcnt = nextDword > inoutBuffer.baseDword ? 0u : inoutBuffer.bitcntLast;
         const uint32_t hibitcnt = 32u - lobitcnt;
 
-        #ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
-            inoutBuffer.bitbuf |= (uint64_t)reversebits(inoutBuffer.buffer[nextDword]) << inoutBuffer.bitcnt;
-        #else
-            inoutBuffer.bitbuf = (inoutBuffer.bitbuf << hibitcnt) | (inoutBuffer.buffer[nextDword] >> lobitcnt);
-        #endif
+        inoutBuffer.bitbuf = (inoutBuffer.bitbuf << hibitcnt) | (inoutBuffer.buffer[nextDword] >> lobitcnt);
 
         inoutBuffer.bitcnt += hibitcnt;
         inoutBuffer.hadlastrefill = !(nextDword > inoutBuffer.baseDword);
@@ -886,63 +860,24 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Refill(ZSTDGPU_PARAM_INOUT(zstd
 static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Top(ZSTDGPU_PARAM_IN(zstdgpu_Backward_BitBuffer_V0) inBuffer, uint32_t bitcnt)
 {
     ZSTDGPU_ASSERT(inBuffer.bitcnt >= bitcnt);
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
-    // EXPERIMENT: store "bitbuf" reversed (by employing "v_bfrev_b32" on AMD)
-    // potentially two v_and_b32 on AMD because "bitcnt" is folded into a literal mask
-    return (uint32_t)(inBuffer.bitbuf & ~(~0ull << bitcnt));
-#else
     // potentially v_lshrrev_b64 + v_sub_nc_b32 on AMD
     return (uint32_t)(inBuffer.bitbuf >> (inBuffer.bitcnt - bitcnt));
-#endif
 }
 
 static inline void zstdgpu_Backward_BitBuffer_V0_Pop(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) inoutBuffer, uint32_t bitcnt)
 {
     ZSTDGPU_ASSERT(inoutBuffer.bitcnt >= bitcnt);
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
-    // EXPERIMENT: store "bitbuf" reversed (by employing "v_bfrev_b32" on AMD)
-    // potentially v_lshrrev_b64 + v_sub_nc_b32 on AMD
-    inoutBuffer.bitbuf >>= bitcnt;
-    inoutBuffer.bitcnt  -= bitcnt;
-#else
     // potentially v_sub_nc_b32 + v_lshrrev_b64 + two v_and_b32 on AMD because there's no v_bfm_b64 for mask
     inoutBuffer.bitbuf &= ~(~0ull << (inoutBuffer.bitcnt - bitcnt));
     inoutBuffer.bitcnt  -= bitcnt;
-#endif
 }
 
 ZSTDGPU_BITBUF_DEFINE_STANDARD_METHODS(Backward_BitBuffer_V0)
 
-static inline bool zstdgpu_Backward_BitBuffer_V0_CanRefill_Huffman(ZSTDGPU_PARAM_IN(zstdgpu_Backward_BitBuffer_V0) inBuffer, uint32_t bitcnt)
-{
-    ZSTDGPU_ASSERT(bitcnt <= 32);
-    if (inBuffer.bitcnt >= bitcnt)
-    {
-        return true;
-    }
-    else
-    {
-        return !inBuffer.hadlastrefillHuffman;
-    }
-}
-
-static inline void zstdgpu_Backward_BitBuffer_V0_Refill_Huffman(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) inoutBuffer, uint32_t bitcnt, uint32_t extrabits)
-{
-    if (inoutBuffer.hadlastrefill == false)
-    {
-        zstdgpu_Backward_BitBuffer_V0_Refill(inoutBuffer, bitcnt);
-    }
-
-    if (inoutBuffer.bitcnt < bitcnt)
-    {
-        inoutBuffer.bitcnt += extrabits;    // simply increment counter because upper bits are zeros
-        inoutBuffer.hadlastrefillHuffman = true;
-    }
-}
-
 static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) inoutBuffer, uint32_t bitcnt, uint32_t extrabits)
 {
-    if (inoutBuffer.hadlastrefill == false)
+    // Always true when doing test-in-loop-middle on Regenerated_Size:
+    // if (inoutBuffer.hadlastrefill == false)
     {
         zstdgpu_Backward_BitBuffer_V0_Refill(inoutBuffer, bitcnt);
     }
@@ -951,7 +886,6 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     {
         inoutBuffer.bitcnt += extrabits;    // simply increment counter because upper bits are zeros
         inoutBuffer.bitbuf <<= extrabits;
-        inoutBuffer.hadlastrefillHuffman = true;
     }
 
     uint32_t result = zstdgpu_Backward_BitBuffer_V0_Top(inoutBuffer, bitcnt);

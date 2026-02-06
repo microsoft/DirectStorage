@@ -2757,13 +2757,19 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         const uint32_t literalStreamId = srt.inLitStreamRemap[htLiteralStart + thisGroupLiteralStart + literalIndex];
 
         zstdgpu_LitStreamInfo compressedLiteral = srt.inLitRefs[literalStreamId];
+        // Possibly useful too:
+        // "The process continues up to reading the required number of symbols per stream.
+        // If a bitstream is not entirely and exactly consumed, hence reaching exactly its beginning position with all bits consumed,
+        // the decoding process is considered faulty."
+        if (compressedLiteral.dst.size == 0) // derived from block Regenerated_Size
+            continue;
 
         zstdgpu_Backward_BitBuffer_V0 bitBuffer;
         zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, srt.inCompressedData, compressedLiteral.src);
 
         uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
         uint32_t decodedByteCnt = 0;
-        while (decodedByteCnt < compressedLiteral.dst.size)
+        for (;;)
         {
 #if 1 // ASSUME_11BIT_HUFFMAN_CODES
             const uint32_t symbolAndBitcnt = zstdgpu_LdsLoadU32(GS_HuffmanTable + state);
@@ -2782,18 +2788,14 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
             // and then to memory. At least try small LDS cache of 32-dwords per literal
             zstdgpu_TypedStoreU8(srt.inoutDecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
 
-            if (zstdgpu_Backward_BitBuffer_V0_CanRefill_Huffman(bitBuffer, bitcnt))
-            {
-                const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
-                state = ((state << bitcnt) + rest) & maxBitcntMask;
-            }
-            else
+            if (decodedByteCnt == compressedLiteral.dst.size)
             {
                 break;
             }
+            const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
+            state = ((state << bitcnt) + rest) & maxBitcntMask;
         }
     }
-
 }
 
 #ifdef __hlsl_dx_compiler
