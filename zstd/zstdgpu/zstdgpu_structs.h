@@ -452,6 +452,15 @@ static inline uint32_t zstdgpu_MaxU32(uint32_t a, uint32_t b)
 #endif
 }
 
+static inline uint32_t zstdgpu_MaxI32(int32_t a, int32_t b)
+{
+#ifdef __hlsl_dx_compiler
+    return max(a, b);
+#else
+    return a > b ? a : b;
+#endif
+}
+
 static inline uint32_t zstdgpu_Encode30BitLookbackSelf(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
@@ -891,6 +900,85 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     uint32_t result = zstdgpu_Backward_BitBuffer_V0_Top(inoutBuffer, bitcnt);
     zstdgpu_Backward_BitBuffer_V0_Pop(inoutBuffer, bitcnt);
     return result;
+}
+
+struct HuffmanStream {
+    ZSTDGPU_RO_BUFFER(uint32_t) buffer;
+
+    uint32_t dataSpare;
+    uint32_t numBitsSpare;
+
+    uint32_t data0;
+    uint32_t numBits0;
+
+    // uint32_t baseDwordIdx; SRD from table is bounds-checked, or there should be at least 8 bytes before
+    // the start of compressed literals between the zstd-frame begin and first block.
+    uint32_t lastDwordIdx;
+
+    uint32_t maxBitsPerCode;
+    uint32_t bwMinusMaxBitsPerCode;
+};
+
+static inline void zstdgpu_HuffmanStream_InitWithSegment(
+    ZSTDGPU_PARAM_INOUT(HuffmanStream)      stream,
+    ZSTDGPU_RO_BUFFER(uint32_t)             buffer,
+    ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment,
+    ZSTDGPU_PARAM_IN(uint32_t) maxBitsPerCode)
+{
+    const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // NOTE: - 1, not end
+
+    // const uint32_t baseDwordIdx = segment.offs / 4u;
+    const uint32_t lastDwordIdx = lastByteIdx / 4u;
+
+    uint32_t data = buffer[lastDwordIdx];
+    uint32_t goodBitCount = (lastByteIdx % 4u) * 8 + 8;      // byte index within DWORD of 0 yeilds 8
+    data &= ~0u >> (32 - goodBitCount);                      // keep {1,2,3,4} * 8 low bits
+    goodBitCount = zstdgpu_FindFirstBitHiU32(data);          // NOTE: could become zero, in [0:31]
+
+    data <<= ((32 - goodBitCount) & 31); // lets first try/see how keeping bits at MSB looks
+
+    stream.buffer = buffer;
+
+    stream.dataSpare    = 0;
+    stream.numBitsSpare = 0;
+
+    stream.data0        = data;
+    stream.numBits0     = goodBitCount;
+
+    stream.lastDwordIdx = lastDwordIdx;
+
+    stream.maxBitsPerCode = maxBitsPerCode;
+    stream.bwMinusMaxBitsPerCode = 32 - maxBitsPerCode;
+}
+
+static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
+{
+    if (stream.numBits0 < stream.maxBitsPerCode)
+    {
+        ZSTDGPU_ASSERT(stream.numBitsSpare == 0);
+        stream.dataSpare    = stream.data0;
+        stream.numBitsSpare = stream.numBits0;
+        stream.numBits0     = 32;
+        stream.data0 = stream.buffer[--stream.lastDwordIdx];
+    }
+}
+
+static inline uint32_t zstdgpu_HuffmanStream_Peek(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
+{
+    const uint32_t k = stream.bwMinusMaxBitsPerCode;
+    return (stream.dataSpare >> k) |
+           (stream.data0 >> (k + stream.numBitsSpare));
+}
+
+static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream, ZSTDGPU_PARAM_IN(int) actualBitCount)
+{
+    int ns = stream.numBitsSpare;
+    uint32_t data0Consumed = zstdgpu_MaxI32(0, actualBitCount - ns);
+    stream.numBitsSpare    = zstdgpu_MaxI32(0, ns - actualBitCount);
+    stream.dataSpare <<= actualBitCount;
+
+    stream.numBits0 -= data0Consumed;
+    stream.data0 <<= data0Consumed;
 }
 
 static inline void zstdgpu_Backward_BitBuffer_Init(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer) outBitBuffer, ZSTDGPU_RO_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)

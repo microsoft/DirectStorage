@@ -2764,13 +2764,14 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         if (compressedLiteral.dst.size == 0) // derived from block Regenerated_Size
             continue;
 
-        zstdgpu_Backward_BitBuffer_V0 bitBuffer;
-        zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, srt.inCompressedData, compressedLiteral.src);
-
-        uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
+        HuffmanStream stream;
+        zstdgpu_HuffmanStream_InitWithSegment(stream, srt.inCompressedData, compressedLiteral.src, bitsMax);
         uint32_t decodedByteCnt = 0;
-        for (;;)
+        do
         {
+            zstdgpu_HuffmanStream_Refill(stream);
+            const uint32_t state = zstdgpu_HuffmanStream_Peek(stream);
+
 #if 1 // ASSUME_11BIT_HUFFMAN_CODES
             const uint32_t symbolAndBitcnt = zstdgpu_LdsLoadU32(GS_HuffmanTable + state);
             const uint32_t symbol = symbolAndBitcnt >> 16;
@@ -2784,17 +2785,13 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
             #undef zstdgpu_GetBitcnt
 #endif
 
-            // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
-            // and then to memory. At least try small LDS cache of 32-dwords per literal
+            // TODO(jweinste): Experiment with partial-loop-unrolling with R8G8B8A8_UINT UAV.
             zstdgpu_TypedStoreU8(srt.inoutDecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
 
-            if (decodedByteCnt == compressedLiteral.dst.size)
-            {
-                break;
-            }
-            const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
-            state = ((state << bitcnt) + rest) & maxBitcntMask;
-        }
+            // _Consume is "harmless" here; don't need to mid-break on (decodedByteCnt == compressedLiteral.dst.size).
+            // A classic "do-while" loop _might_ compile better.
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+        } while (decodedByteCnt < compressedLiteral.dst.size);
     }
 }
 
