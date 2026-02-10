@@ -902,21 +902,28 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     return result;
 }
 
+static inline uint64_t LoadU32x2(ZSTDGPU_RO_BUFFER(uint32_t) buffer32, uint32_t lowDwordIndex)
+{
+    // ByteAddressBuffer (raw buffer) will gen buffer_load_b64? Change loop term conds and increment.
+    // Or make it StructuredBuffer<uint64_t>. In both cases API says descriptors need larger alignment than 4 though.
+    return uint64_t(buffer32[lowDwordIndex + 1]) << 32 | buffer32[lowDwordIndex];
+}
+
 struct HuffmanStream {
     ZSTDGPU_RO_BUFFER(uint32_t) buffer;
 
-    uint32_t dataSpare;
+    uint32_t dataSpare; // can be u32, even when data0 is u64
     uint32_t numBitsSpare;
 
-    uint32_t data0;
+    uint64_t data0;
     uint32_t numBits0;
 
     // uint32_t baseDwordIdx; SRD from table is bounds-checked, or there should be at least 8 bytes before
-    // the start of compressed literals between the zstd-frame begin and first block.
+    // the start of compressed literals between the zstd-frame begin and first block(?).
     uint32_t lastDwordIdx;
 
     uint32_t maxBitsPerCode;
-    uint32_t bwMinusMaxBitsPerCode;
+    uint32_t _32MinusMaxBitsPerCode;
 };
 
 static inline void zstdgpu_HuffmanStream_InitWithSegment(
@@ -927,28 +934,36 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(
 {
     const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // NOTE: - 1, not end
 
-    // const uint32_t baseDwordIdx = segment.offs / 4u;
     const uint32_t lastDwordIdx = lastByteIdx / 4u;
 
+    // For experiment with U64 _loads_ in the loop, still do U32 for init since its maybe simpler.
     uint32_t data = buffer[lastDwordIdx];
     uint32_t goodBitCount = (lastByteIdx % 4u) * 8 + 8;      // byte index within DWORD of 0 yeilds 8
     data &= ~0u >> (32 - goodBitCount);                      // keep {1,2,3,4} * 8 low bits
     goodBitCount = zstdgpu_FindFirstBitHiU32(data);          // NOTE: could become zero, in [0:31]
 
-    data <<= ((32 - goodBitCount) & 31); // lets first try/see how keeping bits at MSB looks
+    // When goodBitCount is 0, data will be 0x1 and should be cleared to 0x0,
+    // but we can't shift by 32, so do this in two steps:
+    data <<= 1;
+    data <<= (31 - goodBitCount);
+
+    // Only loaded U32 for init.
+    uint64_t data64 = uint64_t(data) << 32;
 
     stream.buffer = buffer;
 
     stream.dataSpare    = 0;
     stream.numBitsSpare = 0;
 
-    stream.data0        = data;
+    stream.data0        = data64;
     stream.numBits0     = goodBitCount;
 
     stream.lastDwordIdx = lastDwordIdx;
 
     stream.maxBitsPerCode = maxBitsPerCode;
-    stream.bwMinusMaxBitsPerCode = 32 - maxBitsPerCode;
+    stream._32MinusMaxBitsPerCode = 32 - maxBitsPerCode;
+
+    ZSTDGPU_ASSERT(11 >= maxBitsPerCode);
 }
 
 static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
@@ -956,22 +971,26 @@ static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStrea
     if (stream.numBits0 < stream.maxBitsPerCode)
     {
         ZSTDGPU_ASSERT(stream.numBitsSpare == 0);
-        stream.dataSpare    = stream.data0;
+        stream.dataSpare    = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare = stream.numBits0;
-        stream.numBits0     = 32;
-        stream.data0 = stream.buffer[--stream.lastDwordIdx];
+        stream.numBits0     = 64;
+        stream.data0        = LoadU32x2(stream.buffer, stream.lastDwordIdx -= 2);
     }
 }
 
 static inline uint32_t zstdgpu_HuffmanStream_Peek(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
 {
-    const uint32_t k = stream.bwMinusMaxBitsPerCode;
+    const uint32_t k = stream._32MinusMaxBitsPerCode;
+    ZSTDGPU_ASSERT(k + stream.numBitsSpare < 32u);
+     // "Free" since U64 is a pair of VGPRs. Do to avoid U64 shift. Works because Max bits is <= 11:
+    const uint32_t data0_hi = uint32_t(stream.data0 >> 32);
     return (stream.dataSpare >> k) |
-           (stream.data0 >> (k + stream.numBitsSpare));
+           (data0_hi >> (k + stream.numBitsSpare));
 }
 
 static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream, ZSTDGPU_PARAM_IN(int) actualBitCount)
 {
+    ZSTDGPU_ASSERT(stream.maxBitsPerCode >= uint32_t(actualBitCount));
     int ns = stream.numBitsSpare;
     uint32_t data0Consumed = zstdgpu_MaxI32(0, actualBitCount - ns);
     stream.numBitsSpare    = zstdgpu_MaxI32(0, ns - actualBitCount);

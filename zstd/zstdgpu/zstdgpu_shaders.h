@@ -2766,6 +2766,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
 
         HuffmanStream stream;
         zstdgpu_HuffmanStream_InitWithSegment(stream, srt.inCompressedData, compressedLiteral.src, bitsMax);
+
         uint32_t decodedByteCnt = 0;
         do
         {
