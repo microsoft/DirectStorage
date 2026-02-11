@@ -207,6 +207,7 @@ static uint32_t zstdgpu_Count_SRTs(void)
 {
     uint32_t descCount = 0;
 
+    #define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        descCount += 1;
     #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      descCount += 1;
     #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      descCount += 1;
     #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                  descCount += 1;
@@ -222,8 +223,17 @@ static uint32_t zstdgpu_Count_SRTs(void)
     #undef ZSTDGPU_RW_BUFFER_DECL_GLC
     #undef ZSTDGPU_RW_BUFFER_DECL
     #undef ZSTDGPU_RO_BUFFER_DECL
+    #undef ZSTDGPU_RO_RAW_BUFFER_DECL
 
     return descCount;
+}
+
+static void zstdgpu_CreateByteAddressBufferSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpuDest, ID3D12Device* device, ID3D12Resource* resource, uint32_t byteSize)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc = { DXGI_FORMAT_R32_TYPELESS, D3D12_SRV_DIMENSION_BUFFER, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING };
+    desc.Buffer.NumElements = byteSize / sizeof(uint32_t);
+    desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    device->CreateShaderResourceView(resource, &desc, cpuDest);
 }
 
 static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, const zstdgpu_ResourceInfo & resInfo, const zstdgpu_ResourceDataGpu & gpuResData)
@@ -257,6 +267,13 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
         cpuDest.ptr += descSize;                                                                            \
         gpuDest.ptr += descSize;
 
+
+    #define ZSTDGPU_PUSH_RAW_BUFFER(name)                                                                           \
+        (zstdgpu_CreateByteAddressBufferSrv(cpuDest, device, gpuResData.gpuOnly.name, resInfo.name##_ByteSize),     \
+         cpuDest.ptr += descSize,                                                                                   \
+         gpuDest.ptr += descSize);
+
+    #define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index) ZSTDGPU_PUSH_RAW_BUFFER(name)
     #define ZSTDGPU_RO_BUFFER_DECL(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, SRV)
     #define ZSTDGPU_RW_BUFFER_DECL(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, UAV)
     #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, UAV)
@@ -272,6 +289,7 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     #undef ZSTDGPU_RW_BUFFER_DECL_GLC
     #undef ZSTDGPU_RW_BUFFER_DECL
     #undef ZSTDGPU_RO_BUFFER_DECL
+    #undef ZSTDGPU_RO_RAW_BUFFER_DECL
 }
 
 #define ZSTDGPU_KERNEL_LIST()                                                                                                       \

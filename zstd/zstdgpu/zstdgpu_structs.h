@@ -341,6 +341,30 @@ static inline void InterlockedMin(uint32_t & dst, uint32_t x) { dst = dst < x ? 
 static inline void InterlockedMax(uint32_t & dst, uint32_t x) { dst = dst > x ? dst : x; }
 static inline void InterlockedAdd(uint32_t & dst, uint32_t x, uint32_t & ret) { ret = dst; dst += x; }
 static inline void InterlockedCompareStore(uint32_t & dst, uint32_t compare, uint32_t x) { if (dst == compare) dst = x; }
+
+using RawBufferSrvU32 = const uint32_t*;
+static inline uint32_t LoadU32AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+{
+    return *reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(buffer) + offset);
+}
+static inline uint64_t LoadU64AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+{
+    return *reinterpret_cast<const uint64_t* __unaligned>(reinterpret_cast<const char*>(buffer) + offset);
+}
+
+#else
+
+#define RawBufferSrvU32 ByteAddressBuffer
+static inline uint32_t LoadU32AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+{
+    return buffer.Load(offset);
+}
+static inline uint64_t LoadU64AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+{
+    uint2 v = buffer.Load2(offset);
+    return v.x | (uint64_t(v.y) << 32);
+}
+
 #endif
 
 static inline uint32_t zstdgpu_BitFieldExtractU32(uint32_t x, uint32_t start, uint32_t count)
@@ -902,15 +926,8 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     return result;
 }
 
-static inline uint64_t LoadU32x2(ZSTDGPU_RO_BUFFER(uint32_t) buffer32, uint32_t lowDwordIndex)
-{
-    // ByteAddressBuffer (raw buffer) will gen buffer_load_b64? Change loop term conds and increment.
-    // Or make it StructuredBuffer<uint64_t>. In both cases API says descriptors need larger alignment than 4 though.
-    return uint64_t(buffer32[lowDwordIndex + 1]) << 32 | buffer32[lowDwordIndex];
-}
-
 struct HuffmanStream {
-    ZSTDGPU_RO_BUFFER(uint32_t) buffer;
+    RawBufferSrvU32 buffer;
 
     uint32_t dataSpare; // can be u32, even when data0 is u64
     uint32_t numBitsSpare;
@@ -918,9 +935,9 @@ struct HuffmanStream {
     uint64_t data0;
     uint32_t numBits0;
 
-    // uint32_t baseDwordIdx; SRD from table is bounds-checked, or there should be at least 8 bytes before
+    // SRD from table is bounds-checked, or there should be at least 8 bytes before
     // the start of compressed literals between the zstd-frame begin and first block(?).
-    uint32_t lastDwordIdx;
+    uint32_t lastByteOffset;
 
     uint32_t maxBitsPerCode;
     uint32_t _32MinusMaxBitsPerCode;
@@ -928,16 +945,16 @@ struct HuffmanStream {
 
 static inline void zstdgpu_HuffmanStream_InitWithSegment(
     ZSTDGPU_PARAM_INOUT(HuffmanStream)      stream,
-    ZSTDGPU_RO_BUFFER(uint32_t)             buffer,
+    ZSTDGPU_PARAM_IN(RawBufferSrvU32)       buffer,
     ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment,
     ZSTDGPU_PARAM_IN(uint32_t) maxBitsPerCode)
 {
     const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // NOTE: - 1, not end
 
-    const uint32_t lastDwordIdx = lastByteIdx / 4u;
+    const uint32_t lastByteOffsetForDword = lastByteIdx & -4;
 
-    // For experiment with U64 _loads_ in the loop, still do U32 for init since its maybe simpler.
-    uint32_t data = buffer[lastDwordIdx];
+    // Doing U64 loads in the loop, but do U32 for init since its maybe simpler.
+    uint32_t data = LoadU32AtByteOffset(buffer, lastByteOffsetForDword);
     uint32_t goodBitCount = (lastByteIdx % 4u) * 8 + 8;      // byte index within DWORD of 0 yeilds 8
     data &= ~0u >> (32 - goodBitCount);                      // keep {1,2,3,4} * 8 low bits
     goodBitCount = zstdgpu_FindFirstBitHiU32(data);          // NOTE: could become zero, in [0:31]
@@ -958,7 +975,7 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(
     stream.data0        = data64;
     stream.numBits0     = goodBitCount;
 
-    stream.lastDwordIdx = lastDwordIdx;
+    stream.lastByteOffset = lastByteOffsetForDword;
 
     stream.maxBitsPerCode = maxBitsPerCode;
     stream._32MinusMaxBitsPerCode = 32 - maxBitsPerCode;
@@ -974,7 +991,7 @@ static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStrea
         stream.dataSpare    = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare = stream.numBits0;
         stream.numBits0     = 64;
-        stream.data0        = LoadU32x2(stream.buffer, stream.lastDwordIdx -= 2);
+        stream.data0        = LoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t));
     }
 }
 
@@ -1371,7 +1388,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , Counters                      , 2)    \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitStreamRemap                , 3)    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 4)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , CompressedData                , 5)    \
+    ZSTDGPU_RO_RAW_BUFFER_DECL(                                   CompressedData                , 5)    \
     \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeights    , 6)    \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 7)    \
@@ -1461,6 +1478,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
     ZSTDGPU_SRT(ExecuteSequences                        , ZSTDGPU_EXECUTE_SEQUENCES_SRT())                          \
     ZSTDGPU_SRT(ComputeDestSequenceOffsets              , ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT())
 
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        RawBufferSrvU32                            in##name;
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      ZSTDGPU_RO_BUFFER(type)                    in##name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      ZSTDGPU_RW_BUFFER(type)                    inout##name;
 #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                  ZSTDGPU_RW_BUFFER_GLC(type)                inout##name;
@@ -1549,5 +1567,6 @@ typedef struct zstdgpu_ComputeDestSequenceOffsets_SRT
 #undef ZSTDGPU_RW_BUFFER_DECL_GLC
 #undef ZSTDGPU_RW_BUFFER_DECL
 #undef ZSTDGPU_RO_BUFFER_DECL
+#undef ZSTDGPU_RO_RAW_BUFFER_DECL
 
 #endif // #define ZSTDGPU_STRUCTS_H
