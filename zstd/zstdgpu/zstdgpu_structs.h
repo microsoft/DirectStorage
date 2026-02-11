@@ -926,18 +926,16 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     return result;
 }
 
-struct HuffmanStream {
+struct HuffmanStream
+{
     RawBufferSrvU32 buffer;
+    uint32_t lastByteOffset;
 
-    uint32_t dataSpare; // can be u32, even when data0 is u64
+    uint32_t dataSpare;
     uint32_t numBitsSpare;
 
     uint64_t data0;
     uint32_t numBits0;
-
-    // SRD from table is bounds-checked, or there should be at least 8 bytes before
-    // the start of compressed literals between the zstd-frame begin and first block(?).
-    uint32_t lastByteOffset;
 
     uint32_t maxBitsPerCode;
     uint32_t _32MinusMaxBitsPerCode;
@@ -947,40 +945,36 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(
     ZSTDGPU_PARAM_INOUT(HuffmanStream)      stream,
     ZSTDGPU_PARAM_IN(RawBufferSrvU32)       buffer,
     ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment,
-    ZSTDGPU_PARAM_IN(uint32_t) maxBitsPerCode)
+    ZSTDGPU_PARAM_IN(uint32_t)              maxBitsPerCode)
 {
-    const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // NOTE: - 1, not end
+    const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // Byte index containing the flag.
+    const uint32_t lastByteOffsetForU64 = lastByteIdx & -8;
+    uint64_t data64 = LoadU64AtByteOffset(buffer, lastByteOffsetForU64);
 
-    const uint32_t lastByteOffsetForDword = lastByteIdx & -4;
+    // How many extra bytes we read.
+    const uint32_t oobByteCount = 7 - (lastByteIdx & 7);
+    // Shift left by [0:56] to put the byte with the flag on top.
+    const uint32_t oobBitCount = oobByteCount * 8;
+    data64 <<= oobBitCount;
+    // Count number of leading zero bits above the flag (result in [0:7]).
+    // There is no 64-bit version of v_clz_i32_u32 and uint32_t(data64 >> 32) is free since U64 is a pair of VGPRs.
+    // Add one (reverse-subtract by 32, not 31) to also shift out the flag itself.
+    const uint32_t nonDataBitCount = 32 - zstdgpu_FindFirstBitHiU32(uint32_t(data64 >> 32));
+    data64 <<= nonDataBitCount;
 
-    // Doing U64 loads in the loop, but do U32 for init since its maybe simpler.
-    uint32_t data = LoadU32AtByteOffset(buffer, lastByteOffsetForDword);
-    uint32_t goodBitCount = (lastByteIdx % 4u) * 8 + 8;      // byte index within DWORD of 0 yeilds 8
-    data &= ~0u >> (32 - goodBitCount);                      // keep {1,2,3,4} * 8 low bits
-    goodBitCount = zstdgpu_FindFirstBitHiU32(data);          // NOTE: could become zero, in [0:31]
-
-    // When goodBitCount is 0, data will be 0x1 and should be cleared to 0x0,
-    // but we can't shift by 32, so do this in two steps:
-    data <<= 1;
-    data <<= (31 - goodBitCount);
-
-    // Only loaded U32 for init.
-    uint64_t data64 = uint64_t(data) << 32;
-
-    stream.buffer = buffer;
+    stream.buffer         = buffer;
+    stream.lastByteOffset = lastByteOffsetForU64;
 
     stream.dataSpare    = 0;
     stream.numBitsSpare = 0;
 
-    stream.data0        = data64;
-    stream.numBits0     = goodBitCount;
+    stream.data0    = data64;
+    stream.numBits0 = 64 - (oobBitCount + nonDataBitCount); // How many bits we kept (could be 0).
 
-    stream.lastByteOffset = lastByteOffsetForDword;
-
-    stream.maxBitsPerCode = maxBitsPerCode;
+    stream.maxBitsPerCode         = maxBitsPerCode;
     stream._32MinusMaxBitsPerCode = 32 - maxBitsPerCode;
 
-    ZSTDGPU_ASSERT(11 >= maxBitsPerCode);
+    ZSTDGPU_ASSERT(1 <= maxBitsPerCode && maxBitsPerCode <= 11);
 }
 
 static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
@@ -991,7 +985,7 @@ static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStrea
         stream.dataSpare    = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare = stream.numBits0;
         stream.numBits0     = 64;
-        stream.data0        = LoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t));
+        stream.data0        = LoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t)); // NOTE: -=
     }
 }
 
