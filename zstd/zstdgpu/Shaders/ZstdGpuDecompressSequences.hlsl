@@ -54,7 +54,8 @@ groupshared uint32_t Lds[kzstdgpu_TgSizeX_DecompressSequences * (SEQ_CACHE_LEN +
 
 [RootSignature("DescriptorTable(SRV(t0, numDescriptors=8), UAV(u0, numDescriptors=7))")]
 #if defined(USE_LDS_FSE_CACHE) || defined(USE_LDS_OUT_CACHE)
-[numthreads(32, 1, 1)]
+#define NUM_THREADS 32
+[numthreads(NUM_THREADS, 1, 1)]
 void main(uint32_t groupId : SV_GroupId, uint i : SV_GroupThreadId)
 #else
 [numthreads(kzstdgpu_TgSizeX_DecompressSequences, 1, 1)]
@@ -74,7 +75,7 @@ void main(uint i : SV_DispatchThreadId)
 #undef ZSTDGPU_RO_BUFFER_DECL
 
 #if defined(USE_LDS_FSE_CACHE)
-    zstdgpu_ShaderEntry_DecompressSequences_LdsFseCache(srt, groupId, i);
+    zstdgpu_ShaderEntry_DecompressSequences_LdsFseCache(srt, groupId, i, NUM_THREADS);
 #elif defined(USE_LDS_OUT_CACHE)
     zstdgpu_ShaderEntry_DecompressSequences_LdsOutCache(srt, groupId, i);
 #else
