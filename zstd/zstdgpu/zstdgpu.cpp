@@ -230,7 +230,12 @@ static uint32_t zstdgpu_Count_SRTs(void)
 
 static void zstdgpu_CreateByteAddressBufferSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpuDest, ID3D12Device* device, ID3D12Resource* resource, uint32_t byteSize)
 {
-    D3D12_SHADER_RESOURCE_VIEW_DESC desc = { DXGI_FORMAT_R32_TYPELESS, D3D12_SRV_DIMENSION_BUFFER, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING };
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc =
+    {
+        DXGI_FORMAT_R32_TYPELESS,
+        D3D12_SRV_DIMENSION_BUFFER,
+        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
+    };
     desc.Buffer.NumElements = byteSize / sizeof(uint32_t);
     desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
     device->CreateShaderResourceView(resource, &desc, cpuDest);

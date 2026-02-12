@@ -2755,44 +2755,37 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
     ZSTDGPU_FOR_WORK_ITEMS(literalIndex, thisGroupLiteralRemain, threadId, kzstdgpu_TgSizeX_DecompressLiterals)
     {
         const uint32_t literalStreamId = srt.inLitStreamRemap[htLiteralStart + thisGroupLiteralStart + literalIndex];
-
         zstdgpu_LitStreamInfo compressedLiteral = srt.inLitRefs[literalStreamId];
-        // Possibly useful too:
-        // "The process continues up to reading the required number of symbols per stream.
-        // If a bitstream is not entirely and exactly consumed, hence reaching exactly its beginning position with all bits consumed,
-        // the decoding process is considered faulty."
-        if (compressedLiteral.dst.size == 0) // derived from block Regenerated_Size
-            continue;
-
-        HuffmanStream stream;
-        zstdgpu_HuffmanStream_InitWithSegment(stream, srt.inCompressedData, compressedLiteral.src, bitsMax);
-
-        uint32_t decodedByteCnt = 0;
-        do
+        if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
         {
-            zstdgpu_HuffmanStream_Refill(stream);
-            const uint32_t state = zstdgpu_HuffmanStream_Peek(stream);
+            zstdgpu_HuffmanStream stream;
+            zstdgpu_HuffmanStream_InitWithSegment(stream, srt.inCompressedData, compressedLiteral.src, bitsMax);
 
+            uint32_t decodedByteCnt = 0;
+            do
+            {
+                const uint32_t state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
 #if 1 // ASSUME_11BIT_HUFFMAN_CODES
-            const uint32_t symbolAndBitcnt = zstdgpu_LdsLoadU32(GS_HuffmanTable + state);
-            const uint32_t symbol = symbolAndBitcnt >> 16;
-            const uint32_t bitcnt = symbolAndBitcnt & 0xffffu;
+                const uint32_t symbolAndBitcnt = zstdgpu_LdsLoadU32(GS_HuffmanTable + state);
+                const uint32_t symbol = symbolAndBitcnt >> 16;
+                const uint32_t bitcnt = symbolAndBitcnt & 0xffffu;
 #else
-            uint32_t symbol = 0;
-            uint32_t bitcnt = 0;
-            zstdgpu_GetSymbol(symbol, state);
-            zstdgpu_GetBitcnt(bitcnt, state);
-            #undef zstdgpu_GetSymbol
-            #undef zstdgpu_GetBitcnt
+                uint32_t symbol = 0;
+                uint32_t bitcnt = 0;
+                zstdgpu_GetSymbol(symbol, state);
+                zstdgpu_GetBitcnt(bitcnt, state);
+                #undef zstdgpu_GetSymbol
+                #undef zstdgpu_GetBitcnt
 #endif
+                // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
+                // and then to memory. At least try small LDS cache of 32-dwords per literal
+                zstdgpu_TypedStoreU8(srt.inoutDecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
 
-            // TODO(jweinste): Experiment with partial-loop-unrolling with R8G8B8A8_UINT UAV.
-            zstdgpu_TypedStoreU8(srt.inoutDecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
-
-            // _Consume is "harmless" here; don't need to mid-break on (decodedByteCnt == compressedLiteral.dst.size).
-            // A classic "do-while" loop _might_ compile better.
-            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
-        } while (decodedByteCnt < compressedLiteral.dst.size);
+                // Consume() is not illegal here; it's not needed to mid-break on (decodedByteCnt == compressedLiteral.dst.size).
+                // A more conventional do-while loop might compile better.
+                zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+            } while (decodedByteCnt < compressedLiteral.dst.size);
+        }
     }
 }
 

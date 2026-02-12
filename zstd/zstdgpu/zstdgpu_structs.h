@@ -342,24 +342,28 @@ static inline void InterlockedMax(uint32_t & dst, uint32_t x) { dst = dst > x ? 
 static inline void InterlockedAdd(uint32_t & dst, uint32_t x, uint32_t & ret) { ret = dst; dst += x; }
 static inline void InterlockedCompareStore(uint32_t & dst, uint32_t compare, uint32_t x) { if (dst == compare) dst = x; }
 
-using RawBufferSrvU32 = const uint32_t*;
-static inline uint32_t LoadU32AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+using zstdgpu_RawBufferSrvU32 = const uint32_t*;
+
+static inline uint32_t zstdgpu_RawLoadU32AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
 {
     return *reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(buffer) + offset);
 }
-static inline uint64_t LoadU64AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+
+static inline uint64_t zstdgpu_RawLoadU64AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
 {
     return *reinterpret_cast<const uint64_t* __unaligned>(reinterpret_cast<const char*>(buffer) + offset);
 }
 
 #else
 
-#define RawBufferSrvU32 ByteAddressBuffer
-static inline uint32_t LoadU32AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+#define zstdgpu_RawBufferSrvU32 ByteAddressBuffer
+
+static inline uint32_t zstdgpu_RawLoadU32AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
 {
     return buffer.Load(offset);
 }
-static inline uint64_t LoadU64AtByteOffset(RawBufferSrvU32 buffer, uint32_t offset)
+
+static inline uint64_t zstdgpu_RawLoadU64AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
 {
     uint2 v = buffer.Load2(offset);
     return v.x | (uint64_t(v.y) << 32);
@@ -776,9 +780,6 @@ static inline void zstdgpu_Forward_BitBuffer_ByteAlign(ZSTDGPU_PARAM_INOUT(zstdg
     zstdgpu_Forward_BitBuffer_Pop(inoutBuffer, inoutBuffer.bitcnt & 7);
 }
 
-// #define ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF 1 // reversebits/v_bfrev_b32 idea, doesn't compile because of bitcntLast
-// #define ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET 1 // doesn't seem to matter
-
 typedef struct zstdgpu_Backward_BitBuffer_V0
 {
     ZSTDGPU_RO_BUFFER(uint32_t) buffer;
@@ -907,33 +908,48 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Pop(ZSTDGPU_PARAM_INOUT(zstdgpu
 
 ZSTDGPU_BITBUF_DEFINE_STANDARD_METHODS(Backward_BitBuffer_V0)
 
-static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) inoutBuffer, uint32_t bitcnt, uint32_t extrabits)
+// Possible debugging method when trying different bitbuffer ideas:
+// keep an older working implementation around and call them side by side, e.g:
+//
+// void func(...)
+// {   ...
+//     old_Init(old_stream);
+//     new_Init(new_stream);
+//     for (...)
+//     {
+//         old_state = old_RefillAndPeak(old_stream);
+//         new_state = new_RefillAndPeak(new_stream);
+//         if (old_state != new_state)
+//             __debugbreak();
+//         ...
+//         old_state = old_Consume(...);
+//         new_state = new_Consume(...);
+//     }
+//     ...
+// }
+
+// NOTE(jweinste):
+//
+// Backwards bitstream that loads aligned 64-bit elements (instead of 32-bit elements).
+// That was the main goal, and the rest of how this work is what felt "natural".
+//
+// These functions do not check if the source stream was fully consumed, calling code must determine when to stop looping.
+//
+// This style of bitstream could perhaps be used for other things in the future.
+struct zstdgpu_HuffmanStream
 {
-    // Always true when doing test-in-loop-middle on Regenerated_Size:
-    // if (inoutBuffer.hadlastrefill == false)
-    {
-        zstdgpu_Backward_BitBuffer_V0_Refill(inoutBuffer, bitcnt);
-    }
+    zstdgpu_RawBufferSrvU32 buffer;
+    uint32_t                lastByteOffset;
 
-    if (inoutBuffer.bitcnt < bitcnt)
-    {
-        inoutBuffer.bitcnt += extrabits;    // simply increment counter because upper bits are zeros
-        inoutBuffer.bitbuf <<= extrabits;
-    }
-
-    uint32_t result = zstdgpu_Backward_BitBuffer_V0_Top(inoutBuffer, bitcnt);
-    zstdgpu_Backward_BitBuffer_V0_Pop(inoutBuffer, bitcnt);
-    return result;
-}
-
-struct HuffmanStream
-{
-    RawBufferSrvU32 buffer;
-    uint32_t lastByteOffset;
-
+    // Used to juggle bits we still have but need to load another U64.
+    // This juggling means there is a decent amount of ALU (including one 64-bit shift) per Peek+Consume,
+    // but doing fewer loads (by loading U64 over U32) seems worth it (since loads might be immediately waited on).
+    // The refill condition may be non-uniform though, making things not clear-cut.
     uint32_t dataSpare;
-    uint32_t numBitsSpare;
+    uint32_t numBitsSpare; // always strictly < maxBitsPerCode
 
+    // Remaining bits are kept in _high_ bits.
+    // If there is one 5-bit code left (numBits0 = 5) with value 0b11111, then data0 = 0xF800'0000'0000'0000, NOT 0x1F or anything else.
     uint64_t data0;
     uint32_t numBits0;
 
@@ -942,14 +958,20 @@ struct HuffmanStream
 };
 
 static inline void zstdgpu_HuffmanStream_InitWithSegment(
-    ZSTDGPU_PARAM_INOUT(HuffmanStream)      stream,
-    ZSTDGPU_PARAM_IN(RawBufferSrvU32)       buffer,
+    ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream)      stream,
+    ZSTDGPU_PARAM_IN(zstdgpu_RawBufferSrvU32)       buffer,
     ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment,
     ZSTDGPU_PARAM_IN(uint32_t)              maxBitsPerCode)
 {
+    // NOTE(jweinste): we could just load a single DWORD here to reduce codesize/ALU here in InitWithSegment(),
+    // but we want to ensure that the DWORDx2 loads in RefillAndPeek() are 8-byte aligned.
+    // Alignment might improve cache behavior, but it is mainly to remove OOB concerns,
+    // assuming the _first_ frame in a "file" is at least 4-byte aligned,
+    // since a frame is at least 2 bytes and a block has a 3-byte header.
+
     const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // Byte index containing the flag.
     const uint32_t lastByteOffsetForU64 = lastByteIdx & -8;
-    uint64_t data64 = LoadU64AtByteOffset(buffer, lastByteOffsetForU64);
+    uint64_t data64 = zstdgpu_RawLoadU64AtByteOffset(buffer, lastByteOffsetForU64);
 
     // How many extra bytes we read.
     const uint32_t oobByteCount = 7 - (lastByteIdx & 7);
@@ -977,31 +999,32 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(
     ZSTDGPU_ASSERT(1 <= maxBitsPerCode && maxBitsPerCode <= 11);
 }
 
-static inline void zstdgpu_HuffmanStream_Refill(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
+static inline uint32_t zstdgpu_HuffmanStream_RefillAndPeek(ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream) stream)
 {
+    // Need refill?
     if (stream.numBits0 < stream.maxBitsPerCode)
     {
+        // Do refill.
         ZSTDGPU_ASSERT(stream.numBitsSpare == 0);
         stream.dataSpare    = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare = stream.numBits0;
         stream.numBits0     = 64;
-        stream.data0        = LoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t)); // NOTE: -=
+        stream.data0        = zstdgpu_RawLoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t)); // NOTE: -=
     }
-}
 
-static inline uint32_t zstdgpu_HuffmanStream_Peek(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream)
-{
+    // Peak.
     const uint32_t k = stream._32MinusMaxBitsPerCode;
     ZSTDGPU_ASSERT(k + stream.numBitsSpare < 32u);
-     // "Free" since U64 is a pair of VGPRs. Do to avoid U64 shift. Works because Max bits is <= 11:
+    // Extracting high U32 is "free" since U64 is a pair of VGPRs. Avoid slower U64 shift. Works because maxBitsPerCode bits is <= 11.
     const uint32_t data0_hi = uint32_t(stream.data0 >> 32);
     return (stream.dataSpare >> k) |
            (data0_hi >> (k + stream.numBitsSpare));
 }
 
-static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(HuffmanStream) stream, ZSTDGPU_PARAM_IN(int) actualBitCount)
+static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream) stream, ZSTDGPU_PARAM_IN(int) actualBitCount)
 {
     ZSTDGPU_ASSERT(stream.maxBitsPerCode >= uint32_t(actualBitCount));
+
     int ns = stream.numBitsSpare;
     uint32_t data0Consumed = zstdgpu_MaxI32(0, actualBitCount - ns);
     stream.numBitsSpare    = zstdgpu_MaxI32(0, ns - actualBitCount);
@@ -1472,7 +1495,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
     ZSTDGPU_SRT(ExecuteSequences                        , ZSTDGPU_EXECUTE_SEQUENCES_SRT())                          \
     ZSTDGPU_SRT(ComputeDestSequenceOffsets              , ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT())
 
-#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        RawBufferSrvU32                            in##name;
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        zstdgpu_RawBufferSrvU32                    in##name;
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      ZSTDGPU_RO_BUFFER(type)                    in##name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      ZSTDGPU_RW_BUFFER(type)                    inout##name;
 #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                  ZSTDGPU_RW_BUFFER_GLC(type)                inout##name;
