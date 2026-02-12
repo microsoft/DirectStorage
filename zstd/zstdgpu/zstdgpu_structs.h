@@ -313,6 +313,8 @@ static const uint32_t kzstdgpu_TgSizeX_ExecuteSequences = 32;
 #endif
 
 #ifndef __hlsl_dx_compiler
+typedef const uint32_t* zstdgpu_RawBufferSrvU32;
+
 typedef struct uint32_t4
 {
     uint32_t x, y, z, w;
@@ -341,35 +343,20 @@ static inline void InterlockedMin(uint32_t & dst, uint32_t x) { dst = dst < x ? 
 static inline void InterlockedMax(uint32_t & dst, uint32_t x) { dst = dst > x ? dst : x; }
 static inline void InterlockedAdd(uint32_t & dst, uint32_t x, uint32_t & ret) { ret = dst; dst += x; }
 static inline void InterlockedCompareStore(uint32_t & dst, uint32_t compare, uint32_t x) { if (dst == compare) dst = x; }
-
-using zstdgpu_RawBufferSrvU32 = const uint32_t*;
-
-static inline uint32_t zstdgpu_RawLoadU32AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
-{
-    return *reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(buffer) + offset);
-}
-
-static inline uint64_t zstdgpu_RawLoadU64AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
-{
-    return *reinterpret_cast<const uint64_t* __unaligned>(reinterpret_cast<const char*>(buffer) + offset);
-}
-
 #else
-
-#define zstdgpu_RawBufferSrvU32 ByteAddressBuffer
-
-static inline uint32_t zstdgpu_RawLoadU32AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
-{
-    return buffer.Load(offset);
-}
+typedef ByteAddressBuffer zstdgpu_RawBufferSrvU32;
+#endif
 
 static inline uint64_t zstdgpu_RawLoadU64AtByteOffset(zstdgpu_RawBufferSrvU32 buffer, uint32_t offset)
 {
+#ifdef __hlsl_dx_compiler
     uint2 v = buffer.Load2(offset);
     return v.x | (uint64_t(v.y) << 32);
-}
-
+#else
+    const uint32_t* p32 = reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(buffer) + offset);
+    return p32[0] | (uint64_t(p32[1]) << 32);
 #endif
+}
 
 static inline uint32_t zstdgpu_BitFieldExtractU32(uint32_t x, uint32_t start, uint32_t count)
 {
@@ -994,7 +981,7 @@ static inline uint32_t zstdgpu_HuffmanStream_RefillAndPeek(ZSTDGPU_PARAM_INOUT(z
     // Do Peek.
     const uint32_t k = stream._32MinusMaxBitsPerCode;
     const uint32_t data0_hiShift = k + stream.numBitsSpare;
-    const uint32_t data0_hi = uint32_t(stream.data0 >> 32); // High U32 extract is free. U64 shift is slow. maxBitsPerCode is <= 11.
+    const uint32_t data0_hi = uint32_t(stream.data0 >> 32); // High U32 extract is free. U64 shift slower than U32. maxBitsPerCode <= 11.
     ZSTDGPU_ASSERT(data0_hiShift < 32u);
     return (stream.dataSpare >> k) | (data0_hi >> data0_hiShift);
 }

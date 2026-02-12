@@ -2780,9 +2780,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
                 // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
                 // and then to memory. At least try small LDS cache of 32-dwords per literal
                 zstdgpu_TypedStoreU8(srt.inoutDecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
-
-                // Consume() is not illegal here; it's not needed to mid-break on (decodedByteCnt == compressedLiteral.dst.size).
-                // A more conventional do-while loop might compile better.
+                // It could make sense to mid-break on (decodedByteCnt == compressedLiteral.dst.size) instead.
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
             } while (decodedByteCnt < compressedLiteral.dst.size);
         }
