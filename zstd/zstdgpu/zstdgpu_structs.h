@@ -908,48 +908,26 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Pop(ZSTDGPU_PARAM_INOUT(zstdgpu
 
 ZSTDGPU_BITBUF_DEFINE_STANDARD_METHODS(Backward_BitBuffer_V0)
 
-// Possible debugging method when trying different bitbuffer ideas:
-// keep an older working implementation around and call them side by side, e.g:
-//
-// void func(...)
-// {   ...
-//     old_Init(old_stream);
-//     new_Init(new_stream);
-//     for (...)
-//     {
-//         old_state = old_RefillAndPeak(old_stream);
-//         new_state = new_RefillAndPeak(new_stream);
-//         if (old_state != new_state)
-//             __debugbreak();
-//         ...
-//         old_state = old_Consume(...);
-//         new_state = new_Consume(...);
-//     }
-//     ...
-// }
-
-// NOTE(jweinste):
-//
-// Backwards bitstream that loads aligned 64-bit elements (instead of 32-bit elements).
-// That was the main goal, and the rest of how this work is what felt "natural".
-//
-// These functions do not check if the source stream was fully consumed, calling code must determine when to stop looping.
-//
-// This style of bitstream could perhaps be used for other things in the future.
+// NOTE(jweinste): Backwards bitstream that loads aligned 64-bit elements (instead of 32-bit elements) per-lane needing refill.
 struct zstdgpu_HuffmanStream
 {
     zstdgpu_RawBufferSrvU32 buffer;
+    uint32_t                finalByteOffset;
     uint32_t                lastByteOffset;
 
-    // Used to juggle bits we still have but need to load another U64.
-    // This juggling means there is a decent amount of ALU (including one 64-bit shift) per Peek+Consume,
-    // but doing fewer loads (by loading U64 over U32) seems worth it (since loads might be immediately waited on).
-    // The refill condition may be non-uniform though, making things not clear-cut.
     uint32_t dataSpare;
     uint32_t numBitsSpare; // always strictly < maxBitsPerCode
 
-    // Remaining bits are kept in _high_ bits.
-    // If there is one 5-bit code left (numBits0 = 5) with value 0b11111, then data0 = 0xF800'0000'0000'0000, NOT 0x1F or anything else.
+    // Available bits are stored against the high-end of the U64.
+    // This initially felt natural since the bitstream is read from MSB to LSB,
+    // and it allows for Peek() to not need a 64-bit shift (although there might be more ALU elsewhere).
+    //
+    // Example: if there is one 5-bit code left (numBits0 = 5) with value 0b11111, then data0 = 0xF800'0000'0000'0000 (not 0x1F).
+    //
+    // @last_peek: On the (potentially more than just the) last call to RefillAndPeek(), there might be < maxBitsPerCode available
+    // (only the actual number of bits for the last code), but every U64 that at contains at least one useful byte would already have
+    // been loaded. When that last U64 is read (which may be in InitWithSegment()), we set numBits0 to UINT_MAX so the next
+    // (and any subsequent reasonable amount) of RefillAndPeek() do not emit a load.
     uint64_t data0;
     uint32_t numBits0;
 
@@ -957,19 +935,14 @@ struct zstdgpu_HuffmanStream
     uint32_t _32MinusMaxBitsPerCode;
 };
 
-static inline void zstdgpu_HuffmanStream_InitWithSegment(
-    ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream)      stream,
-    ZSTDGPU_PARAM_IN(zstdgpu_RawBufferSrvU32)       buffer,
-    ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment,
-    ZSTDGPU_PARAM_IN(uint32_t)              maxBitsPerCode)
+static inline void zstdgpu_HuffmanStream_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream) stream, zstdgpu_RawBufferSrvU32 buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment, ZSTDGPU_PARAM_IN(uint32_t) maxBitsPerCode)
 {
     // NOTE(jweinste): we could just load a single DWORD here to reduce codesize/ALU here in InitWithSegment(),
     // but we want to ensure that the DWORDx2 loads in RefillAndPeek() are 8-byte aligned.
-    // Alignment might improve cache behavior, but it is mainly to remove OOB concerns,
-    // assuming the _first_ frame in a "file" is at least 4-byte aligned,
-    // since a frame is at least 2 bytes and a block has a 3-byte header.
+    // Alignment might improve cache behavior, but it is mainly to potentially limit how many "OOB" bytes we read.
 
     const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // Byte index containing the flag.
+    const uint32_t finalByteOffsetForU64 = segment.offs & -8;
     const uint32_t lastByteOffsetForU64 = lastByteIdx & -8;
     uint64_t data64 = zstdgpu_RawLoadU64AtByteOffset(buffer, lastByteOffsetForU64);
 
@@ -983,15 +956,17 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(
     // Add one (reverse-subtract by 32, not 31) to also shift out the flag itself.
     const uint32_t nonDataBitCount = 32 - zstdgpu_FindFirstBitHiU32(uint32_t(data64 >> 32));
     data64 <<= nonDataBitCount;
+    const uint32_t keptBitCount = 64 - (oobBitCount + nonDataBitCount); // could be 0
 
-    stream.buffer         = buffer;
-    stream.lastByteOffset = lastByteOffsetForU64;
+    stream.buffer          = buffer;
+    stream.finalByteOffset = finalByteOffsetForU64;
+    stream.lastByteOffset  = lastByteOffsetForU64;
 
     stream.dataSpare    = 0;
     stream.numBitsSpare = 0;
 
     stream.data0    = data64;
-    stream.numBits0 = 64 - (oobBitCount + nonDataBitCount); // How many bits we kept (could be 0).
+    stream.numBits0 = (finalByteOffsetForU64 == lastByteOffsetForU64) ? uint32_t(-1) : keptBitCount; // see @last_peek comment
 
     stream.maxBitsPerCode         = maxBitsPerCode;
     stream._32MinusMaxBitsPerCode = 32 - maxBitsPerCode;
@@ -1004,21 +979,24 @@ static inline uint32_t zstdgpu_HuffmanStream_RefillAndPeek(ZSTDGPU_PARAM_INOUT(z
     // Need refill?
     if (stream.numBits0 < stream.maxBitsPerCode)
     {
-        // Do refill.
         ZSTDGPU_ASSERT(stream.numBitsSpare == 0);
-        stream.dataSpare    = uint32_t(stream.data0 >> 32);
-        stream.numBitsSpare = stream.numBits0;
-        stream.numBits0     = 64;
-        stream.data0        = zstdgpu_RawLoadU64AtByteOffset(stream.buffer, stream.lastByteOffset -= sizeof(uint64_t)); // NOTE: -=
+        ZSTDGPU_ASSERT(((stream.finalByteOffset | stream.lastByteOffset) & 7) == 0);
+        ZSTDGPU_ASSERT(stream.finalByteOffset < stream.lastByteOffset);
+        // Do refill.
+        const uint32_t loadByteOffset = stream.lastByteOffset - sizeof(uint64_t);
+        stream.dataSpare      = uint32_t(stream.data0 >> 32);
+        stream.numBitsSpare   = stream.numBits0;
+        stream.lastByteOffset = loadByteOffset;
+        stream.data0          = zstdgpu_RawLoadU64AtByteOffset(stream.buffer, loadByteOffset);
+        stream.numBits0       = (stream.finalByteOffset == loadByteOffset) ? uint32_t(-1) : 64; // see @last_peek comment
     }
 
-    // Peak.
+    // Do Peek.
     const uint32_t k = stream._32MinusMaxBitsPerCode;
-    ZSTDGPU_ASSERT(k + stream.numBitsSpare < 32u);
-    // Extracting high U32 is "free" since U64 is a pair of VGPRs. Avoid slower U64 shift. Works because maxBitsPerCode bits is <= 11.
-    const uint32_t data0_hi = uint32_t(stream.data0 >> 32);
-    return (stream.dataSpare >> k) |
-           (data0_hi >> (k + stream.numBitsSpare));
+    const uint32_t data0_hiShift = k + stream.numBitsSpare;
+    const uint32_t data0_hi = uint32_t(stream.data0 >> 32); // High U32 extract is free. U64 shift is slow. maxBitsPerCode is <= 11.
+    ZSTDGPU_ASSERT(data0_hiShift < 32u);
+    return (stream.dataSpare >> k) | (data0_hi >> data0_hiShift);
 }
 
 static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(zstdgpu_HuffmanStream) stream, ZSTDGPU_PARAM_IN(int) actualBitCount)
