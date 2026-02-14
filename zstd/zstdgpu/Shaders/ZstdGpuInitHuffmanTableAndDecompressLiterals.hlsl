@@ -28,7 +28,7 @@ struct Consts
 
 ConstantBuffer<Consts> Constants : register(b0);
 
-#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                    ByteAddressBuffer                          ZstdIn##name    : register(t##index);
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)              ZSTDGPU_RO_RAW_BUFFER(type)                ZstdIn##name    : register(t##index);
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                  ZSTDGPU_RO_BUFFER(type)                    ZstdIn##name    : register(t##index);
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                  ZSTDGPU_RW_BUFFER(type)                    ZstdInOut##name : register(u##index);
 #define ZSTDGPU_RO_TYPED_BUFFER_DECL(hlsl_type, type, name, index) ZSTDGPU_RO_TYPED_BUFFER(hlsl_type, type)   ZstdIn##name    : register(t##index);
@@ -57,7 +57,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
 
-#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        srt.in##name    = ZstdIn##name;
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                  srt.in##name    = ZstdIn##name;
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      srt.in##name    = ZstdIn##name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      srt.inout##name = ZstdInOut##name;
 #define ZSTDGPU_RO_TYPED_BUFFER_DECL(hlsl_type, type, name, index)     srt.in##name    = ZstdIn##name;

@@ -23,6 +23,7 @@ struct Consts
 
 ConstantBuffer<Consts> Constants : register(b0);
 
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)              ZSTDGPU_RO_RAW_BUFFER(type)                ZstdIn##name    : register(t##index);
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                  ZSTDGPU_RO_BUFFER(type)                    ZstdIn##name    : register(t##index);
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                  ZSTDGPU_RW_BUFFER(type)                    ZstdInOut##name : register(u##index);
 #define ZSTDGPU_RO_TYPED_BUFFER_DECL(hlsl_type, type, name, index) ZSTDGPU_RO_TYPED_BUFFER(hlsl_type, type)   ZstdIn##name    : register(t##index);
@@ -34,6 +35,7 @@ ZSTDGPU_DECOMPRESS_LITERALS_SRT()
 #undef ZSTDGPU_RO_TYPED_BUFFER_DECL
 #undef ZSTDGPU_RW_BUFFER_DECL
 #undef ZSTDGPU_RO_BUFFER_DECL
+#undef ZSTDGPU_RO_RAW_BUFFER_DECL
 
 // WARN(pamartis): Wasteful, need only uint8_t but HLSL doesn't support it
 groupshared uint32_t GS_Lds[kzstdgpu_MaxCount_HuffmanTableExpandedUInts];
@@ -50,6 +52,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_DecompressLiterals_SRT srt;
 
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                  srt.in##name    = ZstdIn##name;
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      srt.in##name    = ZstdIn##name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      srt.inout##name = ZstdInOut##name;
 #define ZSTDGPU_RO_TYPED_BUFFER_DECL(hlsl_type, type, name, index)     srt.in##name    = ZstdIn##name;
@@ -60,6 +63,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 #undef ZSTDGPU_RO_TYPED_BUFFER_DECL
 #undef ZSTDGPU_RW_BUFFER_DECL
 #undef ZSTDGPU_RO_BUFFER_DECL
+#undef ZSTDGPU_RO_RAW_BUFFER_DECL
     srt.huffmanTableSlotCount   = Constants.huffmanTableSlotCount;
 
     if (groupId >= srt.inCounters[kzstdgpu_CounterIndex_DecompressLiteralsGroups])

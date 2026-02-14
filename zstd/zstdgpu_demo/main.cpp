@@ -152,7 +152,7 @@ static const int16_t kzstdgpuFseProbsDefault[] =
 
 #include "zstdgpu_resources.h"
 
-#define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        srt.in##name    = resources.name;
+#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                  srt.in##name    = resources.name;
 #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      srt.in##name    = resources.name;
 #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      srt.inout##name = resources.name;
 #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                  srt.inout##name = resources.name;

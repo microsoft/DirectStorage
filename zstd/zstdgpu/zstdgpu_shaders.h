@@ -2722,7 +2722,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable(ZSTDGPU_PARAM_INOUT(zstdgpu_Ini
     }
 }
 
-static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_BUFFER(uint32_t) CompressedData,
+static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
                                                                ZSTDGPU_RO_BUFFER(uint32_t) LitStreamRemap,
                                                                ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                                ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
@@ -3158,7 +3158,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
     );
 }
 
-void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_BUFFER(uint32_t) CompressedData,
+void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
                                                  ZSTDGPU_RO_BUFFER(uint32_t) LitStreamRemap,
                                                  ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                  ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
@@ -3189,7 +3189,43 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_BUFFER(uint32_t) Com
     ZSTDGPU_FOR_WORK_ITEMS(literalIndex, thisGroupLiteralRemain, threadId, tgSize)
     {
         const uint32_t literalStreamId = LitStreamRemap[htLiteralStart + thisGroupLiteralStart + literalIndex];
+
         zstdgpu_LitStreamInfo compressedLiteral = LitRefs[literalStreamId];
+
+#if 0
+        zstdgpu_Backward_BitBuffer_V0 bitBuffer;
+        zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, CompressedData, compressedLiteral.src);
+
+        uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
+        uint32_t decodedByteCnt = 0;
+        while (decodedByteCnt < compressedLiteral.dst.size)
+        {
+#if 1 // ASSUME_11BIT_HUFFMAN_CODES
+            const uint32_t symbolAndBitcnt = zstdgpu_LdsLoadU32(GS_HuffmanTable + state);
+            const uint32_t symbol = symbolAndBitcnt >> 16;
+            const uint32_t bitcnt = symbolAndBitcnt & 0xffffu;
+#else
+            const uint32_t symbolIndex = zstdgpu_BinarySearchLds(GS_CodeAndSymbol, 0, codeTableSize, state, 0x00ffffffu);
+            const uint32_t bitcntIndex = zstdgpu_BinarySearchLds(GS_RankIndex, 0, bitsMax + 1, state, 0xffffffffu);
+            const uint32_t symbol = zstdgpu_LdsLoadU32(GS_CodeAndSymbol + symbolIndex) >> 24;
+            const uint32_t bitcnt = bitsMax - bitcntIndex;
+#endif
+
+            // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
+            // and then to memory. At least try small LDS cache of 32-dwords per literal
+            zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
+
+            if (zstdgpu_Backward_BitBuffer_V0_CanRefill_Huffman(bitBuffer, bitcnt))
+            {
+                const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
+                state = ((state << bitcnt) + rest) & maxBitcntMask;
+            }
+            else
+            {
+                break;
+            }
+        }
+#else
         if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
         {
             zstdgpu_HuffmanStream stream;
@@ -3216,6 +3252,7 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_BUFFER(uint32_t) Com
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
             } while (decodedByteCnt < compressedLiteral.dst.size);
         }
+#endif
     }
 }
 

@@ -209,7 +209,7 @@ static uint32_t zstdgpu_Count_SRTs(void)
 {
     uint32_t descCount = 0;
 
-    #define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index)                        descCount += 1;
+    #define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                  descCount += 1;
     #define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                      descCount += 1;
     #define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      descCount += 1;
     #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                  descCount += 1;
@@ -280,7 +280,7 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
          cpuDest.ptr += descSize,                                                                                   \
          gpuDest.ptr += descSize);
 
-    #define ZSTDGPU_RO_RAW_BUFFER_DECL(name, index) ZSTDGPU_PUSH_RAW_BUFFER(name)
+    #define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index) ZSTDGPU_PUSH_RAW_BUFFER(name)
     #define ZSTDGPU_RO_BUFFER_DECL(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, SRV)
     #define ZSTDGPU_RW_BUFFER_DECL(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, UAV)
     #define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index) ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, UAV)
