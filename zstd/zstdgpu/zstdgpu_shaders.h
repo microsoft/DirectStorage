@@ -3574,15 +3574,15 @@ static void zstdgpu_ShaderEntry_DecompressSequences_LdsFseCache(ZSTDGPU_PARAM_IN
     ZSTDGPU_PRELOAD_FSE_INTO_LDS(MLen)
 
     #if !defined(__XBOX_SCARLETT)
-    if (tgSize > WaveGetLaneCount())
-    {
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (threadId >= WaveGetLaneCount())
+    GroupMemoryBarrierWithGroupSync();
+    #endif
+
+    // The rest of the shader should be scalar. Ideally the compiler should emit mostly scalar instructions,
+    // but this may help it, or deactivate unnecessary lanes for instructions with no scalar counterpart (LDS loads).
+    if (threadId != 0)
     {
         return;
     }
-    #endif
 
     #define ZSTDGPU_INIT_FSE_STATE(name)                                                                    \
         uint32_t state##name = 0;                                                                           \
