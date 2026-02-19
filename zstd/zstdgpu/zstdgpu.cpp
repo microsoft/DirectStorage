@@ -560,19 +560,20 @@ zstdgpu_Status zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *outPer
         context->ExecuteSequences = context->ExecuteSequences64;
         context->DecompressSequences_LdsFseCache = context->DecompressSequences_LdsFseCache32;
 #else
-        if (persistentContext->maxLaneCount == 128)
+        if (persistentContext->minLaneCount == 128)
         {
             context->ExecuteSequences = context->ExecuteSequences128;
             context->DecompressSequences_LdsFseCache = context->DecompressSequences_LdsFseCache128;
         }
-        else if (persistentContext->maxLaneCount == 64)
+        else if (persistentContext->minLaneCount == 64)
         {
             context->ExecuteSequences = context->ExecuteSequences64;
             context->DecompressSequences_LdsFseCache = context->DecompressSequences_LdsFseCache64;
         }
         else
         {
-            context->ExecuteSequences = context->ExecuteSequences32;
+            context->ExecuteSequences = (persistentContext->maxLaneCount >= 64) ? context->ExecuteSequences64
+                                                                                : context->ExecuteSequences32;
             context->DecompressSequences_LdsFseCache = context->DecompressSequences_LdsFseCache32;
         }
 #endif
