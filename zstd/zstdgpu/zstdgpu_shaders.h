@@ -3030,39 +3030,43 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
 
         zstdgpu_LitStreamInfo compressedLiteral = LitRefs[literalStreamId];
 
-#if 0
-        zstdgpu_Backward_BitBuffer_V0 bitBuffer;
-        zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, CompressedData, compressedLiteral.src);
-
-        uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
-        uint32_t decodedByteCnt = 0;
-        while (decodedByteCnt < compressedLiteral.dst.size)
+        if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
         {
-            uint32_t symbol = 0;
-            uint32_t bitcnt = 0;
-            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            uint32_t decodedByteCnt = 0;
 
-            // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
-            // and then to memory. At least try small LDS cache of 32-dwords per literal
-            zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
+            // This more original way won't compile since Backward_BitBuffer_V0 expects StructuredBuffer<uint32_t>
+            // but CompressedData is ByteAddressBuffer. We could remove all raw-buffer usage and reintroduce it later;
+            // one 64-bit load isn't much better than two (on AMD: s_claused'd) 32-bit loads.
+            //
+            // Benefits of raw-buffers over StructuredBuffer<uint32_t> is any of Load{1,2,3,4} can be used and
+            // when applicable, they are nicer for SMEM (s_buffer_load does not use the SRD stride to compute the address).
+#if 0
+            zstdgpu_Backward_BitBuffer_V0 bitBuffer;
+            zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, CompressedData, compressedLiteral.src);
 
-            if (zstdgpu_Backward_BitBuffer_V0_CanRefill_Huffman(bitBuffer, bitcnt))
+            uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
+            uint32_t decodedByteCnt = 0;
+            for (;;)
             {
+                uint32_t symbol = 0;
+                uint32_t bitcnt = 0;
+                zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+
+                // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
+                // and then to memory. At least try small LDS cache of 32-dwords per literal
+                zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
+
+                if (decodedByteCnt == compressedLiteral.dst.size)
+                {
+                    break;
+                }
+
                 const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
                 state = ((state << bitcnt) + rest) & maxBitcntMask;
             }
-            else
-            {
-                break;
-            }
-        }
 #else
-        if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
-        {
             zstdgpu_HuffmanStream stream;
             zstdgpu_HuffmanStream_InitWithSegment(stream, CompressedData, compressedLiteral.src, bitsMax);
-
-            uint32_t decodedByteCnt = 0;
             do
             {
                 const uint32_t state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
@@ -3076,8 +3080,8 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
                 // It could make sense to mid-break on (decodedByteCnt == compressedLiteral.dst.size) instead.
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
             } while (decodedByteCnt < compressedLiteral.dst.size);
-        }
 #endif
+        }
     }
 }
 

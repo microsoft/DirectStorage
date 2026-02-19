@@ -804,7 +804,6 @@ typedef struct zstdgpu_Backward_BitBuffer_V0
     uint32_t lastDword;   // VGPR as it store any memory block size varying per lane
     uint32_t baseDword;
     bool     hadlastrefill;
-    bool     hadlastrefillHuffman;
 } zstdgpu_Backward_BitBuffer_V0;
 
 typedef struct zstdgpu_Backward_BitBuffer
@@ -879,7 +878,6 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
     outBuffer.lastDword = lastDword;
     outBuffer.baseDword = baseDword;
     outBuffer.hadlastrefill = baseDword == lastDword;
-    outBuffer.hadlastrefillHuffman = false;
     //outBuffer.bytesz = bytesz;
 }
 
@@ -960,19 +958,6 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Pop(ZSTDGPU_PARAM_INOUT(zstdgpu
 
 ZSTDGPU_BITBUF_DEFINE_STANDARD_METHODS(Backward_BitBuffer_V0)
 
-static inline bool zstdgpu_Backward_BitBuffer_V0_CanRefill_Huffman(ZSTDGPU_PARAM_IN(zstdgpu_Backward_BitBuffer_V0) inBuffer, uint32_t bitcnt)
-{
-    ZSTDGPU_ASSERT(bitcnt <= 32);
-    if (inBuffer.bitcnt >= bitcnt)
-    {
-        return true;
-    }
-    else
-    {
-        return !inBuffer.hadlastrefillHuffman;
-    }
-}
-
 static inline void zstdgpu_Backward_BitBuffer_V0_Refill_Huffman(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) inoutBuffer, uint32_t bitcnt, uint32_t extrabits)
 {
     if (inoutBuffer.hadlastrefill == false)
@@ -983,7 +968,6 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Refill_Huffman(ZSTDGPU_PARAM_IN
     if (inoutBuffer.bitcnt < bitcnt)
     {
         inoutBuffer.bitcnt += extrabits;    // simply increment counter because upper bits are zeros
-        inoutBuffer.hadlastrefillHuffman = true;
     }
 }
 
@@ -998,7 +982,6 @@ static inline uint32_t zstdgpu_Backward_BitBuffer_V0_Get_Huffman(ZSTDGPU_PARAM_I
     {
         inoutBuffer.bitcnt += extrabits;    // simply increment counter because upper bits are zeros
         inoutBuffer.bitbuf <<= extrabits;
-        inoutBuffer.hadlastrefillHuffman = true;
     }
 
     uint32_t result = zstdgpu_Backward_BitBuffer_V0_Top(inoutBuffer, bitcnt);
