@@ -370,7 +370,16 @@ static inline void InterlockedAdd(uint32_t & dst, uint32_t x, uint32_t & ret) { 
 static inline void InterlockedCompareStore(uint32_t & dst, uint32_t compare, uint32_t x) { if (dst == compare) dst = x; }
 #endif
 
-static inline uint64_t zstdgpu_RawLoadU64AtByteOffset(ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, uint32_t offset)
+static inline uint32_t zstdgpu_ByteOffsetLoadU32(ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, uint32_t offset)
+{
+#ifdef __hlsl_dx_compiler
+    return buffer.Load(offset);
+#else
+    return *reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(buffer) + offset);
+#endif
+}
+
+static inline uint64_t zstdgpu_ByteOffsetLoadU64(ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, uint32_t offset)
 {
 #ifdef __hlsl_dx_compiler
     uint2 v = buffer.Load2(offset);
@@ -817,24 +826,22 @@ static inline void zstdgpu_Forward_BitBuffer_ByteAlign(ZSTDGPU_PARAM_INOUT(zstdg
 }
 
 //#define ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF 1
-#define ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET 1
 
 typedef struct zstdgpu_Backward_BitBuffer_V0
 {
-    ZSTDGPU_RO_BUFFER(uint32_t) buffer;
+    ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer;
 
     uint64_t bitbuf;    // VGPRs storing valid bits that are not consumed yet
-    uint32_t nextDword; // VGPR storing the offset in dwords to the start of the next dword fetch
     uint32_t bitcnt;    // VGPR storing the number of valid bits in `bitbuf`
     uint32_t bitcntLast;
-    uint32_t lastDword;   // VGPR as it store any memory block size varying per lane
-    uint32_t baseDword;
+    uint32_t lastByteOffset;    // offset of last load (pre-decrement before next load)
+    uint32_t baseByteOffset;
     bool     hadlastrefill;
 } zstdgpu_Backward_BitBuffer_V0;
 
 typedef struct zstdgpu_Backward_BitBuffer
 {
-    ZSTDGPU_RO_BUFFER(uint32_t) buffer;
+    ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer;
 
     uint64_t    bitbuf;
     uint32_t    offset;
@@ -861,17 +868,17 @@ static inline uint32_t reversebits(uint32_t x)
 
 #endif
 
-static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) outBuffer, ZSTDGPU_RO_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
+static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer_V0) outBuffer, ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
 {
     const uint32_t datasz = segment.offs + segment.size;
 
-    const uint32_t baseDword = segment.offs >> 2u;
-    const uint32_t lastDword = (datasz - 1u) >> 2u;
+    const uint32_t baseByteOffset = segment.offs & -4;
+    const uint32_t lastByteOffset = (datasz - 1u) & -4;
 
     // Firstly, we assume that all the bytes read from the last dword are valid and drop only highest bits
     uint32_t bitcnt = (datasz & 3u) << 3u; // Possible: 0, 8, 16, 24
     uint32_t bitmsk = ~0u >> (32u - bitcnt);
-    uint32_t bitbuf = buffer[lastDword] & bitmsk;
+    uint32_t bitbuf = zstdgpu_ByteOffsetLoadU32(buffer, lastByteOffset) & bitmsk;
 
     // Secondly, we search for the highest set bit to see how many bits are valid
     bitcnt = zstdgpu_FindFirstBitHiU32_Nonzero(bitbuf);
@@ -885,7 +892,7 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
 
     const uint32_t bitcntLast = (segment.offs & 0x3u) << 3u;
     {
-        const uint32_t lobitcnt = baseDword == lastDword ? bitcntLast : 0;
+        const uint32_t lobitcnt = baseByteOffset == lastByteOffset ? bitcntLast : 0;
         bitcnt  -= lobitcnt;
         bitbuf >>= lobitcnt;
     }
@@ -893,17 +900,11 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
 
     outBuffer.buffer = buffer;
     outBuffer.bitbuf = (uint64_t)bitbuf;
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET
-    // in "reversed" offset mode we only increment "nextDword"
-    outBuffer.nextDword = 0;
-#else
-    outBuffer.nextDword = lastDword;
-#endif
     outBuffer.bitcnt = bitcnt;
     outBuffer.bitcntLast = bitcntLast;
-    outBuffer.lastDword = lastDword;
-    outBuffer.baseDword = baseDword;
-    outBuffer.hadlastrefill = baseDword == lastDword;
+    outBuffer.lastByteOffset = lastByteOffset;
+    outBuffer.baseByteOffset = baseByteOffset;
+    outBuffer.hadlastrefill = baseByteOffset == lastByteOffset;
     //outBuffer.bytesz = bytesz;
 }
 
@@ -929,28 +930,24 @@ static inline void zstdgpu_Backward_BitBuffer_V0_Refill(ZSTDGPU_PARAM_INOUT(zstd
     {
         ZSTDGPU_ASSERT(inoutBuffer.hadlastrefill == false);
 
-#ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_OFFSET
-        inoutBuffer.nextDword += 1;
-        const uint32_t nextDword = inoutBuffer.lastDword - inoutBuffer.nextDword;
-#else
-        ZSTDGPU_ASSERT(inoutBuffer.nextDword > 0);
-        inoutBuffer.nextDword -= 1;
-        const uint32_t nextDword = inoutBuffer.nextDword;
-#endif
-        ZSTDGPU_ASSERT(nextDword >= inoutBuffer.baseDword);
+        ZSTDGPU_ASSERT(inoutBuffer.lastByteOffset >= 4);
+        inoutBuffer.lastByteOffset -= 4;
+        const uint32_t nextByteOffset = inoutBuffer.lastByteOffset;
+        ZSTDGPU_ASSERT(nextByteOffset >= inoutBuffer.baseByteOffset);
 
         // how many bits we need to remove
-        const uint32_t lobitcnt = nextDword > inoutBuffer.baseDword ? 0u : inoutBuffer.bitcntLast;
+        const uint32_t lobitcnt = nextByteOffset > inoutBuffer.baseByteOffset ? 0u : inoutBuffer.bitcntLast;
         const uint32_t hibitcnt = 32u - lobitcnt;
 
+        const uint32_t loadValue = zstdgpu_ByteOffsetLoadU32(inoutBuffer.buffer, nextByteOffset);
         #ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
-            inoutBuffer.bitbuf |= (uint64_t)reversebits(inoutBuffer.buffer[nextDword]) << inoutBuffer.bitcnt;
+            inoutBuffer.bitbuf |= (uint64_t)reversebits(loadValue) << inoutBuffer.bitcnt;
         #else
-            inoutBuffer.bitbuf = (inoutBuffer.bitbuf << hibitcnt) | (inoutBuffer.buffer[nextDword] >> lobitcnt);
+            inoutBuffer.bitbuf = (inoutBuffer.bitbuf << hibitcnt) | (loadValue >> lobitcnt);
         #endif
 
         inoutBuffer.bitcnt += hibitcnt;
-        inoutBuffer.hadlastrefill = !(nextDword > inoutBuffer.baseDword);
+        inoutBuffer.hadlastrefill = !(nextByteOffset > inoutBuffer.baseByteOffset);
     }
 }
 
@@ -1051,7 +1048,7 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(ZSTDGPU_PARAM_INOUT(zst
     const uint32_t lastByteIdx = (segment.offs + segment.size) - 1; // Byte index containing the flag.
     const uint32_t finalByteOffsetForU64 = segment.offs & -8;
     const uint32_t lastByteOffsetForU64 = lastByteIdx & -8;
-    uint64_t data64 = zstdgpu_RawLoadU64AtByteOffset(buffer, lastByteOffsetForU64);
+    uint64_t data64 = zstdgpu_ByteOffsetLoadU64(buffer, lastByteOffsetForU64);
 
     // How many extra bytes we read.
     const uint32_t oobByteCount = 7 - (lastByteIdx & 7);
@@ -1094,7 +1091,7 @@ static inline uint32_t zstdgpu_HuffmanStream_RefillAndPeek(ZSTDGPU_PARAM_INOUT(z
         stream.dataSpare      = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare   = stream.numBits0;
         stream.lastByteOffset = loadByteOffset;
-        stream.data0          = zstdgpu_RawLoadU64AtByteOffset(stream.buffer, loadByteOffset);
+        stream.data0          = zstdgpu_ByteOffsetLoadU64(stream.buffer, loadByteOffset);
         stream.numBits0       = (stream.finalByteOffset == loadByteOffset) ? uint32_t(-1) : 64; // see @last_peek comment
     }
 
@@ -1119,13 +1116,13 @@ static inline void zstdgpu_HuffmanStream_Consume(ZSTDGPU_PARAM_INOUT(zstdgpu_Huf
     stream.data0 <<= data0Consumed;
 }
 
-static inline void zstdgpu_Backward_BitBuffer_Init(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer) outBitBuffer, ZSTDGPU_RO_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
+static inline void zstdgpu_Backward_BitBuffer_Init(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer) outBitBuffer, ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
 {
     const uint32_t endbyte = segment.offs + segment.size - 1u;
 
     outBitBuffer.buffer = buffer;
-    outBitBuffer.offset = endbyte >> 2u;
-    outBitBuffer.bitbuf = buffer[outBitBuffer.offset];
+    outBitBuffer.offset = endbyte & -4;
+    outBitBuffer.bitbuf = zstdgpu_ByteOffsetLoadU32(buffer, outBitBuffer.offset);
     outBitBuffer.bitpos = 56u - ((endbyte & 3u) << 3u);
 }
 
@@ -1146,7 +1143,7 @@ static inline void zstdgpu_Backward_BitBuffer_Refill(ZSTDGPU_PARAM_INOUT(zstdgpu
 
     // advance the offset by the number of full uints consumed in `bitbuf`
     // which is determined by the number of consumed bits in `bitpos`
-    inoutBuffer.offset -= inoutBuffer.bitpos >> 5u;
+    inoutBuffer.offset -= (inoutBuffer.bitpos >> 5u) * 4;
 
     // we mask `bitpos` so that it's either `32` or `0` to determine how many bits should be replaced
     // by newer bits loaded into lower 32-bits, then we load lower bits unconditionally,
@@ -1157,7 +1154,7 @@ static inline void zstdgpu_Backward_BitBuffer_Refill(ZSTDGPU_PARAM_INOUT(zstdgpu
     //
     // TODO (pamartis): Because of the above, try storing bitbuf as 2 VGPRs as 2 explicit uint32_t values,
     // so "left shift" and "or" are avoided.
-    inoutBuffer.bitbuf = (inoutBuffer.bitbuf << (inoutBuffer.bitpos & ~31u)) | inoutBuffer.buffer[inoutBuffer.offset];
+    inoutBuffer.bitbuf = (inoutBuffer.bitbuf << (inoutBuffer.bitpos & ~31u)) | zstdgpu_ByteOffsetLoadU32(inoutBuffer.buffer, inoutBuffer.offset);
 
     // we update `bitpos` so that it contains <= `31` bit
     inoutBuffer.bitpos &= 31u;
@@ -1181,7 +1178,7 @@ static inline void zstdgpu_Backward_BitBuffer_Pop(ZSTDGPU_PARAM_INOUT(zstdgpu_Ba
     inoutBuffer.bitpos += bitcnt;
 }
 
-static inline void zstdgpu_Backward_BitBuffer_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer) outBitBuffer, ZSTDGPU_RO_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
+static inline void zstdgpu_Backward_BitBuffer_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_BitBuffer) outBitBuffer, ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
 {
     zstdgpu_Backward_BitBuffer_Init(outBitBuffer, buffer, segment);
 
@@ -1210,7 +1207,7 @@ ZSTDGPU_BITBUF_DEFINE_STANDARD_METHODS(Backward_BitBuffer)
 #   error `ZSTDGPU_BACKWARD_BITBUF_TST` must not be defined.
 #endif
 
-static inline void zstdgpu_Backward_CmpBitBuffer_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_CmpBitBuffer) outBuffer, ZSTDGPU_RO_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
+static inline void zstdgpu_Backward_CmpBitBuffer_InitWithSegment(ZSTDGPU_PARAM_INOUT(zstdgpu_Backward_CmpBitBuffer) outBuffer, ZSTDGPU_RO_RAW_BUFFER(uint32_t) buffer, ZSTDGPU_PARAM_IN(zstdgpu_OffsetAndSize) segment)
 {
     ZSTDGPU_BACKWARD_BITBUF_REF(InitWithSegment)(outBuffer.bbref, buffer, segment);
     ZSTDGPU_BACKWARD_BITBUF_TST(InitWithSegment)(outBuffer.bbtst, buffer, segment);
@@ -1465,7 +1462,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
 
 #define ZSTDGPU_DECOMPRESS_HUFFMAN_WEIGHTS_SRT()                                                        \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , Counters                      , 0)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , CompressedData                , 1)    \
+    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 1)    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , HufRefs                       , 2)    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 3)    \
     \
@@ -1521,7 +1518,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t allBlockC
 
 #define ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()                                                              \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , Counters                      , 0)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , CompressedData                , 1)    \
+    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 1)    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_SeqStreamInfo                , SeqRefs                       , 2)    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 3)    \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 4)    \

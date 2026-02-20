@@ -3033,19 +3033,11 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
         if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
         {
             uint32_t decodedByteCnt = 0;
-
-            // This more original way won't compile since Backward_BitBuffer_V0 expects StructuredBuffer<uint32_t>
-            // but CompressedData is ByteAddressBuffer. We could remove all raw-buffer usage and reintroduce it later;
-            // one 64-bit load isn't much better than two (on AMD: s_claused'd) 32-bit loads.
-            //
-            // Benefits of raw-buffers over StructuredBuffer<uint32_t> is any of Load{1,2,3,4} can be used and
-            // when applicable, they are nicer for SMEM (s_buffer_load does not use the SRD stride to compute the address).
 #if 0
             zstdgpu_Backward_BitBuffer_V0 bitBuffer;
             zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, CompressedData, compressedLiteral.src);
 
             uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
-            uint32_t decodedByteCnt = 0;
             for (;;)
             {
                 uint32_t symbol = 0;
