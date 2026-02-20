@@ -453,7 +453,7 @@ static inline uint32_t zstdgpu_FindFirstBitHiU32_Nonzero(uint32_t v)
     //          v_clz_i32_u32   v0, s10             // input s10 is scalar, but didn't use SALU s_clz_i32_u32
     //          v_sub_nc_u32    v1, 31, v0
     //          v_cmp_ne_i32    vcc_lo, -1, v0
-    //          v_cndmask_b32   v0, -1, v1, vcc_lo  // final result in v10
+    //          v_cndmask_b32   v0, -1, v1, vcc_lo  // final result in v0
     // The following formulation gets us:
     //          s_brev_b32    s13, s10
     //          s_ctz_i32_b32 s13, s13
@@ -465,7 +465,7 @@ static inline uint32_t zstdgpu_FindFirstBitHiU32_Nonzero(uint32_t v)
     unsigned long index = 0;
     uint32_t found = _BitScanReverse(&index, v);
     ZSTDGPU_ASSERT(0 != found);
-    return found ? (uint32_t)index : 32u; // found should be true, but due this to match GPU behavior
+    return found ? (uint32_t)index : 32u; // found should be true, but do this to match GPU behavior
 #endif
 }
 
