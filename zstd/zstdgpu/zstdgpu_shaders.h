@@ -3503,27 +3503,26 @@ static void zstdgpu_ShaderEntry_DecompressSequences_LdsFseCache(ZSTDGPU_PARAM_IN
 
     const zstdgpu_SeqStreamInfo seqRef = srt.inSeqRefs[seqStreamIdx];
 
-#ifndef __hlsl_dx_compiler
-
-    const uint32_t SEQ_LITERAL_LENGTH_BASELINES[36] = {
-        0,  1,  2,   3,   4,   5,    6,    7,    8,    9,     10,    11,
-        12, 13, 14,  15,  16,  18,   20,   22,   24,   28,    32,    40,
-        48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
-    const uint32_t SEQ_LITERAL_LENGTH_EXTRA_BITS[36] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  1,  1,
-        1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-
-    const uint32_t SEQ_MATCH_LENGTH_BASELINES[53] = {
-        3,  4,   5,   6,   7,    8,    9,    10,   11,    12,    13,   14, 15, 16,
-        17, 18,  19,  20,  21,   22,   23,   24,   25,    26,    27,   28, 29, 30,
-        31, 32,  33,  34,  35,   37,   39,   41,   43,    47,    51,   59, 67, 83,
-        99, 131, 259, 515, 1027, 2051, 4099, 8195, 16387, 32771, 65539 };
-
-    const uint32_t SEQ_MATCH_LENGTH_EXTRA_BITS[53] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  0,  0,  0,  1,  1,  1, 1,
-        2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-#endif
+    // Extra bits are low 5 bits, rest are baseline.
+    // It could be better/simpler to not bitpack (use uint32_t2), but the LLVM-SROA pass in DXC might split that up; a single load is desired.
+    static const uint32_t SEQ_LITERAL_LENGTH_EXTRA_BITS_AND_BASELINES[36] =
+    {
+            0 << 5 |  0,     1 << 5 |  0,     2 << 5 |  0,     3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,
+            8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,    11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,
+           16 << 5 |  1,    18 << 5 |  1,    20 << 5 |  1,    22 << 5 |  1,    24 << 5 |  2,    28 << 5 |  2,    32 << 5 |  3,    40 << 5 |  3,
+           48 << 5 |  4,    64 << 5 |  6,   128 << 5 |  7,   256 << 5 |  8,   512 << 5 |  9,  1024 << 5 | 10,  2048 << 5 | 11,  4096 << 5 | 12,
+         8192 << 5 | 13, 16384 << 5 | 14, 32768 << 5 | 15, 65536 << 5 | 16
+    };
+    static const uint32_t SEQ_MATCH_LENGTH_EXTRA_BITS_AND_BASELINES[53] =
+    {
+            3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,     8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,
+           11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,    16 << 5 |  0,    17 << 5 |  0,    18 << 5 |  0,
+           19 << 5 |  0,    20 << 5 |  0,    21 << 5 |  0,    22 << 5 |  0,    23 << 5 |  0,    24 << 5 |  0,    25 << 5 |  0,    26 << 5 |  0,
+           27 << 5 |  0,    28 << 5 |  0,    29 << 5 |  0,    30 << 5 |  0,    31 << 5 |  0,    32 << 5 |  0,    33 << 5 |  0,    34 << 5 |  0,
+           35 << 5 |  1,    37 << 5 |  1,    39 << 5 |  1,    41 << 5 |  1,    43 << 5 |  2,    47 << 5 |  2,    51 << 5 |  3,    59 << 5 |  3,
+           67 << 5 |  4,    83 << 5 |  4,    99 << 5 |  5,   131 << 5 |  7,   259 << 5 |  8,   515 << 5 |  9,  1027 << 5 | 10,  2051 << 5 | 11,
+         4099 << 5 | 12,  8195 << 5 | 13, 16387 << 5 | 14, 32771 << 5 | 15, 65539 << 5 | 16
+    };
 
     // NOTE: the final block size will be computed as SUM(literalSize, totalMLen)
     const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId];
@@ -3622,17 +3621,19 @@ static void zstdgpu_ShaderEntry_DecompressSequences_LdsFseCache(ZSTDGPU_PARAM_IN
             ZSTDGPU_ASSERT(symbolLLen < 36);                                                    \
             ZSTDGPU_ASSERT(symbolMLen < 53);                                                    \
                                                                                                 \
-            const uint32_t bitcntLLen = SEQ_LITERAL_LENGTH_EXTRA_BITS[symbolLLen];              \
+            const uint32_t literalLengthInfo = SEQ_LITERAL_LENGTH_EXTRA_BITS_AND_BASELINES[symbolLLen]; \
+            const uint32_t matchLengthInfo = SEQ_MATCH_LENGTH_EXTRA_BITS_AND_BASELINES[symbolMLen];     \
+            const uint32_t bitcntLLen = literalLengthInfo & 31;                                 \
             const uint32_t bitcntOffs = symbolOffs;                                             \
-            const uint32_t bitcntMLen = SEQ_MATCH_LENGTH_EXTRA_BITS[symbolMLen];                \
+            const uint32_t bitcntMLen = matchLengthInfo & 31;                                   \
                                                                                                 \
             const uint32_t bitsOffs = ZSTDGPU_BACKWARD_BITBUF(Get)(bitBuffer, bitcntOffs);      \
             const uint32_t bitsMLen = ZSTDGPU_BACKWARD_BITBUF(Get)(bitBuffer, bitcntMLen);      \
             const uint32_t bitsLLen = ZSTDGPU_BACKWARD_BITBUF(Get)(bitBuffer, bitcntLLen);      \
                                                                                                 \
                   uint32_t offs = (1u << symbolOffs) + bitsOffs;                                \
-            const uint32_t mlen = SEQ_MATCH_LENGTH_BASELINES[symbolMLen] + bitsMLen;            \
-            const uint32_t llen = SEQ_LITERAL_LENGTH_BASELINES[symbolLLen] + bitsLLen;          \
+            const uint32_t mlen = (matchLengthInfo >> 5) + bitsMLen;                            \
+            const uint32_t llen = (literalLengthInfo >> 5) + bitsLLen;                          \
                                                                                                 \
             offs = zstdgpu_SequenceOffsets_Update2(offset1, offset2, offset3, offs, llen);      \
                                                                                                 \
