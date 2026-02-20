@@ -443,6 +443,32 @@ static inline uint32_t zstdgpu_FindFirstBitHiU32(uint32_t v)
 #endif
 }
 
+static inline uint32_t zstdgpu_FindFirstBitHiU32_Nonzero(uint32_t v)
+{
+#ifdef __hlsl_dx_compiler
+    // On AMD RDNA3, {v,s}_clz_i32_u32 return -1 for an input of 0, instead of returning 32.
+    // So firstbithigh can't directly be implemented as 31 - {v,s}_clz_i32_u32;
+    // there are additional fixup instructions, currently even when or-ing the input with 1.
+    // The current AMD driver compiler does not do a great job with uniform firstbithigh:
+    //          v_clz_i32_u32   v0, s10             // input s10 is scalar, but didn't use SALU s_clz_i32_u32
+    //          v_sub_nc_u32    v1, 31, v0
+    //          v_cmp_ne_i32    vcc_lo, -1, v0
+    //          v_cndmask_b32   v0, -1, v1, vcc_lo  // final result in v10
+    // The following formulation gets us:
+    //          s_brev_b32    s13, s10
+    //          s_ctz_i32_b32 s13, s13
+    //          s_sub_u32     s13, 31, s13          // final result in s13
+    // Which isn't identical when v==0, so only use this when v!=0.
+    // If input is non-uniform (VALU), we still save an instruction.
+    return 31 - firstbitlow(reversebits(v));
+#else
+    unsigned long index = 0;
+    uint32_t found = _BitScanReverse(&index, v);
+    ZSTDGPU_ASSERT(0 != found);
+    return found ? (uint32_t)index : 32u; // found should be true, but due this to match GPU behavior
+#endif
+}
+
 static inline uint32_t zstdgpu_FindFirstBitHiU64(uint64_t x)
 {
 #if defined(__hlsl_dx_compiler)
@@ -848,7 +874,7 @@ static inline void zstdgpu_Backward_BitBuffer_V0_InitWithSegment(ZSTDGPU_PARAM_I
     uint32_t bitbuf = buffer[lastDword] & bitmsk;
 
     // Secondly, we search for the highest set bit to see how many bits are valid
-    bitcnt = zstdgpu_FindFirstBitHiU32(bitbuf);
+    bitcnt = zstdgpu_FindFirstBitHiU32_Nonzero(bitbuf);
 #ifdef ZSTDGPU_USE_REVERSED_BIT_BUFFER_BITBUF
     bitbuf <<= 32u - bitcnt;
     bitbuf = reversebits(bitbuf);
@@ -1035,7 +1061,7 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(ZSTDGPU_PARAM_INOUT(zst
     // Count number of leading zero bits above the flag (result in [0:7]).
     // There is no 64-bit version of v_clz_i32_u32 and uint32_t(data64 >> 32) is free since U64 is a pair of VGPRs.
     // Add one (reverse-subtract by 32, not 31) to also shift out the flag itself.
-    const uint32_t nonDataBitCount = 32 - zstdgpu_FindFirstBitHiU32(uint32_t(data64 >> 32));
+    const uint32_t nonDataBitCount = 32 - zstdgpu_FindFirstBitHiU32_Nonzero(uint32_t(data64 >> 32));
     data64 <<= nonDataBitCount;
     const uint32_t keptBitCount = 64 - (oobBitCount + nonDataBitCount); // could be 0
 
