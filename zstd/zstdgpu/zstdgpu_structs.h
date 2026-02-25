@@ -201,6 +201,14 @@
 #   endif
 #endif
 
+#ifndef ZSTDGPU_STATIC_CAST
+#   ifdef __hlsl_dx_compiler
+#       define ZSTDGPU_STATIC_CAST(type)
+#   else
+#       define ZSTDGPU_STATIC_CAST(type) (type)
+#   endif
+#endif
+
 // Opaque LDS address types: offset on HLSL, pointer on C++.
 // Using these instead of raw uint32_t / uint32_t* prevents accidental type
 // mismatches when storing intermediate LDS addresses in local variables.
@@ -1359,7 +1367,7 @@ static zstdgpu_FseInfo zstdgpu_CreateFseInfo(uint32_t symbolCount, uint32_t accu
     return info;
 }
 
-static uint32_t zstdgpu_ComputeFseIndexHufW(uint32_t indexHufW, uint32_t cmpBlockCount)
+static uint32_t zstdgpu_ComputeFseIndexHufW(uint32_t indexHufW, uint32_t /* cmpBlockCount */)
 {
     return kzstdgpu_FseRleTableCount + indexHufW;
 }
@@ -1379,7 +1387,7 @@ static uint32_t zstdgpu_ComputeFseIndexMLen(uint32_t indexMLen, uint32_t cmpBloc
     return kzstdgpu_FseRleTableCount + (3 * cmpBlockCount + 2) + indexMLen;
 }
 
-static uint32_t zstdgpu_ComputeFseDataStartHufW(uint32_t indexHufW, uint32_t cmpBlockCount)
+static uint32_t zstdgpu_ComputeFseDataStartHufW(uint32_t indexHufW, uint32_t /* cmpBlockCount */)
 {
     return kzstdgpu_FseRleTableCount + indexHufW * kzstdgpu_FseElemMaxCount_HufW;
 }

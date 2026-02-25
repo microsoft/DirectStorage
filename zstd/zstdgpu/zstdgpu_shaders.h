@@ -2401,7 +2401,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem0 = srt.inFseElems[offsetState0];
         // peek
-        srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = zstdgpu_FseElem_Symbol(fseElem0);
+        srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = ZSTDGPU_STATIC_CAST(uint8_t)zstdgpu_FseElem_Symbol(fseElem0);
 
         // update
         uint32_t bits0 = zstdgpu_FseElem_Bitcnt(fseElem0);
@@ -2412,7 +2412,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]);
+            srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = ZSTDGPU_STATIC_CAST(uint8_t)zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]);
             break;
         }
 
@@ -2420,7 +2420,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem1 = srt.inFseElems[offsetState1];
         // peek
-        srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = zstdgpu_FseElem_Symbol(fseElem1);
+        srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = ZSTDGPU_STATIC_CAST(uint8_t) zstdgpu_FseElem_Symbol(fseElem1);
 
         // update
         uint32_t bits1 = zstdgpu_FseElem_Bitcnt(fseElem1);
@@ -2431,7 +2431,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]);
+            srt.inoutDecompressedHuffmanWeights[hufWeightIndex++] = ZSTDGPU_STATIC_CAST(uint8_t)zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]);
             break;
         }
 #if 0
@@ -3079,6 +3079,7 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
 {
     ZSTDGPU_UNUSED(threadId);
     const uint32_t maxBitcntMask = (1u << bitsMax) - 1u;
+    ZSTDGPU_UNUSED(maxBitcntMask);
     //
     // The start of decompression of Huffman-compressed literals
     //
@@ -3152,6 +3153,7 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
 {
     ZSTDGPU_UNUSED(threadId);
     const uint32_t maxBitcntMask = (1u << bitsMax) - 1u;
+    ZSTDGPU_UNUSED(maxBitcntMask);
     //
     // The start of decompression of Huffman-compressed literals
     //

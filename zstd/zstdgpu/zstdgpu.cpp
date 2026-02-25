@@ -274,6 +274,7 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     const DXGI_FORMAT DXGI_FORMAT_uint8_t = DXGI_FORMAT_R8_UINT;
     const DXGI_FORMAT DXGI_FORMAT_uint16_t = DXGI_FORMAT_R16_UINT;
     const DXGI_FORMAT DXGI_FORMAT_int16_t = DXGI_FORMAT_R16_SINT;
+    ZSTDGPU_UNUSED(DXGI_FORMAT_uint16_t);
 
     #define ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, viewType) \
         d3d12aid_##viewType##_Create(cpuDest, device,                                                       \
