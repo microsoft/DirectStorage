@@ -1,7 +1,0 @@
-group_0_cmp03_block16192.zst
-group_0_cmp17.zst
-group_0_cmp17_block16384.zst
-group_0_cmp17_block8192.zst
-group_20_cmp17.zst
-group_20_cmp17_block16384.zst
-group_20_cmp17_block8192.zst

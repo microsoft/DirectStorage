@@ -1,1 +1,1 @@
-some_public_content_we_made.zst
+insects_mips_archive_256K.zst
