@@ -242,6 +242,12 @@ std::string ParamNameGenerator(
     return SanitizeTestName(info.param);
 }
 
+static bool file_exists_strict(const std::filesystem::path& p)
+{
+    return std::filesystem::exists(std::filesystem::absolute(p)) &&
+           std::filesystem::is_regular_file(std::filesystem::absolute(p));
+}
+
 // Constructs a valid file path for content specifed in the test content list files.
 // This assumes the content for internal and public tests are stored in known
 // root folder locations:
@@ -252,9 +258,11 @@ static std::filesystem::path MakeContentPath(const std::string& filename, bool i
     const char* drives[3] = {"C:\\", "D:\\", "E:\\"};
     for (auto& drive : drives)
     {
-        std::filesystem::path contentPath =
-            std::filesystem::path(drive) / "DSTESTPC_CONTENT" / (isInternal ? "internal" : "public") / filename;
-        if (std::filesystem::exists(contentPath))
+        std::filesystem::path contentPath = std::filesystem::path(drive);
+        contentPath /= "DSTESTPC_CONTENT";
+        contentPath /= isInternal ? "internal" : "public";
+        contentPath /= filename;
+        if (file_exists_strict(contentPath))
         {
             return contentPath;
         }
@@ -272,7 +280,7 @@ TEST_P(ZstdDecompressionInternalContentTests, CorrectnessTest)
 {
     std::string filename = GetParam();
     std::filesystem::path contentPath = MakeContentPath(filename, true);
-    if (!std::filesystem::exists(contentPath))
+    if (!file_exists_strict(contentPath))
     {
         GTEST_SKIP() << "Test content `" << contentPath.string() << "` not found, skipping test.";
     }
@@ -297,7 +305,7 @@ TEST_P(ZstdDecompressionPublicContentTests, CorrectnessTest)
 {
     std::string filename = GetParam();
     std::filesystem::path contentPath = MakeContentPath(filename, false);
-    if (!std::filesystem::exists(contentPath))
+    if (!file_exists_strict(contentPath))
     {
          GTEST_SKIP() << "Test content `" << contentPath.string() << "` not found, skipping test.";
     }
