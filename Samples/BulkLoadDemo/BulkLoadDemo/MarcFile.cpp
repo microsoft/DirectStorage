@@ -7,6 +7,8 @@
 // PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
 //
 
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 #include "MarcFile.h"
 
 #include "DStorageLoader.h"
@@ -320,6 +322,7 @@ void MarcFile::OnAllDataLoaded()
     m_model->m_JointIBMs = m_cpuData->JointIBMs.Data.Ptr;
 }
 
+static std::mutex g_SamplerMutex;
 static std::unordered_map<uint32_t, uint32_t> g_SamplerPermutations;
 
 static D3D12_CPU_DESCRIPTOR_HANDLE GetSampler(uint32_t addressModes)
@@ -377,34 +380,40 @@ void MarcFile::FixupMaterials()
 
         // See if this combination of samplers has been used before.  If not,
         // allocate more from the heap and copy in the descriptors.
+        // Lock required: FixupMaterials runs on threadpool callbacks and
+        // g_SamplerPermutations, s_SamplerHeap, and the SamplerManager cache
+        // are all shared mutable state with no internal synchronization.
         uint32_t addressModes = srcMat.AddressModes;
-        auto samplerMapLookup = g_SamplerPermutations.find(addressModes);
-
-        if (samplerMapLookup == g_SamplerPermutations.end())
         {
-            DescriptorHandle SamplerHandles = Renderer::s_SamplerHeap.Alloc(kNumTextures);
-            uint32_t SamplerDescriptorTable = Renderer::s_SamplerHeap.GetOffsetOfHandle(SamplerHandles);
-            g_SamplerPermutations[addressModes] = SamplerDescriptorTable;
-            tableOffsets[matIdx] = srvDescriptorTable | SamplerDescriptorTable << 16;
+            std::lock_guard lock{g_SamplerMutex};
+            auto samplerMapLookup = g_SamplerPermutations.find(addressModes);
 
-            D3D12_CPU_DESCRIPTOR_HANDLE SourceSamplers[kNumTextures];
-            for (uint32_t j = 0; j < kNumTextures; ++j)
+            if (samplerMapLookup == g_SamplerPermutations.end())
             {
-                SourceSamplers[j] = GetSampler(addressModes & 0xF);
-                addressModes >>= 4;
+                DescriptorHandle SamplerHandles = Renderer::s_SamplerHeap.Alloc(kNumTextures);
+                uint32_t SamplerDescriptorTable = Renderer::s_SamplerHeap.GetOffsetOfHandle(SamplerHandles);
+                g_SamplerPermutations[addressModes] = SamplerDescriptorTable;
+                tableOffsets[matIdx] = srvDescriptorTable | SamplerDescriptorTable << 16;
+
+                D3D12_CPU_DESCRIPTOR_HANDLE SourceSamplers[kNumTextures];
+                for (uint32_t j = 0; j < kNumTextures; ++j)
+                {
+                    SourceSamplers[j] = GetSampler(addressModes & 0xF);
+                    addressModes >>= 4;
+                }
+                g_Device->CopyDescriptors(
+                    1,
+                    &SamplerHandles,
+                    &destCount,
+                    destCount,
+                    SourceSamplers,
+                    sourceCounts,
+                    D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
             }
-            g_Device->CopyDescriptors(
-                1,
-                &SamplerHandles,
-                &destCount,
-                destCount,
-                SourceSamplers,
-                sourceCounts,
-                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        }
-        else
-        {
-            tableOffsets[matIdx] = srvDescriptorTable | samplerMapLookup->second << 16;
+            else
+            {
+                tableOffsets[matIdx] = srvDescriptorTable | samplerMapLookup->second << 16;
+            }
         }
 
         textureHandles += increment * kNumTextures;
