@@ -16,18 +16,28 @@
  * Author(s):   Pavel Martishevsky (pamartis@microsoft.com)
  */
 
-#include "../zstdgpu_structs.h"
+#include "../zstdgpu_shaders.h"
 
 StructuredBuffer<uint32_t>                              ZstdLitStreamCountPrefix    : register(t0);
 StructuredBuffer<zstdgpu_CompressedLiteralHuffmanBucket> ZstdLitStreamHuffmanBuckets : register(t1);
-StructuredBuffer<uint32_t>                              ZstdCounters                : register(t2);
+StructuredBuffer<zstdgpu_Counters>                      ZstdCounters                : register(t2);
 RWStructuredBuffer<uint32_t>                            ZstdLitStreamMap            : register(u0);
 
-[RootSignature("SRV(t0), SRV(t1), SRV(t2), UAV(u0)")]
-[numthreads(32, 1, 1)]
-void main(uint litStreamId : SV_DispatchThreadId)
+struct Consts
 {
-    if (litStreamId >= ZstdCounters[kzstdgpu_CounterIndex_HUF_Streams])
+    uint32_t tgOffset;
+    uint32_t workItemCount;
+};
+
+ConstantBuffer<Consts> Constants : register(b0);
+
+[RootSignature("SRV(t0), SRV(t1), SRV(t2), UAV(u0), RootConstants(b0, num32BitConstants=2)")]
+[numthreads(32, 1, 1)]
+void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
+{
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
+    const uint32_t litStreamId = groupId * 32 + i;
+    if (litStreamId >= ZstdCounters[0].HUF_Streams)
         return;
 
     const zstdgpu_CompressedLiteralHuffmanBucket bucket = ZstdLitStreamHuffmanBuckets[litStreamId];

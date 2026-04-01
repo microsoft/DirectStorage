@@ -22,7 +22,8 @@
 
 struct Consts
 {
-    uint32_t compressedBlockCount;
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t compressedBufferSizeInBytes;
     uint32_t frameCount;
 };
@@ -37,17 +38,18 @@ ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=16)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=16)), RootConstants(b0, num32BitConstants=4)")]
 [numthreads(kzstdgpu_TgSizeX_ParseCompressedBlocks, 1, 1)]
-void main(uint i : SV_DispatchThreadId)
+void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_ParseCompressedBlocks + threadId;
     zstdgpu_ParseCompressedBlocks_SRT srt;
 
     #include "../zstdgpu_srt_decl_copy.h"
     ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
 
-    srt.compressedBlockCount        = Constants.compressedBlockCount;
+    srt.compressedBlockCount        = Constants.workItemCount;
     srt.compressedBufferSizeInBytes = Constants.compressedBufferSizeInBytes;
     srt.frameCount                  = Constants.frameCount;
 

@@ -19,6 +19,7 @@
 struct Consts
 {
     uint32_t tgOffset;
+    uint32_t workItemCount;
 };
 
 ConstantBuffer<Consts>          Constants                           : register(b0);
@@ -29,7 +30,7 @@ ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT()
 
 #define NUM_THREADS 256
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=7), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=1)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=7), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=2)")]
 [numthreads(NUM_THREADS, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -47,7 +48,7 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
     #include "../zstdgpu_srt_decl_undef.h"
 
     const uint32_t seqIdx = i;
-    const uint32_t seqStreamCnt = srt.inCounters[kzstdgpu_CounterIndex_Seq_Streams];
+    const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t seqStreamIdx = zstdgpu_BinarySearch(srt.inPerSeqStreamSeqStart, 0, seqStreamCnt, seqIdx);
     const uint32_t seqIdxBeg = srt.inPerSeqStreamSeqStart[seqStreamIdx];
 
@@ -61,7 +62,7 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 
     const uint32_t blockIdx = srt.inSeqRefs[seqStreamIdx].blockId;
 
-    const uint32_t frameCnt = srt.inCounters[kzstdgpu_CounterIndex_Frames];
+    const uint32_t frameCnt = srt.inCounters[0].Frames;
     const uint32_t frameIdx = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, frameCnt, blockIdx);
 
     const zstdgpu_OffsetAndSize dstFrameOffsAndSize = srt.inUnCompressedFramesRefs[frameIdx];

@@ -29,7 +29,7 @@
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , FramesRefs                    )
 
 #define ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()                                                 \
-    ZSTDGPU_BUFFER(uint32_t                                 , Counters                      )   \
+    ZSTDGPU_BUFFER(zstdgpu_Counters                         , Counters                      )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRAW         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLE         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMP         )   \
@@ -39,7 +39,9 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )   \
     ZSTDGPU_BUFFER(zstdgpu_FrameInfo                        , Frames                        )
 
-#define ZSTDGPU_BUFFERS_LIST_STAGE_0() /* empty so far*/
+#define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
+    ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )
 
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2() /* empty so far*/
 
@@ -258,7 +260,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t Frames_Count = frameCount;
     const uint32_t FramesRefs_Count = frameCount;
     const uint32_t CompressedData_Count = (dataCount + 3) / 4; // because CompressedData is in uint32_t
-    const uint32_t Counters_Count = kzstdgpu_CounterIndex_Count;
+    const uint32_t Counters_Count = 1;
     const uint32_t PerFrameBlockCountRAW_Count = frameCount + zstdgpu_GetLookbackBlockCount(frameCount);
     const uint32_t PerFrameBlockCountRLE_Count = PerFrameBlockCountRAW_Count;
     const uint32_t PerFrameBlockCountCMP_Count = PerFrameBlockCountRAW_Count;
@@ -266,6 +268,8 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameBlockSizesRAW_Count = PerFrameBlockCountRAW_Count;
     const uint32_t PerFrameBlockSizesRLE_Count = PerFrameBlockCountRLE_Count;
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
+    const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
+    const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
@@ -586,6 +590,13 @@ static void zstdgpu_ResourceDataGpu_Init_GpuOnly(zstdgpu_ResourceDataGpu *outRes
     ID3D12Heap *heap = outResData->gpuOnly_Heap[stageIndex];
     if (stageIndex == 0)
     {
+#if defined(_GAMING_XBOX)
+        bufDesc.Width = info->DispatchArgs_ByteSizeInternal;
+        bufDesc.Flags |= D3D12XBOX_RESOURCE_FLAG_ALLOW_INDIRECT_BUFFER;
+        outResData->gpuOnly.DispatchArgs = d3d12aid_Resource_CreateCommitted_WithHeapTypeAndFlags(device, &bufDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12XBOX_HEAP_FLAG_ALLOW_INDIRECT_BUFFERS);
+        bufDesc.Flags &= ~D3D12XBOX_RESOURCE_FLAG_ALLOW_INDIRECT_BUFFER;
+#endif
+
         ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
     }
     else if (stageIndex == 1)

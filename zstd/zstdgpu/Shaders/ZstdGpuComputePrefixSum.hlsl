@@ -17,11 +17,12 @@
  * Author(s):   Pavel Martishevsky (pamartis@microsoft.com)
  */
 
-#include "../zstdgpu_structs.h"
+#include "../zstdgpu_shaders.h"
 
 struct Consts
 {
-    uint32_t elemToPrefixCount;
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t literalsPerGroup;
 };
 
@@ -36,17 +37,18 @@ RWStructuredBuffer<uint32_t>    ZstdLitStreamCountToPrefixLookback  : register(u
 globallycoherent
 RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefixLookback   : register(u3);
 
-RWStructuredBuffer<uint32_t>    ZstdCounters                        : register(u4);
+RWStructuredBuffer<zstdgpu_Counters>  ZstdCounters                 : register(u4);
 
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, 1, 1)]
-void main(uint i : SV_DispatchThreadId)
+void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSum_LiteralCount + threadId;
     const uint32_t blockSize = min(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, WaveGetLaneCount());
     const uint32_t thisBlockIndex = WaveReadLaneFirst(i / blockSize);
     const uint32_t thisLocalIndex = i % blockSize;
 
-    if (i >= Constants.elemToPrefixCount)
+    if (i >= Constants.workItemCount)
         return;
 
     const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
@@ -134,8 +136,8 @@ void main(uint i : SV_DispatchThreadId)
 
     // NOTE(pamartis): the last thread in the dispatch writes its "inclusive" prefix sum because it's the total number of threadgroups
     // to be dispatched for literal decompression
-    if (i == Constants.elemToPrefixCount - 1)
+    if (i == Constants.workItemCount - 1)
     {
-        ZstdCounters[kzstdgpu_CounterIndex_DecompressLiteralsGroups] = ZstdLitGroupCountToPrefix[i];
+        ZstdCounters[0].DecompressLiteralsGroups = ZstdLitGroupCountToPrefix[i];
     }
 }

@@ -19,6 +19,8 @@
 
 struct Consts
 {
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t HuffmanTableBase;
 };
 
@@ -37,15 +39,17 @@ groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTable_LdsSize];
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=3)), RootConstants(b0, num32BitConstants=1)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=3)), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals, 1, 1)]
-void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
+void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_InitHuffmanTable_SRT srt;
 
     #include "../zstdgpu_srt_decl_copy.h"
     ZSTDGPU_INIT_HUFFMAN_TABLE_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
+
+    uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
 
     groupId = (Constants.HuffmanTableBase != 0) ? (Constants.HuffmanTableBase - 1 - groupId) : groupId;
 

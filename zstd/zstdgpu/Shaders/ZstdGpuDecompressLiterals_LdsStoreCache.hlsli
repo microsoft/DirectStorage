@@ -56,6 +56,8 @@ ZSTDGPU_DECOMPRESS_LITERALS_LDS_STORE_CACHE(0, DecompressLiterals_LdsStoreCache)
 
 struct Consts
 {
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t huffmanTableSlotCount;
 };
 
@@ -69,10 +71,12 @@ groupshared uint32_t GS_Lds[kzstdgpu_DecompressLiterals_LdsStoreCache_LdsSize];
 #define ZSTDGPU_LDS GS_Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=9), UAV(u0, numDescriptors=2)), RootConstants(b0, num32BitConstants=1)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=9), UAV(u0, numDescriptors=2)), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals_LdsStoreCache, 1, 1)]
-void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
+void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
+
     zstdgpu_DecompressLiterals_SRT srt;
 
     #include "../zstdgpu_srt_decl_copy.h"
@@ -80,7 +84,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
     #include "../zstdgpu_srt_decl_undef.h"
     srt.huffmanTableSlotCount   = Constants.huffmanTableSlotCount;
 
-    if (groupId >= srt.inCounters[kzstdgpu_CounterIndex_DecompressLiteralsGroups])
+    if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;
 
     uint32_t htIndex = 0;
@@ -109,7 +113,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
     const uint32_t stateCnt = WaveReadLaneFirst(srt.inHuffmanTableRankIndex[htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks + bitsMax]);
     const uint32_t statePairCnt = stateCnt >> 1u;
 
-    // Expand Huffman Table — pack two symbol+bitcnt pairs per dword
+    // Expand Huffman Table -- pack two symbol+bitcnt pairs per dword
     ZSTDGPU_FOR_WORK_ITEMS(statePairId, statePairCnt, i, kzstdgpu_TgSizeX_DecompressLiterals_LdsStoreCache)
     {
         const uint32_t stateId0 = statePairId << 1u;

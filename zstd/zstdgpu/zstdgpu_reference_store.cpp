@@ -792,17 +792,17 @@ static ZSTDGPU_ENUM(Validate_Result) izstdgpu_ReferenceStore_Validate_OffsetsAnd
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_Blocks(const zstdgpu_ResourceDataCpu *resourceDataCpu)
 {
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_RAW] != GBlockIndexRAW)
+    if (resourceDataCpu->Counters->Blocks_RAW != GBlockIndexRAW)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_RLE] != GBlockIndexRLE)
+    if (resourceDataCpu->Counters->Blocks_RLE != GBlockIndexRLE)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockIndexCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     #define VALIDATE_BLOCKS(name) \
-        izstdgpu_ReferenceStore_Validate_OffsetsAndSizes(GZstd.Blocks##name##Refs, GBlockCount##name, resourceDataCpu->Blocks##name##Refs, resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_##name])
+        izstdgpu_ReferenceStore_Validate_OffsetsAndSizes(GZstd.Blocks##name##Refs, GBlockCount##name, resourceDataCpu->Blocks##name##Refs, resourceDataCpu->Counters->Blocks_##name)
 
         if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_BLOCKS(RAW))
             return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -882,21 +882,21 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
     const zstdgpu_ResourceDataCpu *ref = &GZstd;
     const zstdgpu_ResourceDataCpu *tst = resourceDataCpu;
 
-    if (tst->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockCountCMP)
+    if (tst->Counters->Blocks_CMP != GBlockCountCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (tst->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockIndexCMP)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-    if (tst->Counters[kzstdgpu_CounterIndex_FseHufW] != GFseProbTableIndexHufW)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (tst->Counters[kzstdgpu_CounterIndex_FseLLen] != GFseProbTableIndexLLen)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (tst->Counters[kzstdgpu_CounterIndex_FseOffs] != GFseProbTableIndexOffs)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (tst->Counters[kzstdgpu_CounterIndex_FseMLen] != GFseProbTableIndexMLen)
+    if (tst->Counters->Blocks_CMP != GBlockIndexCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (tst->Counters[kzstdgpu_CounterIndex_FseHufW] != GFseCompressedHuffmanWeightCount)
+    if (tst->Counters->FseHufW != GFseProbTableIndexHufW)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (tst->Counters->FseLLen != GFseProbTableIndexLLen)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (tst->Counters->FseOffs != GFseProbTableIndexOffs)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (tst->Counters->FseMLen != GFseProbTableIndexMLen)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+    if (tst->Counters->FseHufW != GFseCompressedHuffmanWeightCount)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     for (uint32_t i = 0; i < GBlockCountCMP; ++i)
@@ -944,21 +944,21 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksData(const zstdgpu_ResourceDataCpu *resourceDataCpu)
 {
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockCountCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockCountCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockIndexCMP)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_FseHufW] != GFseProbTableIndexHufW)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_FseLLen] != GFseProbTableIndexLLen)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_FseOffs] != GFseProbTableIndexOffs)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_FseMLen] != GFseProbTableIndexMLen)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_FseHufW] != GFseCompressedHuffmanWeightCount)
+    if (resourceDataCpu->Counters->FseHufW != GFseProbTableIndexHufW)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (resourceDataCpu->Counters->FseLLen != GFseProbTableIndexLLen)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (resourceDataCpu->Counters->FseOffs != GFseProbTableIndexOffs)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+    if (resourceDataCpu->Counters->FseMLen != GFseProbTableIndexMLen)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+    if (resourceDataCpu->Counters->FseHufW != GFseCompressedHuffmanWeightCount)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     const zstdgpu_CompressedBlockData *refCmpBlocks = GZstd.CompressedBlocks;
@@ -1040,10 +1040,10 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffmanWeights(const zstdgpu_ResourceDataCpu *resourceDataCpu)
 {
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockCountCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockCountCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockIndexCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     const zstdgpu_ResourceDataCpu *ref = &GZstd;
@@ -1099,10 +1099,10 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeights(const zstdgpu_ResourceDataCpu * resourceDataCpu)
 {
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockCountCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockCountCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-    if (resourceDataCpu->Counters[kzstdgpu_CounterIndex_Blocks_CMP] != GBlockIndexCMP)
+    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
 
@@ -1247,7 +1247,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
             //izstdgpu_ReferenceStore_Validate_OffsetAndSize(&refSeqRefs[refSeqSteamIndex].dst, &tstSeqRefs[tstSeqSteamIndex].dst);
             {
                 const uint32_t refSeqOffsNext = (i == GBlockCountCMP - 1u) ? GSequenceCount                                                     : refData->PerSeqStreamSeqStart[refSeqSteamIndex + 1];
-                const uint32_t tstSeqOffsNext = (i == GBlockCountCMP - 1u) ? tstData->Counters[kzstdgpu_CounterIndex_Seq_Streams_DecodedItems]  : tstData->PerSeqStreamSeqStart[tstSeqSteamIndex + 1];
+                const uint32_t tstSeqOffsNext = (i == GBlockCountCMP - 1u) ? tstData->Counters->Seq_Streams_DecodedItems  : tstData->PerSeqStreamSeqStart[tstSeqSteamIndex + 1];
                 const uint32_t refSeqCount = refSeqOffsNext - refSeqOffs;
                 const uint32_t tstSeqCount = tstSeqOffsNext - tstSeqOffs;
 

@@ -18,7 +18,8 @@
 
 struct Consts
 {
-    uint32_t elemToPrefixCount;
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t outputInclusive;
 };
 
@@ -30,11 +31,12 @@ globallycoherent
 RWStructuredBuffer<uint32_t>    ZstdInCountsOutPrefixLookback       : register(u1);
 
 
-[RootSignature("UAV(u0), UAV(u1), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("UAV(u0), UAV(u1), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum, 1, 1)]
-void main(uint i : SV_DispatchThreadId)
+void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    if (i >= Constants.elemToPrefixCount)
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSum + threadId;
+    if (i >= Constants.workItemCount)
         return;
 
     const uint32_t count = ZstdInCountsOutPrefix[i];

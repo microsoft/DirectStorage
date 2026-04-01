@@ -18,11 +18,11 @@
 
 struct Consts
 {
-    uint32_t byteCount;
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t blockCount;
     uint32_t frameCount;
     uint32_t flags;
-    uint32_t tgOffset;
 };
 
 ConstantBuffer<Consts>                  Constants                           : register(b0);
@@ -43,13 +43,9 @@ StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : re
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
-#if defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-    i += groupId.x * kzstdgpu_TgSizeX_MemsetMemcpy;
-#else
-    i += (Constants.tgOffset + groupId.y * 65535 + groupId.x) * kzstdgpu_TgSizeX_MemsetMemcpy;
-#endif
+    i += zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
 
-    if (i >= Constants.byteCount)
+    if (i >= Constants.workItemCount)
         return;
 
     const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, Constants.blockCount, i);

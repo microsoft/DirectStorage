@@ -271,7 +271,7 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
         srt.inCompressedData                    = cpuRes.CompressedData;
         srt.inoutDecompressedHuffmanWeights     = cpuRes.DecompressedHuffmanWeights;
         srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
-        for (uint32_t i = 0; i < gpuReadbackRes.Counters[kzstdgpu_CounterIndex_FseHufW]; ++i)
+        for (uint32_t i = 0; i < gpuReadbackRes.Counters->FseHufW; ++i)
         {
             zstdgpu_ShaderEntry_DecompressHuffmanWeights(srt, i);
         }
@@ -303,9 +303,9 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
         // NOTE(pamartis): We don't need to set CPU-side Huffman Weight Counts because they're not computed within kernel
         // like in the "Decompress" case, and only read instead. And therefore we want to use GPU data
         //srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
-        srt.compressedBlockCount                = gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP];
+        srt.compressedBlockCount                = gpuReadbackRes.Counters->Blocks_CMP;
         srt.compressedBufferSizeInBytes         = zstdDataBufferSize;
-        for (uint32_t i = 0; i < gpuReadbackRes.Counters[kzstdgpu_CounterIndex_HUF_WgtStreams]; ++i)
+        for (uint32_t i = 0; i < gpuReadbackRes.Counters->HUF_WgtStreams; ++i)
         {
             zstdgpu_ShaderEntry_DecodeHuffmanWeights(srt, i);
         }
@@ -348,9 +348,9 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, gpuReadbackRes);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
-        srt.huffmanTableSlotCount       = gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP];
+        srt.huffmanTableSlotCount       = gpuReadbackRes.Counters->Blocks_CMP;
 
-        for (uint32_t groupId = 0; groupId < gpuReadbackRes.Counters[kzstdgpu_CounterIndex_DecompressLiteralsGroups]; ++groupId)
+        for (uint32_t groupId = 0; groupId < gpuReadbackRes.Counters->DecompressLiteralsGroups; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0);
         }
@@ -404,31 +404,31 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 
             // FIXUP(pamartis): because DecompreSequences requres 'BlockSizePrefix' to contain literal size (on GPU actual prefix is computed later)
             // we need to setup it properly
-            for (uint32_t i = 0; i < cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP]; ++i)
+            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_CMP; ++i)
             {
                 const uint32_t literalSize = cpuRes.CompressedBlocks[i].literal.size;
                 const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerCmpBlock[i];
                 cpuRes.BlockSizePrefix[dstBlockIndex] = literalSize;
             }
-            for (uint32_t i = 0; i < cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RAW]; ++i)
+            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_RAW; ++i)
             {
                 const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerRawBlock[i];
                 cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRAWRefs[i].size;;
             }
-            for (uint32_t i = 0; i < cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RLE]; ++i)
+            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_RLE; ++i)
             {
                 const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerRleBlock[i];
                 cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRLERefs[i].size;;
             }
 
-            for (uint32_t i = 0; i < gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Seq_Streams]; ++i)
+            for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams; ++i)
             {
                 zstdgpu_ShaderEntry_DecompressSequences_MultiStream(srt, /* groupId */ i, /* threadId */ 0, /* streamsPerGroup */ 1);
             }
             // Compute prefix sum of block sizes
-            const uint32_t allBlockCount = cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP]
-                                         + cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RAW]
-                                         + cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RLE];
+            const uint32_t allBlockCount = cpuRes.Counters->Blocks_CMP
+                                         + cpuRes.Counters->Blocks_RAW
+                                         + cpuRes.Counters->Blocks_RLE;
 
             // FIXUP(pamartis): because after `DecompreSequences` execution 'BlockSizePrefix' contain actual size of the block,
             // not the prefix (it's computed after `DecompreSequences`  on GPU) we update the prefix manually
@@ -447,7 +447,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             zstdgpu_FinaliseSequenceOffsets_SRT srt;
             zstdgpu_Init_FinaliseSequenceOffsets_SRT(srt, gpuReadbackRes);
             srt.inoutDecompressedSequenceOffs = cpuRes.DecompressedSequenceOffs;
-            for (uint32_t i = 0; i < gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Seq_Streams_DecodedItems]; ++i)
+            for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams_DecodedItems; ++i)
             {
                 zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
             }
@@ -481,16 +481,16 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 static void zstdgpu_Test_BlockPrefix(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes)
 {
     /** these buffers could be zero if some block types don't exist */
-    const uint32_t refRleBlockCount = cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RLE];
-    const uint32_t refRawBlockCount = cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_RAW];
-    const uint32_t refCmpBlockCount = cpuRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP];
+    const uint32_t refRleBlockCount = cpuRes.Counters->Blocks_RLE;
+    const uint32_t refRawBlockCount = cpuRes.Counters->Blocks_RAW;
+    const uint32_t refCmpBlockCount = cpuRes.Counters->Blocks_CMP;
     const uint32_t refAllBlockCount = refRleBlockCount
                                     + refRawBlockCount
                                     + refCmpBlockCount;
 
-    VALIDATE_CND(refRleBlockCount == gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Blocks_RLE]);
-    VALIDATE_CND(refRawBlockCount == gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Blocks_RAW]);
-    VALIDATE_CND(refCmpBlockCount == gpuReadbackRes.Counters[kzstdgpu_CounterIndex_Blocks_CMP]);
+    VALIDATE_CND(refRleBlockCount == gpuReadbackRes.Counters->Blocks_RLE);
+    VALIDATE_CND(refRawBlockCount == gpuReadbackRes.Counters->Blocks_RAW);
+    VALIDATE_CND(refCmpBlockCount == gpuReadbackRes.Counters->Blocks_CMP);
 
     if (NULL != cpuRes.GlobalBlockIndexPerCmpBlock)
         VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerCmpBlock, gpuReadbackRes.GlobalBlockIndexPerCmpBlock, sizeof(cpuRes.GlobalBlockIndexPerCmpBlock[0]) * refCmpBlockCount));
@@ -569,7 +569,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     memcpy(zstdCpu.FramesRefs, zstdFrameRefs, sizeof(zstdgpu_OffsetAndSize) * zstdFrameCount);
     memcpy(zstdCpu.FseProbsDefault, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
 
-    #define CNTRS(name) zstdCpu.Counters[kzstdgpu_CounterIndex_##name]
+    #define CNTRS(name) zstdCpu.Counters->name
     {
         zstdgpu_InitResources_SRT srt = {};
         zstdgpu_Init_InitResources_SRT(srt, zstdCpu);

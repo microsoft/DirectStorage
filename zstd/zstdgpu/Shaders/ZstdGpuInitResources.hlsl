@@ -1,11 +1,10 @@
 /**
  * ZstdGpuInitResources.hlsl
  *
- * A compute shader that initializes various resources to their defauls.
+ * A compute shader that initializes various resources to their defaults.
  *      - Counters for various entities
- *      - Arguments for indirect Dispatch calls
- *      - Default FSE tables
- *      - Lookback resources
+ *      - Default FSE tables and RLE entries
+ *      - Per-frame sequence stream min index
  *
  * The caller needs to call Dispatch(zstdgpu_InitResources_GetDispatchSizeX, 1, 1)
  *
@@ -36,7 +35,7 @@ ConstantBuffer<Consts> Constants : register(b0);
 ZSTDGPU_INIT_RESOURCES_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=1), UAV(u0, numDescriptors=20)), RootConstants(b0, num32BitConstants=4)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=1), UAV(u0, numDescriptors=4)), RootConstants(b0, num32BitConstants=4)")]
 [numthreads(kzstdgpu_TgSizeX_InitCounters, 1, 1)]
 void main(uint i : SV_DispatchThreadId)
 {

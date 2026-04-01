@@ -19,7 +19,8 @@
 
 struct Consts
 {
-    uint32_t elemToPrefixCount;
+    uint32_t tgOffset;
+    uint32_t workItemCount;
     uint32_t frameCount;
 };
 
@@ -44,19 +45,22 @@ StructuredBuffer<uint32_t>      ZstdFrameBlockCountAll              : register(t
 
 StructuredBuffer<zstdgpu_SeqStreamInfo> ZstdSeqRefs                 : register(t2);
 
+StructuredBuffer<zstdgpu_Counters>     ZstdCounters                 : register(t3);
+
 #if defined(__XBOX_SCARLETT)
 #   define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), UAV(u5), SRV(t0), SRV(t1), SRV(t2), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), UAV(u5), SRV(t0), SRV(t1), SRV(t2), SRV(t3), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_PrefixSequenceOffsets, 1, 1)]
-void main(uint i : SV_DispatchThreadId)
+void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSequenceOffsets + threadId;
     const uint32_t blockSize = min(kzstdgpu_TgSizeX_PrefixSequenceOffsets, WaveGetLaneCount());
     const uint32_t thisBlockIndex = WaveReadLaneFirst(i / blockSize);
     const uint32_t thisLocalIndex = i % blockSize;
 
-    if (i >= Constants.elemToPrefixCount)
+    if (i >= ZstdCounters[0].Seq_Streams)
         return;
 
     // NOTE(pamartis): Given an exclusive prefix sum of compressed block counts per block (ZstdFrameBlockCountCMP)
