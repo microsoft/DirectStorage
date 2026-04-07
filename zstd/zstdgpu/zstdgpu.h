@@ -56,7 +56,7 @@ ZSTDGPU_API void zstdgpu_CountFramesAndBlocks(zstdgpu_CountFramesAndBlocksInfo *
 
 /**
  *  Traverses a memory block containing zstd frames on CPU and extracts information for every zstd frame.
- *  During traversal, the function jumps over every blocks in every frame to determine the end of the parent zstd frame
+ *  During traversal, the function jumps over every block in every frame to determine the end of the parent zstd frame
  *  because zstd doesn't store the size of compressed frames.
  *
  *  The results of this function are stored in two arrays:
@@ -93,6 +93,26 @@ ZSTDGPU_API void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu
  *       stores the number of times the symbol has to be repeated in the decompressed stream.
  */
 ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAndSize *outBlocksRLE, zstdgpu_OffsetAndSize *outBlocksCmp, const zstdgpu_OffsetAndSize *frames, const zstdgpu_FrameInfo *frameInfos, uint32_t frameIndex, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes);
+
+struct zstdgpu_CountLiteralAndSequenceInfo
+{
+    uint32_t compressedLiteralsByteCount;
+    uint32_t sequenceCount;
+};
+
+/**
+ *  Scans compressed block interiors on CPU and extracts aggregate literal/sequence statistics.
+ *  For each compressed block, parses the literal section header (to get regenerated size for
+ *  compressed/treeless literals) and the sequence section header (to get sequence count).
+ *
+ *  Takes the already-discovered frame offsets from a prior `zstdgpu_CollectFrames` call.
+ *
+ *  Results can be passed to `zstdgpu_SetupBlockInfoConstants` to enable merging all GPU
+ *  stages into a single command list submission without CPU fences.
+ *
+ *  NB: `memoryBlockSize` must be a multiple of 4 bytes.
+ */
+ZSTDGPU_API void zstdgpu_CountCompressedLiteralsAndSequences(zstdgpu_CountLiteralAndSequenceInfo *outInfo, const zstdgpu_OffsetAndSize *frames, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes);
 
 typedef enum zstdgpu_Status
 {

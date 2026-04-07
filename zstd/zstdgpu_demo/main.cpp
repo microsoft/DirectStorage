@@ -1091,7 +1091,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         debugPrint(L"[INFO] Loaded '%s' -- %u bytes.\n", zstFilePath, zstdDataSize);
     }
 
-    zstdgpu_CountFramesAndBlocksInfo fbInfo;
+    zstdgpu_CountFramesAndBlocksInfo fbInfo = {};
     zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
     zstdgpu_FrameInfo *zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);

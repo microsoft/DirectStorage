@@ -95,33 +95,311 @@ static const int16_t kzstdgpuFseProbsDefault[] =
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1
 };
 
+struct zstdgpu_BlockInfo
+{
+    uint32_t litStreamCount;
+    uint32_t seqStreamCount;
+    uint32_t litByteCount;
+    uint32_t seqElemCount;
+};
+
+/**
+ *  This is copy and paste of `zstdgpu_ShaderEntry_ParseFrame` mostly due to a divergency of parameters
+ */
+static inline void zstdgpu_ParseFrame(zstdgpu_FrameInfo *outFrameInfo,
+                                      zstdgpu_BlockInfo *outBlockInfo,
+                                      zstdgpu_OffsetAndSize *outBlocksRAWRefs,
+                                      zstdgpu_OffsetAndSize *outBlocksRLERefs,
+                                      zstdgpu_OffsetAndSize *outBlocksCMPRefs,
+                                      zstdgpu_Forward_BitBuffer & bits)
+{
+    ZSTDGPU_ASSERT(NULL != outFrameInfo);
+
+    // "A content compressed by Zstandard is transformed into a Zstandard frame.
+    // Multiple frames can be appended into a single file or stream. A frame is
+    // totally independent, has a defined beginning and end, and a set of
+    // parameters which tells the decoder how to decompress it."
+
+    const uint32_t descriptor = zstdgpu_Forward_BitBuffer_Get(bits, 8);
+
+    // check "Reserved_bit"
+    // This bit is reserved for some future feature. Its value _must be zero_.
+    // A decoder compliant with this specification version must ensure it is not set.
+    // This bit may be used in a future revision, to signal a feature that must be interpreted to decode the frame correctly.
+    if (0 != zstdgpu_BitFieldExtractU32(descriptor, 3, 1))
+    {
+        ZSTDGPU_BREAK();
+    }
+
+    const uint32_t singleSegmentFlag = zstdgpu_BitFieldExtractU32(descriptor, 5, 1);
+    //
+    if (0 == singleSegmentFlag)
+    {
+        const uint32_t windowDescriptor = zstdgpu_Forward_BitBuffer_Get(bits, 8);
+
+        // "Provides guarantees on maximum back-reference distance that will be
+        // used within compressed data. This information is important for
+        // decoders to allocate enough memory.
+        //
+        // Bit numbers  7-3         2-0
+        // Field name   Exponent    Mantissa"
+        const uint32_t exponent = windowDescriptor >> 3;
+        const uint32_t mantissa = windowDescriptor & 7;
+
+        // Use the algorithm from the specification to compute window size
+        // https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor
+        const uint64_t windowBase = 1ull << (10 + exponent);
+        const uint64_t windowAdd = (windowBase / 8) * mantissa;
+        outFrameInfo->windowSize = windowBase + windowAdd;
+    }
+
+    const uint32_t dictionaryIdFlag = zstdgpu_BitFieldExtractU32(descriptor, 0, 2);
+    if (0 != dictionaryIdFlag)
+    {
+        // "This is a variable size field, which contains the ID of the
+        // dictionary required to properly decode the frame. Note that this
+        // field is optional. When it's not present, it's up to the caller to
+        // make sure it uses the correct dictionary. Format is little-endian."
+        const uint32_t byteCount[] = { 0u, 1u, 2u, 4u };
+        const uint32_t bitCount = byteCount[dictionaryIdFlag] * 8u;
+
+        outFrameInfo->dictionary = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
+    }
+
+    const uint32_t frameContentSizeFlag = zstdgpu_BitFieldExtractU32(descriptor, 6, 2);
+
+    if (0 != singleSegmentFlag || 0 != frameContentSizeFlag)
+    {
+        // "This is the original (uncompressed) size. This information is
+        // optional. The Field_Size is provided according to value of
+        // Frame_Content_Size_flag. The Field_Size can be equal to 0 (not
+        // present), 1, 2, 4 or 8 bytes. Format is little-endian."
+        //
+        // if frame_content_size_flag == 0 but single_segment_flag is set, we
+        // still have a 1 byte field
+        const uint32_t byteCount[] = { 1u, 2u, 4u, 8u };
+        const uint32_t bitCount = byteCount[frameContentSizeFlag] * 8u;
+
+        if (bitCount == 64)
+        {
+            outFrameInfo->uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+            outFrameInfo->uncompSize |= (uint64_t)zstdgpu_Forward_BitBuffer_Get(bits, 32) << 32;
+        }
+        else
+        {
+            outFrameInfo->uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
+        }
+
+        if (16u == bitCount)
+        {
+            // "When Field_Size is 2, the offset of 256 is added."
+            outFrameInfo->uncompSize += 256;
+        }
+    }
+
+    if (0 != singleSegmentFlag)
+    {
+        // "The Window_Descriptor byte is optional. It is absent when
+        // Single_Segment_flag is set. In this case, the maximum back-reference
+        // distance is the content size itself, which can be any value from 1 to
+        // 2^64-1 bytes (16 EB)."
+        outFrameInfo->windowSize = outFrameInfo->uncompSize;
+    }
+
+    //
+    // "A frame encapsulates one or multiple blocks. Each block can be
+    // compressed or not, and has a guaranteed maximum content size, which
+    // depends on frame parameters. Unlike frames, each block depends on
+    // previous blocks for proper decoding. However, each block can be
+    // decompressed without waiting for its successor, allowing streaming
+    // operations."
+    uint32_t lastBlock = 0;
+    do
+    {
+        // "Last_Block
+        //
+        // The lowest bit signals if this block is the last one. Frame ends
+        // right after this block.
+        //
+        // Block_Type and Block_Size
+        //
+        // The next 2 bits represent the Block_Type, while the remaining 21 bits
+        // represent the Block_Size. Format is little-endian."
+        zstdgpu_Forward_BitBuffer_Refill(bits, 1 + 2 + 21);
+
+        lastBlock = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 1);
+        const uint32_t blockType = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 2);
+        const uint32_t blockSize = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 21);
+        const uint32_t blockBase = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
+
+        if (/* Compressed block */ 2 == blockType)
+        {
+            if (outBlocksCMPRefs)
+            {
+                outBlocksCMPRefs[outFrameInfo->cmpBlockStart].offs = blockBase;
+                outBlocksCMPRefs[outFrameInfo->cmpBlockStart].size = blockSize;
+            }
+            outFrameInfo->cmpBlockStart += 1;
+
+            if (NULL == outBlockInfo)
+            {
+                zstdgpu_Forward_BitBuffer_Skip(bits, blockSize);
+            }
+            else
+            {
+                // Parse literal section header
+                zstdgpu_Forward_BitBuffer_Refill(bits, 32);
+                const uint32_t litBlockType  = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 2);
+                const uint32_t litBlockSzFmt = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 2);
+
+                uint32_t regeneratedSize = 0;
+                uint32_t compressedSize  = 0;
+
+                if (litBlockType <= 1)
+                {
+                    if (0 == zstdgpu_BitFieldExtractU32(litBlockSzFmt, 0, 1))
+                    {
+                        regeneratedSize = (zstdgpu_Forward_BitBuffer_Get(bits, 8 - 4) << 1) | zstdgpu_BitFieldExtractU32(litBlockSzFmt, 1, 1);
+                    }
+                    else if (litBlockSzFmt == 1)
+                    {
+                        regeneratedSize = zstdgpu_Forward_BitBuffer_Get(bits, 16 - 4);
+                    }
+                    else
+                    {
+                        regeneratedSize = zstdgpu_Forward_BitBuffer_Get(bits, 24 - 4);
+                    }
+
+                    compressedSize = (litBlockType == 0) ? regeneratedSize : 1;
+                }
+                else
+                {
+                    if (litBlockSzFmt <= 1)
+                    {
+                        zstdgpu_Forward_BitBuffer_Refill(bits, 10 + 10);
+                        regeneratedSize = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 10);
+                        compressedSize  = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 10);
+                    }
+                    else if (litBlockSzFmt == 2)
+                    {
+                        zstdgpu_Forward_BitBuffer_Refill(bits, 14 + 14);
+                        regeneratedSize = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 14);
+                        compressedSize  = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 14);
+                    }
+                    else
+                    {
+                        regeneratedSize = zstdgpu_Forward_BitBuffer_Get(bits, 18);
+                        compressedSize  = zstdgpu_Forward_BitBuffer_Get(bits, 18);
+                    }
+
+                    outBlockInfo->litByteCount += regeneratedSize;
+                    outBlockInfo->litStreamCount += 1;
+                }
+
+                // Skip past literal section data to reach sequence section header
+                if (compressedSize > 0)
+                {
+                    zstdgpu_Forward_BitBuffer_Skip(bits, compressedSize);
+                }
+
+                // Parse sequence count
+                const uint32_t seqByte0 = zstdgpu_Forward_BitBuffer_Get(bits, 8);
+                uint32_t seqCount = 0;
+                if (seqByte0 < 128)
+                {
+                    seqCount = seqByte0;
+                }
+                else if (seqByte0 < 255)
+                {
+                    seqCount = ((seqByte0 - 128) << 8) + zstdgpu_Forward_BitBuffer_Get(bits, 8);
+                }
+                else
+                {
+                    seqCount = zstdgpu_Forward_BitBuffer_Get(bits, 16) + 0x7F00;
+                }
+
+                outBlockInfo->seqElemCount += seqCount;
+                outBlockInfo->seqStreamCount += seqCount > 0 ? 1 : 0;
+
+                // Skip to the end of block
+                const uint32_t blockCur = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
+                const uint32_t blockEnd = blockBase + blockSize;
+                if (blockEnd > blockCur)
+                {
+                    zstdgpu_Forward_BitBuffer_Skip(bits, blockEnd - blockCur);
+                }
+                else
+                {
+                    ZSTDGPU_BREAK();
+                }
+            }
+        }
+        else if (/* RAW */ 0 == blockType)
+        {
+            if (outBlocksRAWRefs)
+            {
+                outBlocksRAWRefs[outFrameInfo->rawBlockStart].offs = blockBase;
+                // `Raw_Block` - this is an uncompressed block. `Block_Content` contains `Block_Size` bytes.
+                outBlocksRAWRefs[outFrameInfo->rawBlockStart].size = blockSize;
+            }
+            outFrameInfo->rawBlockStart += 1;
+            outFrameInfo->rawBlockBytesStart += blockSize;
+
+            zstdgpu_Forward_BitBuffer_Skip(bits, blockSize);
+        }
+        else if (/* RLE */ 1 == blockType)
+        {
+            if (outBlocksRLERefs)
+            {
+                outBlocksRLERefs[outFrameInfo->rleBlockStart].offs = zstdgpu_Forward_BitBuffer_Get(bits, 8);
+                // `RLE_Block` - this is a single byte, repeated `Block_Size` times. `Block_Content` consists of a single byte.
+                // On the decompression side, this byte must be repeated `Block_Size` times.
+                outBlocksRLERefs[outFrameInfo->rleBlockStart].size = blockSize;
+            }
+            outFrameInfo->rleBlockStart += 1;
+            outFrameInfo->rleBlockBytesStart += blockSize;
+
+            zstdgpu_Forward_BitBuffer_Skip(bits, 1);
+        }
+        else
+        {
+            ZSTDGPU_BREAK();
+        }
+    }
+    while (0 == lastBlock);
+
+    const uint32_t contentCheckSumFlag = zstdgpu_BitFieldExtractU32(descriptor, 2, 1);
+    if (0 != contentCheckSumFlag)
+    {
+        zstdgpu_Forward_BitBuffer_Refill(bits, 32);
+        zstdgpu_Forward_BitBuffer_Pop(bits, 32);
+    }
+}
+
 void zstdgpu_CountFramesAndBlocks(zstdgpu_CountFramesAndBlocksInfo *outInfo, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes)
 {
     uint32_t byteOfs = 0;
 
     zstdgpu_Forward_BitBuffer bits;
-    zstdgpu_FrameInfo frameInfo;
-    zstdgpu_OffsetAndSize unusedRawBlockSize;
-    zstdgpu_OffsetAndSize unusedRLEBlockSize;
-    zstdgpu_OffsetAndSize unusedCmpBlockSize;
-
-    outInfo->rawBlockCount  = 0;
-    outInfo->rleBlockCount  = 0;
-    outInfo->cmpBlockCount  = 0;
-    outInfo->frameCount     = 0;
-    outInfo->frameByteCount = 0;
-
     zstdgpu_Forward_BitBuffer_Init(bits, (uint32_t *)memoryBlock, contentSizeInBytes, memoryBlockSizeInBytes);
 
     while (byteOfs < bits.datasz)
     {
-        const uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+
+        /** skip over skipable frames */
+        while (magic >= 0x184D2A50 && magic <= 0x184D2A5F)
+        {
+            const uint32_t frameSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+            zstdgpu_Forward_BitBuffer_Skip(bits, frameSize);
+            byteOfs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
+            magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        }
+
         if (magic == 0xFD2FB528U)
         {
-            frameInfo.rawBlockStart = 0;
-            frameInfo.rleBlockStart = 0;
-            frameInfo.cmpBlockStart = 0;
-            zstdgpu_ShaderEntry_ParseFrame(frameInfo, &unusedRawBlockSize, &unusedRLEBlockSize, &unusedCmpBlockSize, NULL, NULL, NULL, NULL, NULL, NULL, bits, 0);
+            zstdgpu_FrameInfo frameInfo = {};
+            zstdgpu_ParseFrame(&frameInfo, NULL, NULL, NULL, NULL, bits);
 
             byteOfs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
 
@@ -143,33 +421,43 @@ void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu_FrameInfo *
     uint32_t byteOfs = 0;
 
     zstdgpu_Forward_BitBuffer bits;
-    zstdgpu_FrameInfo frameInfo;
-    zstdgpu_OffsetAndSize unusedRawBlockSize;
-    zstdgpu_OffsetAndSize unusedRLEBlockSize;
-    zstdgpu_OffsetAndSize unusedCmpBlockSize;
+    zstdgpu_FrameInfo frameInfo = {};
 
     zstdgpu_Forward_BitBuffer_Init(bits, (uint32_t*)memoryBlock, contentSizeInBytes, memoryBlockSizeInBytes);
 
-    frameInfo.rawBlockStart = 0;
-    frameInfo.rleBlockStart = 0;
-    frameInfo.cmpBlockStart = 0;
-
     for (uint32_t frameId = 0; frameId < frameCount; ++frameId)
     {
-        const uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+
+        /** skip over skipable frames */
+        while (magic >= 0x184D2A50 && magic <= 0x184D2A5F)
+        {
+            const uint32_t frameSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+            zstdgpu_Forward_BitBuffer_Skip(bits, frameSize);
+            byteOfs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
+            magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        }
+
         if (magic == 0xFD2FB528U)
         {
             outFrames[frameId].offs = byteOfs;
 
             // store prefix
-            outFrameInfos[frameId].rawBlockStart = frameInfo.rawBlockStart;
-            outFrameInfos[frameId].rleBlockStart = frameInfo.rleBlockStart;
-            outFrameInfos[frameId].cmpBlockStart = frameInfo.cmpBlockStart;
+            outFrameInfos[frameId].rawBlockStart      = frameInfo.rawBlockStart;
+            outFrameInfos[frameId].rleBlockStart      = frameInfo.rleBlockStart;
+            outFrameInfos[frameId].cmpBlockStart      = frameInfo.cmpBlockStart;
+            outFrameInfos[frameId].rawBlockBytesStart = frameInfo.rawBlockBytesStart;
+            outFrameInfos[frameId].rleBlockBytesStart = frameInfo.rleBlockBytesStart;
 
-            frameInfo.rawBlockStart = 0;
-            frameInfo.rleBlockStart = 0;
-            frameInfo.cmpBlockStart = 0;
-            zstdgpu_ShaderEntry_ParseFrame(frameInfo, &unusedRawBlockSize, &unusedRLEBlockSize, &unusedCmpBlockSize, NULL, NULL, NULL, NULL, NULL, NULL, bits, 0);
+            frameInfo.windowSize         = 0;
+            frameInfo.uncompSize         = 0;
+            frameInfo.dictionary         = 0;
+            frameInfo.rawBlockStart      = 0;
+            frameInfo.rleBlockStart      = 0;
+            frameInfo.cmpBlockStart      = 0;
+            frameInfo.rawBlockBytesStart = 0;
+            frameInfo.rleBlockBytesStart = 0;
+            zstdgpu_ParseFrame(&frameInfo, NULL, NULL, NULL, NULL, bits);
 
             // store just retrieved data
             outFrameInfos[frameId].windowSize = frameInfo.windowSize;
@@ -180,9 +468,11 @@ void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu_FrameInfo *
             outFrames[frameId].size = byteOfs - outFrames[frameId].offs;
 
             // accumulate previous prefix onto current frame's block counts
-            frameInfo.rawBlockStart += outFrameInfos[frameId].rawBlockStart;
-            frameInfo.rleBlockStart += outFrameInfos[frameId].rleBlockStart;
-            frameInfo.cmpBlockStart += outFrameInfos[frameId].cmpBlockStart;
+            frameInfo.rawBlockStart      += outFrameInfos[frameId].rawBlockStart;
+            frameInfo.rleBlockStart      += outFrameInfos[frameId].rleBlockStart;
+            frameInfo.cmpBlockStart      += outFrameInfos[frameId].cmpBlockStart;
+            frameInfo.rawBlockBytesStart += outFrameInfos[frameId].rawBlockBytesStart;
+            frameInfo.rleBlockBytesStart += outFrameInfos[frameId].rleBlockBytesStart;
         }
         else
         {
@@ -196,23 +486,70 @@ void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAn
     uint32_t byteOfs = 0;
 
     zstdgpu_Forward_BitBuffer bits;
-    zstdgpu_FrameInfo frameInfo;
-
     zstdgpu_Forward_BitBuffer_InitWithSegment(bits, (uint32_t *)memoryBlock, frames[frameIndex], memoryBlockSizeInBytes);
 
-    frameInfo.rawBlockStart = frameInfos[frameIndex].rawBlockStart;
-    frameInfo.rleBlockStart = frameInfos[frameIndex].rleBlockStart;
-    frameInfo.cmpBlockStart = frameInfos[frameIndex].cmpBlockStart;
+    uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
 
-    const uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+    /** skip over skipable frames */
+    while (magic >= 0x184D2A50 && magic <= 0x184D2A5F)
+    {
+        const uint32_t frameSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        zstdgpu_Forward_BitBuffer_Skip(bits, frameSize);
+        magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+    }
+
     if (magic == 0xFD2FB528U)
     {
+        zstdgpu_FrameInfo frameInfo = {};
+
+        const uint32_t rawBlockStart = frameInfos[frameIndex].rawBlockStart;
+        const uint32_t rleBlockStart = frameInfos[frameIndex].rleBlockStart;
+        const uint32_t cmpBlockStart = frameInfos[frameIndex].cmpBlockStart;
+
         const uint32_t byteEnd = frameIndex < frameCount - 1u ? frames[frameIndex + 1u].offs : contentSizeInBytes;
 
-        zstdgpu_ShaderEntry_ParseFrame(frameInfo, outBlocksRaw, outBlocksRLE, outBlocksCmp, NULL, NULL, NULL, NULL, NULL, NULL, bits, 1u);
+        zstdgpu_ParseFrame(&frameInfo, NULL, &outBlocksRaw[rawBlockStart], &outBlocksRLE[rleBlockStart], &outBlocksCmp[cmpBlockStart], bits);
         byteOfs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
 
         ZSTDGPU_ASSERT(byteOfs == byteEnd);
+    }
+}
+
+void zstdgpu_CountCompressedLiteralsAndSequences(zstdgpu_CountLiteralAndSequenceInfo *outInfo, const zstdgpu_OffsetAndSize *frames, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes)
+{
+    outInfo->compressedLiteralsByteCount = 0;
+    outInfo->sequenceCount              = 0;
+
+    uint32_t byteOfs = 0;
+
+    for (uint32_t frameIdx = 0; frameIdx < frameCount; ++frameIdx)
+    {
+        zstdgpu_Forward_BitBuffer bits;
+        zstdgpu_Forward_BitBuffer_InitWithSegment(bits, (uint32_t *)memoryBlock, frames[frameIdx], memoryBlockSizeInBytes);
+
+        uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+
+        /** skip over skipable frames */
+        while (magic >= 0x184D2A50 && magic <= 0x184D2A5F)
+        {
+            const uint32_t frameSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+            zstdgpu_Forward_BitBuffer_Skip(bits, frameSize);
+            magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+        }
+
+        if (magic == 0xFD2FB528U)
+        {
+            zstdgpu_FrameInfo frameInfo = {};
+            zstdgpu_BlockInfo blockInfo = {};
+
+            zstdgpu_ParseFrame(&frameInfo, &blockInfo, NULL, NULL, NULL, bits);
+            byteOfs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
+
+            ZSTDGPU_ASSERT(byteOfs == frames[frameIdx].offs + frames[frameIdx].size);
+
+            outInfo->compressedLiteralsByteCount += blockInfo.litByteCount;
+            outInfo->sequenceCount               += blockInfo.seqElemCount;
+        }
     }
 }
 
