@@ -606,7 +606,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdgpu_ResourceInfo_Stage_1_Init(&zstdInfo, zstdRawBlockCount, zstdRleBlockCount, zstdCmpBlockCount);
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
-    // Compute prefixes
+    // NOTE(pamartis):On CPU, lookback regions for PerFrameBlockCount{RAW,RLE,CMP,All} and
+    // PerFrameBlockSizes{RAW,RLE} do NOT need zeroing because prefix sums are computed sequentially
     {
         uint32_t prefix = 0;
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
@@ -663,6 +664,24 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         srt.initResourcesStage  = 1; // 1 means -- right before "parse compressed blocks"
         zstdgpu_ShaderEntry_InitResources(srt, 0);
 
+    }
+    // NOTE(pamartis): On GPU, `LitStreamEndPerHuffmanTable` is zeroed by an indirect Memset dispatch
+    // (via the `Memset_LitStreamEnd` dispatch slot, populated by `UpdateDispatchArgs` from Counters).
+    // On CPU, the Memset shader doesn't run, so we zero the buffer explicitly here.
+    // `LitStreamEndPerHuffmanTable` accumulates per-Huffman-table literal stream counts during
+    // `ParseCompressedBlocks` (via InterlockedAdd on GPU, sequential read-modify-write on CPU),
+    // so it must start at zero before the loop.
+    // `TableIndexLookback` does NOT need CPU zeroing because the CPU path in
+    // `ParseCompressedBlocks` uses `static` local variables instead of the decoupled lookback buffer
+    // (the lookback buffer read/write code is inside `#ifdef __hlsl_dx_compiler`, GPU-only).
+    {
+        memset(zstdCpu.LitStreamEndPerHuffmanTable, 0, zstdCmpBlockCount * sizeof(uint32_t));
+    }
+    // NOTE(pamartis): On GPU, PerFrameSeqStreamMinIdx is initialized to ~0u by a direct Memset dispatch.
+    // On CPU, we fill explicitly. Each entry stores the minimum compressed block index with non-zero
+    // sequence count per frame
+    {
+        memset(zstdCpu.PerFrameSeqStreamMinIdx, 0xFF, zstdFrameCount * sizeof(uint32_t));
     }
     // Parse Compressed Blocks on CPU with the same code we use on GPU
     {
