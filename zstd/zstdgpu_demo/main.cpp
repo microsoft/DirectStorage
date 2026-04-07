@@ -40,7 +40,7 @@
 #include <xmem.h>
 #endif
 
-#define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 2
+#define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 3
 #define D3D12AID_MAPPED_BUFFER_LATENCY_FRAME_MAX_COUNT 1
 #include <d3d12aid.h>
 
@@ -918,6 +918,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 #endif
 
     bool extMem = false;
+    bool blkCnt = false;
+    bool seqCnt = false;
     bool chkGpu = false;
     bool chkCpu = false;
     bool simGpu = false;
@@ -1030,6 +1032,15 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     extMem = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--blk-cnt"))
+                {
+                    blkCnt = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--seq-cnt"))
+                {
+                    seqCnt = true;
+                    blkCnt = true; // --seq-cnt implies --blk-cnt
+                }
                 else if (0 == wcscmp(argv[argi], L"--prf-lvl"))
                 {
                     nextPrfLevel = true;
@@ -1061,6 +1072,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--d3d-gfx                 [Optional] Enables D3D12 Graphics queue (DIRECT), otherwise COMPUTE (by default).\n");
                 debugPrint(L"\t--run-cnt <count>         [Optional] The number of times to repeat the experiment.\n");
                 debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them.\n");
+                debugPrint(L"\t--blk-cnt                 [Optional] Uses SetupFrameInfoConstants path (user-specified block counts from CPU pre-scan).\n");
+                debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
                 if (badArg)
@@ -1306,6 +1319,16 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         defaultUploadCallbackUserData[1] = (void *)zstdInFrameRefs;
         zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
     }
+    if (blkCnt)
+    {
+        zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
+        if (seqCnt)
+        {
+            zstdgpu_CountLiteralAndSequenceInfo blkInfo;
+            zstdgpu_CountCompressedLiteralsAndSequences(&blkInfo, zstdInFrameRefs, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes);
+            zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.compressedLiteralsByteCount, blkInfo.sequenceCount);
+        }
+    }
     zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
 
     ID3D12Heap *readbackHeap[3] = { NULL, NULL, NULL };
@@ -1422,7 +1445,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                             zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
                         );
 
-                        if (stageIndex < 2)
+                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
                         {
                             d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
                                 d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
@@ -1434,29 +1457,23 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 }
                 else
                 {
-                    d3d12aid_Timestamp_PushScope(Stage0_Stamp, timestamps, cmdList,
-                        zstdgpu_SubmitWithInteralMemory(perRequestContext, 0, cmdList);
-                    );
+                    uint32_t *const StageTimestampInt[3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
+                    uint32_t *const ReadbackTimestampInt[2] = { &Readback0_Stamp, &Readback1_Stamp };
+                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    {
+                        d3d12aid_Timestamp_PushScope(*StageTimestampInt[stageIndex], timestamps, cmdList,
+                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
+                        );
 
-                    d3d12aid_Timestamp_PushScope(Readback0_Stamp, timestamps, cmdList,
-                        d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                        d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                        cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
-                    );
-
-                    d3d12aid_Timestamp_PushScope(Stage1_Stamp, timestamps, cmdList,
-                        zstdgpu_SubmitWithInteralMemory(perRequestContext, 1, cmdList);
-                    );
-
-                    d3d12aid_Timestamp_PushScope(Readback1_Stamp, timestamps, cmdList,
-                        d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                        d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                        cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
-                    );
-
-                    d3d12aid_Timestamp_PushScope(Stage2_Stamp, timestamps, cmdList,
-                        zstdgpu_SubmitWithInteralMemory(perRequestContext, 2, cmdList);
-                    );
+                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
+                        {
+                            d3d12aid_Timestamp_PushScope(*ReadbackTimestampInt[stageIndex], timestamps, cmdList,
+                                d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
+                                d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+                                cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
+                            );
+                        }
+                    }
                 }
                 {
                     D3D12_RESOURCE_BARRIER barrier;

@@ -188,6 +188,31 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outS
 
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *framesMemory, uint32_t framesMemorySizeInBytes, struct ID3D12Resource *frames, uint32_t frameCount);
 
+/**
+ *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.
+ *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 1 uses these counts instead of
+ *              reading from GPU counter readback, enabling stages 0 and 1 to be recorded into
+ *              the same command list without a CPU fence.
+ *              Can be called before or after `zstdgpu_SetupInputs*` functions.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount);
+
+/**
+ *  @brief      Specifies the total decoded literal byte count and sequence count.
+ *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 2 uses these counts instead of
+ *              reading from GPU counter readback, enabling stages 1 and 2 to be recorded into
+ *              the same command list without a CPU fence.
+ *              Can be called before or after `zstdgpu_SetupInputs*` functions.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t literalsByteCount, uint32_t sequenceCount);
+
+/**
+ *  @brief      Returns 1 if a CPU readback/fence is required after the given stage before proceeding
+ *              to the next stage, 0 otherwise. Use this to determine whether to submit the command list
+ *              and wait for GPU idle between stages.
+ */
+ZSTDGPU_API uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
+
 ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,

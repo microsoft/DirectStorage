@@ -565,7 +565,7 @@ typedef struct zstdgpu_SRTs
     #undef  ZSTDGPU_SRT
 } zstdgpu_SRTs;
 
-static uint32_t zstdgpu_Count_SRTs(void)
+static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
 {
     uint32_t descCount = 0;
 
@@ -587,7 +587,18 @@ static uint32_t zstdgpu_Count_SRTs(void)
     #define ZSTDGPU_RW_TYPED_BUFFER_ALIAS_DECL_GLC(hlsl_type, type, name, alias, index) descCount += 1;
 
     #define ZSTDGPU_SRT(name, SRT) SRT
-        ZSTDGPU_SRT_LIST()
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_SRT_LIST_STAGE0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_SRT_LIST_STAGE1()
+        }
+        else
+        {
+            ZSTDGPU_SRT_LIST_STAGE2()
+        }
     #undef  ZSTDGPU_SRT
 
     #include "zstdgpu_srt_decl_undef.h"
@@ -608,7 +619,7 @@ static void zstdgpu_CreateByteAddressBufferSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpuDe
     device->CreateShaderResourceView(resource, &desc, cpuDest);
 }
 
-static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, const zstdgpu_ResourceInfo & resInfo, const zstdgpu_ResourceDataGpu & gpuResData)
+static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, const zstdgpu_ResourceInfo & resInfo, const zstdgpu_ResourceDataGpu & gpuResData, uint32_t stageIndex)
 {
     D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = d3d12aid_DescriptorHeap_GetGpuStart(srts.heap);
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = d3d12aid_DescriptorHeap_GetCpuStart(srts.heap);
@@ -664,7 +675,18 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     #define ZSTDGPU_RW_TYPED_BUFFER_ALIAS_DECL_GLC(hlsl_type, type, name, alias, index) ZSTDGPU_PUSH_TYPED_BUFFER(type, name, UAV)
 
     #define ZSTDGPU_SRT(name, SRT) srts.name##GpuHandle = gpuDest; SRT
-        ZSTDGPU_SRT_LIST()
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_SRT_LIST_STAGE0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_SRT_LIST_STAGE1()
+        }
+        else
+        {
+            ZSTDGPU_SRT_LIST_STAGE2()
+        }
     #undef  ZSTDGPU_SRT
 
     #include "zstdgpu_srt_decl_undef.h"
@@ -835,13 +857,14 @@ struct zstdgpu_PersistentContextImpl
     uint32_t                DecompressSequences_StreamsPerGroup;
 };
 
-enum zstdgpu_SetupInputsType
-{
-    kzstdgpu_SetupInputsType_Frames_CpuMemory   = 0,
-    kzstdgpu_SetupInputsType_Frames_GpuMemory   = 1,
+static const uint32_t kzstdgpu_SetupFlags_InputsCpuMemory       = (1u << 0);
+static const uint32_t kzstdgpu_SetupFlags_InputsGpuMemory       = (1u << 1);
+static const uint32_t kzstdgpu_SetupFlags_HasFrameInfoConstants = (1u << 2);
+static const uint32_t kzstdgpu_SetupFlags_HasBlockInfoConstants = (1u << 3);
 
-    kzstdgpu_SetupInputsType_Frames_Unknown     = 0x7fffffff
-};
+static const uint32_t kzstdgpu_SetupFlags_InputsMask = kzstdgpu_SetupFlags_InputsCpuMemory | kzstdgpu_SetupFlags_InputsGpuMemory;
+
+static uint32_t zstdgpu_HasFlag(uint32_t flags, uint32_t flag) { return (flags & flag) != 0; }
 
 struct zstdgpu_PerRequestContextImpl
 {
@@ -885,21 +908,12 @@ struct zstdgpu_PerRequestContextImpl
     uint32_t                zstdRleBlockCount;
     uint32_t                zstdCmpBlockCount;
 
-    uint32_t                zstdRawByteCount;
-    uint32_t                zstdRleByteCount;
-
     uint32_t                zstdUncompressedLiteralsByteCount;
     uint32_t                zstdUncompressedSequenceCount;
-    uint32_t                zstdSeqStreamCount;
 
-    ZSTDGPU_ENUM(SetupInputsType) setupInputsType;
+    uint32_t                setupFlags;
 };
 
-static uint32_t zstdgpu_GetStageCountFromSetupInputsType(ZSTDGPU_ENUM(SetupInputsType) type)
-{
-    ZSTDGPU_UNUSED(type);
-    return ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
-}
 
 uint32_t zstdgpu_GetPersistentContextRequiredMemorySizeInBytes(void)
 {
@@ -1138,12 +1152,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->zstdRawBlockCount                  = 0;
         context->zstdRleBlockCount                  = 0;
         context->zstdCmpBlockCount                  = 0;
-        context->zstdRawByteCount                   = 0;
-        context->zstdRleByteCount                   = 0;
         context->zstdUncompressedLiteralsByteCount  = 0;
         context->zstdUncompressedSequenceCount      = 0;
-        context->zstdSeqStreamCount                 = 0;
-        context->setupInputsType                    = ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_Unknown);
+        context->setupFlags = 0;
 
         *outPerRequestContext = context;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
@@ -1160,7 +1171,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPerRequestContext(void **outMemoryBlock, uin
     {
         d3d12aid_Timestamps_Release(&inPerRequestContext->timestamps);
 
-        const uint32_t stageCount = zstdgpu_GetStageCountFromSetupInputsType(inPerRequestContext->setupInputsType);
+        const uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
         for (uint32_t stage = 0; stage < stageCount; ++stage)
         {
             zstdgpu_ResourceDataGpu_Term(&inPerRequestContext->resData, stage);
@@ -1209,7 +1220,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupInputsAsFramesInCpuMemory(uint32_t *outStageCo
 
     if (proceed)
     {
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == inPerRequestContext->setupInputsType)
+        if (zstdgpu_HasFlag(inPerRequestContext->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory))
         {
             // NOTE(pamartis): we only release ID3D12Resource with the PerRequest context.
             // ID3D12Resource within zstdgpu_ResourceDataGpu will be released with the zstdgpu_ResourceDataGpu_Term call.
@@ -1224,7 +1235,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupInputsAsFramesInCpuMemory(uint32_t *outStageCo
         inPerRequestContext->compressedFramesRefs           = NULL;
         inPerRequestContext->zstdFrameCount                 = frameCount;
         inPerRequestContext->zstdCompressedFramesByteCount  = framesMemorySizeInBytes;
-        inPerRequestContext->setupInputsType                = ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_CpuMemory);
+        inPerRequestContext->setupFlags = (inPerRequestContext->setupFlags & ~kzstdgpu_SetupFlags_InputsMask) | kzstdgpu_SetupFlags_InputsCpuMemory;
 
         *outStageCount = 3u;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
@@ -1245,7 +1256,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outStageCo
 
     if (proceed)
     {
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == inPerRequestContext->setupInputsType)
+        if (zstdgpu_HasFlag(inPerRequestContext->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory))
         {
             // NOTE(pamartis): we only release ID3D12Resource with the PerRequest context.
             // ID3D12Resource within zstdgpu_ResourceDataGpu will be released with the zstdgpu_ResourceDataGpu_Term call.
@@ -1262,7 +1273,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outStageCo
         inPerRequestContext->compressedFramesRefs->AddRef();
         inPerRequestContext->zstdFrameCount                 = frameCount;
         inPerRequestContext->zstdCompressedFramesByteCount  = framesMemorySizeInBytes;
-        inPerRequestContext->setupInputsType                = ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory);
+        inPerRequestContext->setupFlags = (inPerRequestContext->setupFlags & ~kzstdgpu_SetupFlags_InputsMask) | kzstdgpu_SetupFlags_InputsGpuMemory;
 
         *outStageCount = 3u;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
@@ -1300,10 +1311,57 @@ ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupOutputs(zstdgpu_PerRequestContext 
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
+ZSTDGPU_ENUM(Status) zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (inPerRequestContext->thisMemoryBlock == (void *)inPerRequestContext);
+    proceed = proceed && (0 != rawBlockCount + rleBlockCount + cmpBlockCount);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        inPerRequestContext->zstdRawBlockCount          = rawBlockCount;
+        inPerRequestContext->zstdRleBlockCount          = rleBlockCount;
+        inPerRequestContext->zstdCmpBlockCount          = cmpBlockCount;
+        inPerRequestContext->setupFlags |= kzstdgpu_SetupFlags_HasFrameInfoConstants;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t literalsByteCount, uint32_t sequenceCount)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (inPerRequestContext->thisMemoryBlock == (void *)inPerRequestContext);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        inPerRequestContext->zstdUncompressedLiteralsByteCount = literalsByteCount;
+        inPerRequestContext->zstdUncompressedSequenceCount     = sequenceCount;
+        inPerRequestContext->setupFlags |= kzstdgpu_SetupFlags_HasBlockInfoConstants;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex)
+{
+    if (stageIndex == 0)
+    {
+        return zstdgpu_HasFlag(inPerRequestContext->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants) ? 0 : 1;
+    }
+    if (stageIndex == 1)
+    {
+        return zstdgpu_HasFlag(inPerRequestContext->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants) ? 0 : 1;
+    }
+    return 0;
+}
+
 ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
 {
     uint32_t proceed = 1;
-    uint32_t stageCount = zstdgpu_GetStageCountFromSetupInputsType(req->setupInputsType);
+    uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
 
     proceed = proceed && (NULL != outDefaultHeapByteCount);
     proceed = proceed && (NULL != outUploadHeapByteCount);
@@ -1322,19 +1380,27 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
         #define CNTRS(name) req->resData.gpu2Cpu.CountersCpu->name
         if (stageIndex == 0)
         {
-            zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == req->setupInputsType ? 1u : 0u);
+            zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
         }
         else if (stageIndex == 1)
         {
-            const uint32_t cntRaw = CNTRS(Blocks_RAW);
-            const uint32_t cntRle = CNTRS(Blocks_RLE);
-            const uint32_t cntCmp = CNTRS(Blocks_CMP);
+            uint32_t cntRaw, cntRle, cntCmp;
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+            {
+                cntRaw = req->zstdRawBlockCount;
+                cntRle = req->zstdRleBlockCount;
+                cntCmp = req->zstdCmpBlockCount;
+            }
+            else
+            {
+                cntRaw = CNTRS(Blocks_RAW);
+                cntRle = CNTRS(Blocks_RLE);
+                cntCmp = CNTRS(Blocks_CMP);
 
-            req->zstdRawBlockCount = cntRaw;
-            req->zstdRleBlockCount = cntRle;
-            req->zstdCmpBlockCount = cntCmp;
-            req->zstdRawByteCount  = CNTRS(BlocksBytes_RAW);
-            req->zstdRleByteCount  = CNTRS(BlocksBytes_RLE);
+                req->zstdRawBlockCount = cntRaw;
+                req->zstdRleBlockCount = cntRle;
+                req->zstdCmpBlockCount = cntCmp;
+            }
 
             ZSTDGPU_ASSERT(0 != cntRaw + cntRle + cntCmp);
 
@@ -1343,19 +1409,26 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
         }
         else if (stageIndex == 2)
         {
-            const uint32_t cntLit = CNTRS(HUF_Streams_DecodedBytes);
-            const uint32_t cntSeq = CNTRS(Seq_Streams_DecodedItems);
-
-            req->zstdUncompressedLiteralsByteCount = cntLit;
-            req->zstdUncompressedSequenceCount     = cntSeq;
-            req->zstdSeqStreamCount                = CNTRS(Seq_Streams);
+            uint32_t cntLit, cntSeq;
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+            {
+                cntLit = req->zstdUncompressedLiteralsByteCount;
+                cntSeq = req->zstdUncompressedSequenceCount;
+            }
+            else
+            {
+                cntLit = CNTRS(HUF_Streams_DecodedBytes);
+                cntSeq = CNTRS(Seq_Streams_DecodedItems);
+                req->zstdUncompressedLiteralsByteCount = cntLit;
+                req->zstdUncompressedSequenceCount     = cntSeq;
+            }
 
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
         *outDefaultHeapByteCount            = req->resInfo.gpuOnly_ByteCount[stageIndex];
         *outUploadHeapByteCount             = req->resInfo.cpu2Gpu_ByteCount[stageIndex];
         *outReadbackHeapByteCount           = req->resInfo.gpu2Cpu_ByteCount[stageIndex];
-        *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs();
+        *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs_Stage(stageIndex);
 
         #undef CNTRS
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
@@ -1380,7 +1453,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
                                                 uint32_t shaderVisibileHeapOffsetInDescriptors)
 {
     uint32_t proceed = 1;
-    uint32_t stageCount = zstdgpu_GetStageCountFromSetupInputsType(req->setupInputsType);
+    uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
     uint32_t defaultHeapMemReq = 0;
     uint32_t uploadHeapMemReq = 0;
     uint32_t readbackHeapMemReq = 0;
@@ -1427,7 +1500,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
         req->resData.gpu2Cpu_HeapOffset[stageIndex] = readbackHeap_OffsetInBytes;
 
         zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, stageIndex);
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == req->setupInputsType && stageIndex == 0u)
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) && stageIndex == 0u)
         {
             zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
         }
@@ -1440,7 +1513,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
         // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
         if (stageIndex == 0)
         {
-            if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_CpuMemory) == req->setupInputsType)
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
             {
                 req->uploadCallback(req->resData.cpu2Gpu.CompressedDataCpu, req->zstdCompressedFramesByteCount, req->resData.cpu2Gpu.FramesRefsCpu, req->zstdFrameCount, req->uploadUserdata);
             }
@@ -1451,7 +1524,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
         req->srts.heap = shaderVisibleHeap;
         req->srts.heap->AddRef();
         req->srts.heapOffset = shaderVisibileHeapOffsetInDescriptors;
-        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData);
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, stageIndex);
 
         if (stageIndex == 0)
         {
@@ -1474,7 +1547,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
 ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext req, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList)
 {
     uint32_t proceed = 1;
-    uint32_t stageCount = zstdgpu_GetStageCountFromSetupInputsType(req->setupInputsType);
+    uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
 
     proceed = proceed && (req->thisMemoryBlock == (void *)req);
     proceed = proceed && (req->zstdFrameCount > 0);
@@ -1492,19 +1565,27 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         // NOTE(pamartis): Recompute memory information for a given stage
         if (stageIndex == 0)
         {
-            zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == req->setupInputsType ? 1u : 0u);
+            zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
         }
         else if (stageIndex == 1)
         {
-            const uint32_t cntRaw = CNTRS(Blocks_RAW);
-            const uint32_t cntRle = CNTRS(Blocks_RLE);
-            const uint32_t cntCmp = CNTRS(Blocks_CMP);
+            uint32_t cntRaw, cntRle, cntCmp;
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+            {
+                cntRaw = req->zstdRawBlockCount;
+                cntRle = req->zstdRleBlockCount;
+                cntCmp = req->zstdCmpBlockCount;
+            }
+            else
+            {
+                cntRaw = CNTRS(Blocks_RAW);
+                cntRle = CNTRS(Blocks_RLE);
+                cntCmp = CNTRS(Blocks_CMP);
 
-            req->zstdRawBlockCount = cntRaw;
-            req->zstdRleBlockCount = cntRle;
-            req->zstdCmpBlockCount = cntCmp;
-            req->zstdRawByteCount = CNTRS(BlocksBytes_RAW);
-            req->zstdRleByteCount = CNTRS(BlocksBytes_RLE);
+                req->zstdRawBlockCount = cntRaw;
+                req->zstdRleBlockCount = cntRle;
+                req->zstdCmpBlockCount = cntCmp;
+            }
 
             ZSTDGPU_ASSERT(0 != cntRaw + cntRle + cntCmp);
 
@@ -1512,12 +1593,19 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         }
         else if (stageIndex == 2)
         {
-            const uint32_t cntLit = CNTRS(HUF_Streams_DecodedBytes);
-            const uint32_t cntSeq = CNTRS(Seq_Streams_DecodedItems);
-
-            req->zstdUncompressedLiteralsByteCount = cntLit;
-            req->zstdUncompressedSequenceCount     = cntSeq;
-            req->zstdSeqStreamCount                = CNTRS(Seq_Streams);
+            uint32_t cntLit, cntSeq;
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+            {
+                cntLit = req->zstdUncompressedLiteralsByteCount;
+                cntSeq = req->zstdUncompressedSequenceCount;
+            }
+            else
+            {
+                cntLit = CNTRS(HUF_Streams_DecodedBytes);
+                cntSeq = CNTRS(Seq_Streams_DecodedItems);
+                req->zstdUncompressedLiteralsByteCount = cntLit;
+                req->zstdUncompressedSequenceCount     = cntSeq;
+            }
 
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
@@ -1534,7 +1622,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         // NOTE(pamartis): try re-creating heap and then resources (will trigger only if they were released or never created)
         zstdgpu_ResourceDataGpu_InitHeap(&req->resData, &req->resInfo, req->device, stageIndex);
         zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, stageIndex);
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_GpuMemory) == req->setupInputsType && stageIndex == 0u)
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) && stageIndex == 0u)
         {
             zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
         }
@@ -1547,7 +1635,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
         if (stageIndex == 0)
         {
-            if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_CpuMemory) == req->setupInputsType)
+            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
             {
                 req->uploadCallback(req->resData.cpu2Gpu.CompressedDataCpu, req->zstdCompressedFramesByteCount, req->resData.cpu2Gpu.FramesRefsCpu, req->zstdFrameCount, req->uploadUserdata);
             }
@@ -1556,11 +1644,20 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
 
         if (NULL == req->srts.heap)
         {
-            req->srts.heap = d3d12aid_DescriptorHeap_Create(req->device, zstdgpu_Count_SRTs(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+            const uint32_t srtCount = zstdgpu_Count_SRTs_Stage(0) + zstdgpu_Count_SRTs_Stage(1) + zstdgpu_Count_SRTs_Stage(2);
+            req->srts.heap = d3d12aid_DescriptorHeap_Create(req->device, srtCount, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
             req->srts.heapOffset = 0;
         }
+        {
+            uint32_t offset = 0;
+            for (uint32_t s = 0; s < stageIndex; ++s)
+            {
+                offset += zstdgpu_Count_SRTs_Stage(s);
+            }
+            req->srts.heapOffset = offset;
+        }
         #undef CNTRS
-        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData);
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, stageIndex);
 
         if (stageIndex == 0)
         {
@@ -1682,6 +1779,15 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
     }                                                                           \
     while (0)
 
+#define BIND_RS_PS_SRT_EX(psoName, srtName)                                     \
+    do                                                                          \
+    {                                                                           \
+        d3d12aid_ComputeRsPs_Set(&req->psoName, cmdList);                       \
+        cmdList->SetDescriptorHeaps(1, &req->srts.heap);                        \
+        cmdList->SetComputeRootDescriptorTable(0, req->srts.srtName##GpuHandle);\
+    }                                                                           \
+    while (0)
+
 static void zstdgpu_Dispatch32Bit(ID3D12GraphicsCommandList *cmdList, uint32_t tgCount, uint32_t rootParameterIndex, uint32_t rootParameterOffset)
 {
 #ifdef _GAMING_XBOX
@@ -1715,7 +1821,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         #define zstdgpu_PushUpload(name) cmdList->CopyResource(req->resData.gpuOnly.name, req->resData.cpu2Gpu.name)
 
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_CpuMemory) == req->setupInputsType)
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
         {
             zstdgpu_PushUpload(CompressedData);
             zstdgpu_PushUpload(FramesRefs);
@@ -1725,7 +1831,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         setResourceState(barriers, 0, req->resData.gpuOnly.FseProbsDefault, COPY_DEST, NON_PIXEL_SHADER_RESOURCE);
         uploadBarrierCount += 1;
-        if (ZSTDGPU_ENUM_CONST(SetupInputsType_Frames_CpuMemory) == req->setupInputsType)
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
         {
             setResourceState(barriers, 1, req->resData.gpuOnly.CompressedData, COPY_DEST, NON_PIXEL_SHADER_RESOURCE);
             setResourceState(barriers, 2, req->resData.gpuOnly.FramesRefs, COPY_DEST, NON_PIXEL_SHADER_RESOURCE);
@@ -1739,7 +1845,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         const uint32_t cmpBlockCount = 0;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 0]");
-        BIND_RS_PS_SRT(InitResources);
+        BIND_RS_PS_SRT_EX(InitResources, InitResources_S0);
         cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
         cmdList->SetComputeRoot32BitConstant(1, cmpBlockCount, 1);
         cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
@@ -1811,7 +1917,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         const uint32_t countBlocksOnly = 1;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Count Blocks]");
-        BIND_RS_PS_SRT(ParseFrames);
+        BIND_RS_PS_SRT_EX(ParseFrames, ParseFrames_S0);
         cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 0);
         cmdList->SetComputeRoot32BitConstant(1, req->resInfo.CompressedData_ByteSize, 1);
         cmdList->SetComputeRoot32BitConstant(1, countBlocksOnly, 2);
@@ -1899,14 +2005,19 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Count] and [Parse Compressed Blocks]");
         D3D12_RESOURCE_BARRIER barriers[5];
         // last read by [Update Dispatch Args :: Stage 0]
-        // next read by [Readback Counters :: After Block Count]
-        setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+        // next read by [Readback Counters :: After Block Count] or [Init Resources :: Stage 1]
+        if (zstdgpu_IsReadbackRequired(req, 0))
+        {
+            setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+        }
+        else
+        {
+            setResourceUavSync(barriers, 0, req->resData.gpuOnly.Counters);
+        }
         // last written by [PrefixSum :: Block Counts]
-        // next read by [Parse Compressed Blocks]
-        setResourceUavToSrvSync(barriers, 1, req->resData.gpuOnly.PerFrameBlockCountCMP);
-        // last written by [PrefixSum :: Block Counts]
-        // next read by [Prefix Sequence Offsets] and [Finalise Sequence Offsets]
-        setResourceUavToSrvSync(barriers, 2, req->resData.gpuOnly.PerFrameBlockCountAll);
+        // next bound to [Parse Compressed Blocks] as UAV
+        setResourceUavSync(barriers, 1, req->resData.gpuOnly.PerFrameBlockCountCMP);
+        setResourceUavSync(barriers, 2, req->resData.gpuOnly.PerFrameBlockCountAll);
         // last written by [Update Dispatch Args :: Stage 0]
         // next read by ExecuteIndirect calls as argument/count buffers
         setResourceState(barriers, 3, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
@@ -1914,6 +2025,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
+    if (zstdgpu_IsReadbackRequired(req, 0))
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Readback Counters :: After Block Count]");
         zstdgpu_PushReadback(Counters);
@@ -1929,7 +2041,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
                                      + req->zstdCmpBlockCount;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 1]");
-        BIND_RS_PS_SRT(InitResources);
+        BIND_RS_PS_SRT_EX(InitResources, InitResources_S1);
         cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
         cmdList->SetComputeRoot32BitConstant(1, req->zstdCmpBlockCount, 1);
         cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
@@ -1992,7 +2104,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         const uint32_t countBlocksOnly = 0;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Collect Blocks]");
-        BIND_RS_PS_SRT(ParseFrames);
+        BIND_RS_PS_SRT_EX(ParseFrames, ParseFrames_S1);
         cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 0);
         cmdList->SetComputeRoot32BitConstant(1, req->resInfo.CompressedData_ByteSize, 1);
         cmdList->SetComputeRoot32BitConstant(1, countBlocksOnly, 2);
@@ -2003,7 +2115,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Parse Compressed Blocks] and [Memcpy RAW blocks, Memset RLE blocks]");
-        D3D12_RESOURCE_BARRIER barriers[14];
+        D3D12_RESOURCE_BARRIER barriers[15];
 
         uint32_t bc = 0;
         if (req->zstdCmpBlockCount > 0)
@@ -2011,63 +2123,60 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // last written by [Parse Frames :: Collect Blocks]
             // next written/updated by [Parse Compressed Blocks] with non-intersecting memory ranges with [Parse Frames :: Collect Blocks]
             // so TODO: check if can remove
-            setResourceUavSync(barriers, bc + 0, req->resData.gpuOnly.Counters);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
             // last written by [Init Resources :: Stage 1]
             // next written/updated by [Parse Compressed Blocks] with non-intersecting memory range with [Init Resources :: Stage 1]
             // so TODO: check if can remove
-            setResourceUavSync(barriers, bc + 1, req->resData.gpuOnly.FseInfos);
-            setResourceUavSync(barriers, bc + 2, req->resData.gpuOnly.FseProbs);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseInfos);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseProbs);
             // last written by [InitResources :: Memset :: Stage 1]
             // next written/updated by [Parse Compressed Blocks] -- both "lookback" and "prefix" sub-buffers
-            setResourceUavSync(barriers, bc + 3, req->resData.gpuOnly.TableIndexLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.TableIndexLookback);
             // last written by [InitResources :: Memset :: Stage 1]
             // next written/updated by [Parse Compressed Blocks]
-            setResourceUavSync(barriers, bc + 4, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
-            setResourceUavSync(barriers, bc + 5, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Parse Compressed Blocks]
-            setResourceUavToSrvSync(barriers, bc + 6, req->resData.gpuOnly.BlocksCMPRefs);
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksCMPRefs);
+            // last bound as UAV to [Parse Frames :: Collect Blocks]
+            // next read by [Parse Compressed Blocks]
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountCMP);
+            // last bound as UAV to [Parse Frames :: Collect Blocks]
+            // next read by [Prefix Sequence Offsets] and [Finalise Sequence Offsets]
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountAll);
             // last written by [InitResources :: Memset :: Stage 1]
             // next written/updated by [Parse Compressed Blocks]
-            setResourceUavSync(barriers, bc + 7, req->resData.gpuOnly.SeqCountPrefixLookback);
-            setResourceUavSync(barriers, bc + 8, req->resData.gpuOnly.BlockSeqCountPrefixLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.SeqCountPrefixLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSeqCountPrefixLookback);
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Parse Compressed Blocks] -- to be able to get global index to index into BlockSizePrefix
-            setResourceUavToSrvSync(barriers, bc + 9, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock);
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock);
             // last written by [Parse Frames :: Collect Blocks]
             // next written/updated by [Parse Compressed Blocks] - sets literal size to be uncompressed block size
-            setResourceUavSync(barriers, bc + 10, req->resData.gpuOnly.BlockSizePrefix);
-            //
-            // [NOTE] PerFrameBlockCountCMP is bound as UAV by [InitResources :: Memset :: Stage 1] and [Parse Frames],
-            // and later read by ParseCompressedBlocks as SRV, so we transition to read state
-            setResourceUavToSrvSync(barriers, bc + 11, req->resData.gpuOnly.PerFrameBlockCountCMP);
-            bc += 12;
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
         }
         else
         {
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Readback Counters :: After Block Parse] and updated by [Update Dispatch Args]
-            setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.Counters);
-            bc += 1;
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.Counters);
 
             // last written by [Parse Frames :: Collect Blocks]
             // next updated by [Prefix Block Sizes]
-            setResourceUavSync(barriers, bc + 0, req->resData.gpuOnly.BlockSizePrefix);
-            bc += 1;
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
         }
 
         // last written by [Parse Frames :: Collect Blocks]
         // next read by [Memcpy RAW blocks, Memset RLE blocks]
         if (req->zstdRawBlockCount > 0)
         {
-            setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.BlocksRAWRefs);
-            bc += 1;
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksRAWRefs);
         }
 
-        if (req->zstdRleByteCount > 0)
+        if (req->zstdRleBlockCount > 0)
         {
-            setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.BlocksRLERefs);
-            bc += 1;
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksRLERefs);
         }
 
         cmdList->ResourceBarrier(bc, barriers);
@@ -2093,8 +2202,15 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
         D3D12_RESOURCE_BARRIER barriers[11];
         // last written by [Parse Compressed Blocks]
-        // next read by [Readback Counters :: After Block Parse] and updated by [Update Dispatch Args]
-        setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+        // next read by [Readback Counters :: After Block Parse] or [Update Dispatch Args]
+        if (zstdgpu_IsReadbackRequired(req, 1))
+        {
+            setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+        }
+        else
+        {
+            setResourceUavSync(barriers, 0, req->resData.gpuOnly.Counters);
+        }
         // last written by [Parse Compressed Blocks]
         // next written/updated by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         setResourceUavSync(barriers, 1, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
@@ -2121,6 +2237,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
+    if (zstdgpu_IsReadbackRequired(req, 1))
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Readback Counters :: After Block Parse]");
         zstdgpu_PushReadback(Counters);
@@ -2580,7 +2697,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
-    if (req->zstdRawByteCount > 0 || req->zstdRleByteCount > 0)
+    if (req->zstdRawBlockCount > 0 || req->zstdRleBlockCount > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Memcpy RAW blocks, Memset RLE blocks]");
         d3d12aid_ComputeRsPs_Set(&req->MemsetMemcpy, cmdList);
@@ -2588,7 +2705,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->SetComputeRootDescriptorTable(0, req->srts.MemsetMemcpyGpuHandle);
         ZSTDGPU_KERNEL_SCOPE(MemcpyRAW_MemsetRLE, cmdList,
         {
-            if (req->zstdRawByteCount > 0)
+            if (req->zstdRawBlockCount > 0)
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RawBlockSizePrefix->GetGPUVirtualAddress());
                 cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRAW->GetGPUVirtualAddress());
@@ -2600,7 +2717,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
                 cmdList->SetComputeRoot32BitConstant(5, 1 /* flags */, 4);
                 zstdgpu_DispatchIndirect(cmdList, MemsetMemcpy, MemcpyRAW);
             }
-            if (req->zstdRleByteCount > 0)
+            if (req->zstdRleBlockCount > 0)
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RleBlockSizePrefix->GetGPUVirtualAddress());
                 cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRLE->GetGPUVirtualAddress());
@@ -2620,7 +2737,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[2];
         uint32_t bc = 0;
-        if (req->zstdRawByteCount > 0 || req->zstdRleByteCount > 0)
+        if (req->zstdRawBlockCount > 0 || req->zstdRleBlockCount > 0)
         {
             // in case if the number of RAW+RLE blocks > 0, [Memcpy RAW blocks, Memset RLE blocks] has written to 'UnCompressedFramesData'
             // next read by [Execute Sequences]
@@ -2672,35 +2789,39 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
 {
     // NOTE(pamartis): these are required to make sure D3D12 validation doesn't complain about state mismatch when
-    // Read-only resource from the last stage get a NON_PS_RESOURCE state as a result of promotion from COMMON state
+    // Read-only resource from the last stage (== 2) get a NON_PS_RESOURCE state as a result of promotion from COMMON state
+    // (which happens in case if the stage prior to it (==1) is submitted in a separate CommandList/ExecuteCommandList)
     // and then used as COPY_SOURCE for debug readback
     D3D12_RESOURCE_BARRIER barriers[13];
     uint32_t bc = 0;
-    setResourceState(barriers, 0, req->resData.gpuOnly.PerFrameBlockCountCMP, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-    setResourceState(barriers, 1, req->resData.gpuOnly.PerFrameBlockCountAll, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-    setResourceState(barriers, 2, req->resData.gpuOnly.PerFrameBlockSizesRAW, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-    setResourceState(barriers, 3, req->resData.gpuOnly.PerFrameBlockSizesRLE, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-    setResourceState(barriers, 4, req->resData.gpuOnly.PerFrameSeqStreamMinIdx, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-    bc += 5;
-    if (req->zstdCmpBlockCount > 0)
+    if (zstdgpu_IsReadbackRequired(req, 1))
     {
-        setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        setResourceState(barriers, bc + 1, req->resData.gpuOnly.PerSeqStreamSeqStart, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        bc += 2;
-    }
-    if (req->zstdRawBlockCount > 0)
-    {
-        setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRawBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        setResourceState(barriers, bc + 1, req->resData.gpuOnly.RawBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        setResourceState(barriers, bc + 2, req->resData.gpuOnly.BlocksRAWRefs, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        bc += 3;
-    }
-    if (req->zstdRleBlockCount > 0)
-    {
-        setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRleBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        setResourceState(barriers, bc + 1, req->resData.gpuOnly.RleBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        setResourceState(barriers, bc + 2, req->resData.gpuOnly.BlocksRLERefs, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
-        bc += 3;
+        setResourceState(barriers, 0, req->resData.gpuOnly.PerFrameBlockCountCMP, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+        setResourceState(barriers, 1, req->resData.gpuOnly.PerFrameBlockCountAll, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+        setResourceState(barriers, 2, req->resData.gpuOnly.PerFrameBlockSizesRAW, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+        setResourceState(barriers, 3, req->resData.gpuOnly.PerFrameBlockSizesRLE, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+        setResourceState(barriers, 4, req->resData.gpuOnly.PerFrameSeqStreamMinIdx, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+        bc += 5;
+        if (req->zstdCmpBlockCount > 0)
+        {
+            setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            setResourceState(barriers, bc + 1, req->resData.gpuOnly.PerSeqStreamSeqStart, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            bc += 2;
+        }
+        if (req->zstdRawBlockCount > 0)
+        {
+            setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRawBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            setResourceState(barriers, bc + 1, req->resData.gpuOnly.RawBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            setResourceState(barriers, bc + 2, req->resData.gpuOnly.BlocksRAWRefs, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            bc += 3;
+        }
+        if (req->zstdRleBlockCount > 0)
+        {
+            setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRleBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            setResourceState(barriers, bc + 1, req->resData.gpuOnly.RleBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            setResourceState(barriers, bc + 2, req->resData.gpuOnly.BlocksRLERefs, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
+            bc += 3;
+        }
     }
 
     if (bc > 0)
