@@ -1231,15 +1231,6 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     }
 
 #ifdef __hlsl_dx_compiler
-
-    // Setup default FSE-indices we are going to propagate
-    uint32_t4 fseTableIndices = uint32_t4(
-        outBlockData.fseTableIndexHufW,
-        outBlockData.fseTableIndexLLen,
-        outBlockData.fseTableIndexOffs,
-        outBlockData.fseTableIndexMLen
-    );
-
     const uint32_t blockSize = min(WaveGetLaneCount(), kzstdgpu_TgSizeX_ParseCompressedBlocks);
 
     const uint32_t thisBlockIndex = WaveReadLaneFirst(threadId / blockSize);
@@ -1489,7 +1480,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     static uint32_t lastOffsIndex = kzstdgpu_FseProbTableIndex_Unused;
     static uint32_t lastMLenIndex = kzstdgpu_FseProbTableIndex_Unused;
 
-    #define PROPAGATE_FSE_HUF_INDEX(name) \
+    #define CPU_PROPAGATE_FSE_INDEX(name) \
         if (outBlockData.fseTableIndex##name < kzstdgpu_FseProbTableIndex_Repeat)    \
         {                                                                           \
             last##name##Index = outBlockData.fseTableIndex##name;                   \
@@ -1499,12 +1490,12 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             outBlockData.fseTableIndex##name = last##name##Index;                   \
         }
 
-    PROPAGATE_FSE_HUF_INDEX(HufW)
-    PROPAGATE_FSE_HUF_INDEX(LLen)
-    PROPAGATE_FSE_HUF_INDEX(Offs)
-    PROPAGATE_FSE_HUF_INDEX(MLen)
+    CPU_PROPAGATE_FSE_INDEX(HufW)
+    CPU_PROPAGATE_FSE_INDEX(LLen)
+    CPU_PROPAGATE_FSE_INDEX(Offs)
+    CPU_PROPAGATE_FSE_INDEX(MLen)
 
-    #undef PROPAGATE_FSE_HUF_INDEX
+    #undef CPU_PROPAGATE_FSE_INDEX
 #endif
 
     if (0 != seqCount)
