@@ -324,7 +324,7 @@ static inline void zstdgpu_ParseFrame(zstdgpu_FrameInfo *outFrameInfo,
                 // Skip to the end of block
                 const uint32_t blockCur = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
                 const uint32_t blockEnd = blockBase + blockSize;
-                if (blockEnd > blockCur)
+                if (blockEnd >= blockCur)
                 {
                     zstdgpu_Forward_BitBuffer_Skip(bits, blockEnd - blockCur);
                 }
@@ -356,10 +356,12 @@ static inline void zstdgpu_ParseFrame(zstdgpu_FrameInfo *outFrameInfo,
                 // On the decompression side, this byte must be repeated `Block_Size` times.
                 outBlocksRLERefs[outFrameInfo->rleBlockStart].size = blockSize;
             }
+            else
+            {
+                zstdgpu_Forward_BitBuffer_Skip(bits, 1);
+            }
             outFrameInfo->rleBlockStart += 1;
             outFrameInfo->rleBlockBytesStart += blockSize;
-
-            zstdgpu_Forward_BitBuffer_Skip(bits, 1);
         }
         else
         {
@@ -378,6 +380,12 @@ static inline void zstdgpu_ParseFrame(zstdgpu_FrameInfo *outFrameInfo,
 
 void zstdgpu_CountFramesAndBlocks(zstdgpu_CountFramesAndBlocksInfo *outInfo, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes)
 {
+    outInfo->rawBlockCount  = 0;
+    outInfo->rleBlockCount  = 0;
+    outInfo->cmpBlockCount  = 0;
+    outInfo->frameCount     = 0;
+    outInfo->frameByteCount = 0;
+
     uint32_t byteOfs = 0;
 
     zstdgpu_Forward_BitBuffer bits;
@@ -517,7 +525,7 @@ void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAn
 
 void zstdgpu_CountCompressedLiteralsAndSequences(zstdgpu_CountLiteralAndSequenceInfo *outInfo, const zstdgpu_OffsetAndSize *frames, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes)
 {
-    outInfo->compressedLiteralsByteCount = 0;
+    outInfo->decodedLiteralsByteCount = 0;
     outInfo->sequenceCount              = 0;
 
     uint32_t byteOfs = 0;
@@ -547,7 +555,7 @@ void zstdgpu_CountCompressedLiteralsAndSequences(zstdgpu_CountLiteralAndSequence
 
             ZSTDGPU_ASSERT(byteOfs == frames[frameIdx].offs + frames[frameIdx].size);
 
-            outInfo->compressedLiteralsByteCount += blockInfo.litByteCount;
+            outInfo->decodedLiteralsByteCount    += blockInfo.litByteCount;
             outInfo->sequenceCount               += blockInfo.seqElemCount;
         }
     }

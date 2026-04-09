@@ -96,7 +96,7 @@ ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstd
 
 struct zstdgpu_CountLiteralAndSequenceInfo
 {
-    uint32_t compressedLiteralsByteCount;
+    uint32_t decodedLiteralsByteCount;
     uint32_t sequenceCount;
 };
 
