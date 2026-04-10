@@ -62,21 +62,35 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
         globalBlockGlobalOffset = ZstdInBlockSizePrefix[globalBlockIdx - 1];
     }
 
-    const uint32_t frameIdx = zstdgpu_BinarySearch(ZstdInPerFrameBlockCountAll, 0, Constants.frameCount, globalBlockIdx);
+    zstdgpu_OffsetAndSize dstFrameOffsetAndSize;
+    uint32_t dstBlockOffset;
 
-    const uint32_t frameFirstGlobalBlockIdx = ZstdInPerFrameBlockCountAll[frameIdx];
-
-    uint32_t frameFirstBlockGlobalOffset = 0;
-    [branch] if (frameFirstGlobalBlockIdx > 0)
-    {
-        frameFirstBlockGlobalOffset = ZstdInBlockSizePrefix[frameFirstGlobalBlockIdx - 1];
+    #define GET_FRAME_INFO(optGlobalBlockIdx) {                                                                                 \
+        const uint32_t frameIdx = zstdgpu_BinarySearch(ZstdInPerFrameBlockCountAll, 0, Constants.frameCount, optGlobalBlockIdx);\
+        const uint32_t frameFirstGlobalBlockIdx = ZstdInPerFrameBlockCountAll[frameIdx];                    \
+        uint32_t frameFirstBlockGlobalOffset = 0;                                                           \
+        [branch] if (frameFirstGlobalBlockIdx > 0)                                                          \
+        {                                                                                                   \
+            frameFirstBlockGlobalOffset = ZstdInBlockSizePrefix[frameFirstGlobalBlockIdx - 1];              \
+        }                                                                                                   \
+        const uint32_t frameRelativeBlockOffset = globalBlockGlobalOffset - frameFirstBlockGlobalOffset;    \
+        dstFrameOffsetAndSize = ZstdInUnCompressedFramesRefs[frameIdx];                                     \
+        dstBlockOffset = dstFrameOffsetAndSize.offs + frameRelativeBlockOffset;                             \
     }
 
-    const uint32_t frameRelativeBlockOffset = globalBlockGlobalOffset - frameFirstBlockGlobalOffset;
+    // Detect the (likely) case all threads store within the same block, and if so use SMEM to do the frame lookup.
+    // Waterfall loop instead of if/else might be better.
+    if (WaveActiveAllEqual(globalBlockIdx))
+    {
+        const uint32_t uniformGlobalBlockIdx = WaveReadLaneFirst(globalBlockIdx);
+        GET_FRAME_INFO(uniformGlobalBlockIdx);
+    }
+    else
+    {
+        GET_FRAME_INFO(globalBlockIdx);
+    }
 
-    const zstdgpu_OffsetAndSize dstFrameOffsetAndSize = ZstdInUnCompressedFramesRefs[frameIdx];
-
-    const uint32_t dstBlockOffset = dstFrameOffsetAndSize.offs + frameRelativeBlockOffset;
+    #undef GET_FRAME_INFO
 
     if (byteIdx >= dstFrameOffsetAndSize.size)
         return;
