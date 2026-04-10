@@ -200,7 +200,9 @@ static inline uint32_t zstdgpu_OrderedAppendIndex(ZSTDGPU_RW_BUFFER_GLC(uint32_t
     return zstdgpu_GlobalExclusivePrefixSum(lookback, WavePrefixSum(threadAppendCnt), threadAppendCnt, globalThreadIdx, tgroupThreadCnt);
 }
 
-static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSequence, uint32_t start, uint32_t count, uint32_t threadId)
+// Returns leftmost index i such that inserting target _after_ i would keep the array sorted ascending.
+// Assumes such an i in [start, start + count) exists.
+static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSequence, uint32_t start, uint32_t count, uint32_t target)
 {
     uint32_t rangeBase = start;
     uint32_t rangeSize = count;
@@ -211,7 +213,7 @@ static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSe
         const uint32_t rangeNext = rangeBase + rangeTest;
 
         const uint32_t value = sortedSequence[rangeNext];
-        rangeBase = threadId < value ? rangeBase : rangeNext;
+        rangeBase = target < value ? rangeBase : rangeNext;
         rangeSize -= rangeTest;
     }
 
@@ -418,6 +420,13 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         lastBlock = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 1);
         const uint32_t blockType = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 2);
         const uint32_t blockSize = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 21);
+
+        // The main zstd decompressor seems to accept 0-size RLE and Raw blocks.
+        // ZstdGpuMemsetMemcpy.hlsl doesn't handle that so don't track them.
+        if (blockSize == 0)
+        {
+            continue;
+        }
 
         const bool isRaw = 0 == blockType;
         const bool isRle = 1 == blockType;
