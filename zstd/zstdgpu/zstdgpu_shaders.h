@@ -200,8 +200,8 @@ static inline uint32_t zstdgpu_OrderedAppendIndex(ZSTDGPU_RW_BUFFER_GLC(uint32_t
     return zstdgpu_GlobalExclusivePrefixSum(lookback, WavePrefixSum(threadAppendCnt), threadAppendCnt, globalThreadIdx, tgroupThreadCnt);
 }
 
-// Returns leftmost index i such that inserting target _after_ i would keep the array sorted ascending.
-// Assumes such an i in [start, start + count) exists.
+// Given sorted ascending array A where A[i] is the beginning of an interval that ends (exclusive) at A[i+1] (or at "infinity" for i+1 == N),
+// finds assumed to exist index of interval that contains target.
 static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSequence, uint32_t start, uint32_t count, uint32_t target)
 {
     uint32_t rangeBase = start;
@@ -421,13 +421,6 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         const uint32_t blockType = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 2);
         const uint32_t blockSize = zstdgpu_Forward_BitBuffer_GetNoRefill(bits, 21);
 
-        // The main zstd decompressor seems to accept 0-size RLE and Raw blocks.
-        // ZstdGpuMemsetMemcpy.hlsl doesn't handle that so don't track them.
-        if (blockSize == 0)
-        {
-            continue;
-        }
-
         const bool isRaw = 0 == blockType;
         const bool isRle = 1 == blockType;
         const bool isCmp = 2 == blockType;
@@ -441,6 +434,14 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         {
             blockOffs = zstdgpu_Forward_BitBuffer_GetByteOffset(bits);
             zstdgpu_Forward_BitBuffer_Skip(bits, blockSize);
+        }
+
+        // The main zstd decompressor seems to accept zero-decompressed-size RLE and Raw blocks.
+        // ZstdGpuMemsetMemcpy.hlsl doesn't handle that so don't track them.
+        // For RLE blocks this needs to be after extracting the value byte from the stream.
+        if (blockSize == 0)
+        {
+            continue;
         }
 
         if (0 != outputBlockInfo)

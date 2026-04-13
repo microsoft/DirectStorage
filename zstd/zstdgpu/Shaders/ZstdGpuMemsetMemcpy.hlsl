@@ -117,8 +117,8 @@ void main(uint2 groupId : SV_GroupId, uint threadIdInGroup : SV_GroupThreadId)
     }
     else
     {
-        // After using SMEM to narrow down the block range, do one VMEM load per-wave into LDS,
-        // which should be sufficient since we only kept nonzero-size RLE/Raw blocks.
+        // After using SMEM to narrow down the block range, do one VMEM load per-wave into LDS.
+        // One VMEM load should be sufficient since we only tracked nonzero-decompressed-size RLE/Raw blocks in ParseFrame().
         lds[threadIdInGroup] = ZstdInBlockSizePrefixTyped[zstdgpu_MinU32(groupLeaderBlockIdx + threadIdInGroup, Constants.blockCount - 1)];
         GroupMemoryBarrierWithGroupSync();
         if (i >= Constants.workItemCount)
@@ -126,17 +126,19 @@ void main(uint2 groupId : SV_GroupId, uint threadIdInGroup : SV_GroupThreadId)
 
         const uint32_t numActiveBlocks = zstdgpu_MinU32(Constants.blockCount - groupLeaderBlockIdx, numActiveThreads);
         uint32_t blockIdx;
-        // Instead of a binary search or linear search from the end, this does a linear search from the beginning.
-        // This has a more complicated loop exit test then linear search from end, but assuming block sizes are
-        // large compared to kzstdgpu_TgSizeX_MemsetMemcpy, the loop should iterate much less times.
+        // Instead of a binary search, do a linear search under the assumption it should usually have few iterations.
+        // Find leftmost interval such that (i >= lds[r] && i < lds[r + 1]).
+        // We already know i >= lds[0] (since that is true for the i of the group leader).
+        uint32_t intervalEnd = iEndForGroupLeaderBlock;
         for (uint32_t r = 0;; ++r)
         {
-            if ((r == numActiveBlocks - 1) ||
-                (i >= lds[r] && i < lds[r + 1]))
+            const uint32_t nextIterEnd = lds[(r + 2u) % kzstdgpu_TgSizeX_MemsetMemcpy];
+            if (r == numActiveBlocks - 1 || i < intervalEnd)
             {
                 blockIdx = groupLeaderBlockIdx + r;
                 break;
             }
+            intervalEnd = nextIterEnd;
         }
 
         GetDestinationInfo(blockIdx, i, blockRef, byteIdx, dstFrameOffsetAndSize, dstBlockOffset);
