@@ -39,7 +39,7 @@ StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : re
 
 StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t7);
 
-groupshared uint32_t lds[kzstdgpu_TgSizeX_MemsetMemcpy];
+groupshared uint32_t GS_GroupLeaderBlockIdx;
 
 inline void GetDestinationInfo(uint32_t blockIdx,
                                uint32_t i,
@@ -91,13 +91,21 @@ void main(uint2 groupId : SV_GroupId, uint threadIdInGroup : SV_GroupThreadId)
     if (threadIdInGroup == 0)
     {
         const uint32_t groupLeaderBlockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, Constants.blockCount, scaledGroupId + 0);
-        lds[0] = groupLeaderBlockIdx;
+        GS_GroupLeaderBlockIdx = groupLeaderBlockIdx;
     }
     GroupMemoryBarrierWithGroupSync();
-    const uint32_t groupLeaderBlockIdx = WaveReadLaneFirst(lds[0]);
+    if (i >= Constants.workItemCount)
+        return;
 
-    uint32_t iEndForGroupLeaderBlock = uint32_t(-1);
-    [branch] if (Constants.blockCount >= 2)
+    const uint32_t groupLeaderBlockIdx = WaveReadLaneFirst(GS_GroupLeaderBlockIdx);
+
+    // We do a linear search within the tail, instead of a binary search.
+    // If we did the latter and we ensured we don't track zero-decompress-size Raw/RLE blocks,
+    // this could be min()'d with numActiveThreads:
+    const uint32_t tailBlockCount = Constants.blockCount - groupLeaderBlockIdx; // includes leader
+
+    uint32_t iEndForGroupLeaderBlock = uint32_t(-1); // "infinity"
+    [branch] if (tailBlockCount >= 2)
     {
         iEndForGroupLeaderBlock = ZstdInBlockSizePrefixTyped[groupLeaderBlockIdx + 1];
     }
@@ -110,37 +118,28 @@ void main(uint2 groupId : SV_GroupId, uint threadIdInGroup : SV_GroupThreadId)
     // The else path can handle any case, but try to pass a uniform blockIdx to GetDestinationInfo.
     if (iEndForGroupLeaderBlock >= scaledGroupId + numActiveThreads)
     {
-        if (i >= Constants.workItemCount)
-            return;
-
         GetDestinationInfo(groupLeaderBlockIdx, i, blockRef, byteIdx, dstFrameOffsetAndSize, dstBlockOffset);
     }
     else
     {
-        // After using SMEM to narrow down the block range, do one VMEM load per-wave into LDS.
-        // One VMEM load should be sufficient since we only tracked nonzero-decompressed-size RLE/Raw blocks in ParseFrame().
-        lds[threadIdInGroup] = ZstdInBlockSizePrefixTyped[zstdgpu_MinU32(groupLeaderBlockIdx + threadIdInGroup, Constants.blockCount - 1)];
-        GroupMemoryBarrierWithGroupSync();
-        if (i >= Constants.workItemCount)
-            return;
-
-        const uint32_t numActiveBlocks = zstdgpu_MinU32(Constants.blockCount - groupLeaderBlockIdx, numActiveThreads);
-        uint32_t blockIdx;
-        // Instead of a binary search, do a linear search under the assumption it should usually have few iterations.
-        // Find leftmost interval such that (i >= lds[r] && i < lds[r + 1]).
-        // We already know i >= lds[0] (since that is true for the i of the group leader).
+        // Instead of a binary search, do a linear search under the assumption it should usually have few iterations
+        // from the start of the tail.
         uint32_t intervalEnd = iEndForGroupLeaderBlock;
-        for (uint32_t r = 0;; ++r)
+        uint32_t r = 1; // index of interval _end_ relative to group leader index
+        for (;;)
         {
-            const uint32_t nextIterEnd = lds[(r + 2u) % kzstdgpu_TgSizeX_MemsetMemcpy];
-            if (r == numActiveBlocks - 1 || i < intervalEnd)
+            if (i < intervalEnd)
             {
-                blockIdx = groupLeaderBlockIdx + r;
                 break;
             }
-            intervalEnd = nextIterEnd;
+            ++r;
+            if (r >= tailBlockCount)
+            {
+                break;
+            }
+            intervalEnd = ZstdInBlockSizePrefixTyped[groupLeaderBlockIdx + r];
         }
-
+        const uint32_t blockIdx = groupLeaderBlockIdx + (r - 1);
         GetDestinationInfo(blockIdx, i, blockRef, byteIdx, dstFrameOffsetAndSize, dstBlockOffset);
     }
 

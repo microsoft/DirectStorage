@@ -436,14 +436,6 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
             zstdgpu_Forward_BitBuffer_Skip(bits, blockSize);
         }
 
-        // The main zstd decompressor seems to accept zero-decompressed-size RLE and Raw blocks.
-        // ZstdGpuMemsetMemcpy.hlsl doesn't handle that so don't track them.
-        // For RLE blocks this needs to be after extracting the value byte from the stream.
-        if (blockSize == 0)
-        {
-            continue;
-        }
-
         if (0 != outputBlockInfo)
         {
             const uint32_t blockIndex = outFrameInfo.rawBlockStart
