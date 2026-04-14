@@ -1326,7 +1326,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         {
             zstdgpu_CountLiteralAndSequenceInfo blkInfo;
             zstdgpu_CountCompressedLiteralsAndSequences(&blkInfo, zstdInFrameRefs, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes);
-            zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.compressedLiteralsByteCount, blkInfo.sequenceCount);
+            zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.decodedLiteralsByteCount, blkInfo.sequenceCount);
         }
     }
     zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
