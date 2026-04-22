@@ -2257,7 +2257,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
-        D3D12_RESOURCE_BARRIER barriers[11];
+        D3D12_RESOURCE_BARRIER barriers[12];
         uint32_t bc = 0;
         // last written by [Parse Compressed Blocks]
         // next read by [Readback Counters :: After Block Parse] or [Update Dispatch Args]
