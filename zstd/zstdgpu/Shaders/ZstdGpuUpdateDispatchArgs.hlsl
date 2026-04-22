@@ -21,24 +21,36 @@
 RWStructuredBuffer<zstdgpu_Counters>  ZstdCounters     : register(u0);
 RWStructuredBuffer<uint32_t>          ZstdDispatchArgs : register(u1);
 RWStructuredBuffer<uint32_t>          ZstdDispatchCnts : register(u2);
+RWStructuredBuffer<uint32_t>          ZstdPredicate    : register(u3);
 
 struct UpdateDispatchArgsConsts
 {
     uint32_t decompressSequences_StreamsPerTG;
     uint32_t stage;
+
+    uint32_t cmpBlockCountMax;
+    uint32_t rawBlockCountMax;
+    uint32_t rleBlockCountMax;
+    uint32_t litByteCountMax;
+    uint32_t seqElemCountMax;
 };
 
 ConstantBuffer<UpdateDispatchArgsConsts> Consts : register(b0);
 
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), RootConstants(b0, num32BitConstants=7)")]
 [numthreads(1, 1, 1)]
 void main()
 {
     if (Consts.stage == 0)
     {
         // Block-count dependent slots (valid after Stage 0 ParseFrames :: Count Blocks)
-        const uint32_t allBlockCount = ZstdCounters[0].Blocks_RAW + ZstdCounters[0].Blocks_RLE + ZstdCounters[0].Blocks_CMP;
         const uint32_t cmpBlockCount = ZstdCounters[0].Blocks_CMP;
+        const uint32_t rawBlockCount = ZstdCounters[0].Blocks_RAW;
+        const uint32_t rleBlockCount = ZstdCounters[0].Blocks_RLE;
+        const uint32_t allBlockCount = rawBlockCount
+                                     + rleBlockCount
+                                     + cmpBlockCount;
+
 
         // the arguments dependent on block counts/sizes -- these could be computed after ParseFrames
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_ComputePrefixSum,         cmpBlockCount,                            kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
@@ -52,9 +64,20 @@ void main()
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_TableIndexLookback,  zstdgpu_GetHufFseTableIndexLookbackUInt32Count(cmpBlockCount),   kzstdgpu_TgSizeX_Memset);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_LitStreamEnd,        cmpBlockCount + zstdgpu_GetLookbackBlockCount(cmpBlockCount),    kzstdgpu_TgSizeX_Memset);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_AllBlockLookback,    zstdgpu_GetLookbackBlockCount(allBlockCount),                    kzstdgpu_TgSizeX_Memset);
+
+        const uint32_t predicateMask = 0
+                                     | (cmpBlockCount > Consts.cmpBlockCountMax ? (1u << 0u) : 0u)
+                                     | (rawBlockCount > Consts.rawBlockCountMax ? (1u << 1u) : 0u)
+                                     | (rleBlockCount > Consts.rleBlockCountMax ? (1u << 2u) : 0u);
+
+        ZstdPredicate[0] = predicateMask; // lower 32-bits of Stage 1 predicate
+        ZstdPredicate[2] = predicateMask; // lower 32-bits of Stage 2 predicate
     }
     else if (Consts.stage == 1)
     {
+        const uint32_t litByteCount = ZstdCounters[0].HUF_Streams_DecodedBytes;
+        const uint32_t seqElemCount = ZstdCounters[0].Seq_Streams_DecodedItems;
+
         // the arguments dependent on various streams counts that are part of compressed blocks -- these could be computed after ParseCompressedBlocks
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_FseHufW,                  ZstdCounters[0].FseHufW,                  1);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_FseLLen,                  ZstdCounters[0].FseLLen,                  1);
@@ -76,6 +99,12 @@ void main()
 
         // Update derived counter field in Counters (kept for shader bounds checks)
         ZstdCounters[0].DecompressSequencesGroups = ZSTDGPU_TG_COUNT(ZstdCounters[0].Seq_Streams, Consts.decompressSequences_StreamsPerTG);
+
+        const uint32_t predicateMask = 0
+                                     | (litByteCount > Consts.litByteCountMax ? (1u << 3u) : 0u)
+                                     | (seqElemCount > Consts.seqElemCountMax ? (1u << 4u) : 0u);
+
+        ZstdPredicate[2] = ZstdPredicate[2] | predicateMask; // lower 32-bits of Stage 2 predicate
     }
     else
     {

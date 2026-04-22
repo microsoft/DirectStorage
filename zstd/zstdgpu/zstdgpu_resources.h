@@ -41,7 +41,8 @@
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )
+    ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )   \
+    ZSTDGPU_BUFFER(uint64_t                                 , Predicate                     )   \
 
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2() /* empty so far*/
 
@@ -270,6 +271,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
+    const uint32_t Predicate_Count = 2;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
