@@ -931,8 +931,8 @@ struct zstdgpu_PerRequestContextImpl
     uint32_t                zstdRleBlockCountMax;
     uint32_t                zstdCmpBlockCountMax;
 
-    uint32_t                zstdUncompressedLiteralsByteCount;
-    uint32_t                zstdUncompressedSequenceCount;
+    uint32_t                zstdUncompressedLitByteCountMax;
+    uint32_t                zstdUncompressedSeqElemCountMax;
 
     uint32_t                setupFlags;
 };
@@ -1175,8 +1175,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->zstdRawBlockCountMax               = 0;
         context->zstdRleBlockCountMax               = 0;
         context->zstdCmpBlockCountMax               = 0;
-        context->zstdUncompressedLiteralsByteCount  = 0;
-        context->zstdUncompressedSequenceCount      = 0;
+        context->zstdUncompressedLitByteCountMax    = 0;
+        context->zstdUncompressedSeqElemCountMax    = 0;
         context->setupFlags = 0;
 
         *outPerRequestContext = context;
@@ -1360,8 +1360,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestContext i
 
     if (proceed)
     {
-        inPerRequestContext->zstdUncompressedLiteralsByteCount = literalsByteCount;
-        inPerRequestContext->zstdUncompressedSequenceCount     = sequenceCount;
+        inPerRequestContext->zstdUncompressedLitByteCountMax = literalsByteCount;
+        inPerRequestContext->zstdUncompressedSeqElemCountMax = sequenceCount;
         inPerRequestContext->setupFlags |= kzstdgpu_SetupFlags_HasBlockInfoConstants;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
@@ -1435,15 +1435,15 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
             uint32_t cntLit, cntSeq;
             if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
             {
-                cntLit = req->zstdUncompressedLiteralsByteCount;
-                cntSeq = req->zstdUncompressedSequenceCount;
+                cntLit = req->zstdUncompressedLitByteCountMax;
+                cntSeq = req->zstdUncompressedSeqElemCountMax;
             }
             else
             {
                 cntLit = CNTRS(HUF_Streams_DecodedBytes);
                 cntSeq = CNTRS(Seq_Streams_DecodedItems);
-                req->zstdUncompressedLiteralsByteCount = cntLit;
-                req->zstdUncompressedSequenceCount     = cntSeq;
+                req->zstdUncompressedLitByteCountMax = cntLit;
+                req->zstdUncompressedSeqElemCountMax = cntSeq;
             }
 
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
@@ -1499,7 +1499,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
     {
         if (stageIndex == 2)
         {
-            ZSTDGPU_ASSERT(req->zstdUncompressedLiteralsByteCount == 0 || req->zstdCmpBlockCountMax > 0);
+            ZSTDGPU_ASSERT(req->zstdUncompressedLitByteCountMax == 0 || req->zstdCmpBlockCountMax > 0);
         }
 
         zstdgpu_ResourceDataGpu_Term(&req->resData, stageIndex);
@@ -1619,15 +1619,15 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
             uint32_t cntLit, cntSeq;
             if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
             {
-                cntLit = req->zstdUncompressedLiteralsByteCount;
-                cntSeq = req->zstdUncompressedSequenceCount;
+                cntLit = req->zstdUncompressedLitByteCountMax;
+                cntSeq = req->zstdUncompressedSeqElemCountMax;
             }
             else
             {
                 cntLit = CNTRS(HUF_Streams_DecodedBytes);
                 cntSeq = CNTRS(Seq_Streams_DecodedItems);
-                req->zstdUncompressedLiteralsByteCount = cntLit;
-                req->zstdUncompressedSequenceCount     = cntSeq;
+                req->zstdUncompressedLitByteCountMax = cntLit;
+                req->zstdUncompressedSeqElemCountMax = cntSeq;
             }
 
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
@@ -2638,7 +2638,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         bc += 7;
         // last written/updated by [Init Huffman Table and Decompress Literals]
         // next read by [Execute Sequences]
-        if (req->zstdUncompressedLiteralsByteCount > 0)
+        if (req->zstdUncompressedLitByteCountMax > 0)
         {
             setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.DecompressedLiterals);
             bc += 1;
@@ -2809,7 +2809,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute Dest Sequence Offsets]");
         BIND_RS_PS_SRT(ComputeDestSequenceOffsets);
 
-        zstdgpu_Dispatch32Bit(cmdList, ZSTDGPU_TG_COUNT(req->zstdUncompressedSequenceCount, 256), 1, 0);
+        zstdgpu_Dispatch32Bit(cmdList, ZSTDGPU_TG_COUNT(req->zstdUncompressedSeqElemCountMax, 256), 1, 0);
 
         PIXEndEvent(cmdList);
     }
