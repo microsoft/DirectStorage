@@ -1918,7 +1918,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         D3D12_RESOURCE_BARRIER barriers[8];
         uint32_t bc = 0;
 
-        // last written by [Init Resources :: Stage 0] and [InitResources :: Memset :: Stage 0]
+        // last written by [Init Resources :: Stage 0]
         // next written/atomically updated by [Parse Frames :: Count Blocks]
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
         // last written by [InitResources :: Memset :: Stage 0]
@@ -2027,25 +2027,28 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Count] and [Parse Compressed Blocks]");
         D3D12_RESOURCE_BARRIER barriers[5];
+        uint32_t bc = 0;
         // last read by [Update Dispatch Args :: Stage 0]
         // next read by [Readback Counters :: After Block Count] or [Init Resources :: Stage 1]
         if (zstdgpu_IsReadbackRequired(req, 0))
         {
-            setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+            setResourceState(barriers, bc ++, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
         }
         else
         {
-            setResourceUavSync(barriers, 0, req->resData.gpuOnly.Counters);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
         }
         // last written by [PrefixSum :: Block Counts]
         // next bound to [Parse Compressed Blocks] as UAV
-        setResourceUavSync(barriers, 1, req->resData.gpuOnly.PerFrameBlockCountCMP);
-        setResourceUavSync(barriers, 2, req->resData.gpuOnly.PerFrameBlockCountAll);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountCMP);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountAll);
         // last written by [Update Dispatch Args :: Stage 0]
         // next read by ExecuteIndirect calls as argument/count buffers
-        setResourceState(barriers, 3, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
-        setResourceState(barriers, 4, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
-        cmdList->ResourceBarrier(_countof(barriers), barriers);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+
+        ZSTDGPU_ASSERT(bc <= _countof(barriers));
+        cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
     if (zstdgpu_IsReadbackRequired(req, 0))
@@ -2226,40 +2229,42 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
         D3D12_RESOURCE_BARRIER barriers[11];
+        uint32_t bc = 0;
         // last written by [Parse Compressed Blocks]
         // next read by [Readback Counters :: After Block Parse] or [Update Dispatch Args]
         if (zstdgpu_IsReadbackRequired(req, 1))
         {
-            setResourceState(barriers, 0, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
+            setResourceState(barriers, bc ++, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
         }
         else
         {
-            setResourceUavSync(barriers, 0, req->resData.gpuOnly.Counters);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
         }
         // last written by [Parse Compressed Blocks]
         // next written/updated by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
-        setResourceUavSync(barriers, 1, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
-        setResourceUavSync(barriers, 2, req->resData.gpuOnly.LitGroupEndPerHuffmanTable);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitGroupEndPerHuffmanTable);
         // last written by [Parse Compressed Blocks]
         // next written/updated by [Decompress Sequences]
-        setResourceUavSync(barriers, 3, req->resData.gpuOnly.BlockSizePrefix);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
         // last written by [Parse Compressed Blocks]
         // next read by [Prefix Sequence Offsets]
-        setResourceUavToSrvSync(barriers, 4, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+        setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
 
         // last written by [Init Resources :: Stage 1] with zero values to lookback data
         // next written by [Decompress Sequences] with encoded "final" offsets per block
-        setResourceUavSync(barriers, 5, req->resData.gpuOnly.PerSeqStreamFinalOffset1);
-        setResourceUavSync(barriers, 6, req->resData.gpuOnly.PerSeqStreamFinalOffset2);
-        setResourceUavSync(barriers, 7, req->resData.gpuOnly.PerSeqStreamFinalOffset3);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerSeqStreamFinalOffset1);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerSeqStreamFinalOffset2);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerSeqStreamFinalOffset3);
         // last written by [Parse Compressed Blocks]
         // next read by [Finalise Sequence Offsets]
-        setResourceUavToSrvSync(barriers, 8, req->resData.gpuOnly.PerSeqStreamSeqStart);
+        setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerSeqStreamSeqStart);
         // last read by ExecuteIndirect as INDIRECT_ARGUMENT
         // next written by [Update Dispatch Args :: Stage 2]
-        setResourceState(barriers, 9, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
-        setResourceState(barriers, 10, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
-        cmdList->ResourceBarrier(_countof(barriers), barriers);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
+        ZSTDGPU_ASSERT(bc <= _countof(barriers));
+        cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
     if (zstdgpu_IsReadbackRequired(req, 1))
@@ -2290,14 +2295,17 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
         D3D12_RESOURCE_BARRIER barriers[3];
+        uint32_t bc = 0;
         // last written by [Update Dispatch Args]
         // next read by [Compute `Per-Huffman Table` Literal Stream Count Prefix] via ExecuteIndirect
-        setResourceState(barriers, 0, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
-        setResourceState(barriers, 1, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
         // last written by [Update Dispatch Args]
         // next read/written by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
-        setResourceUavSync(barriers, 2, req->resData.gpuOnly.Counters);
-        cmdList->ResourceBarrier(_countof(barriers), barriers);
+        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
+
+        ZSTDGPU_ASSERT(bc <= _countof(barriers));
+        cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
 
