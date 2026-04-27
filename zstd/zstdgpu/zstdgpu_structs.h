@@ -313,11 +313,9 @@ typedef struct zstdgpu_Counters
     uint32_t HUF_Streams;
     uint32_t RAW_Streams;
     uint32_t RLE_Streams;
-    uint32_t Blocks_RAW;
-    uint32_t Blocks_RLE;
+    uint32_t Blocks_RR;
     uint32_t Blocks_CMP;
-    uint32_t BlocksBytes_RAW;
-    uint32_t BlocksBytes_RLE;
+    uint32_t BlocksBytes_RR;
     uint32_t Frames;
     uint32_t Frames_UncompressedByteSize;
     uint32_t Frames_ExecuteSequences;
@@ -337,14 +335,13 @@ static const uint32_t kzstdgpu_DispatchSlot_FinaliseSequenceOffsets      = 10;
 static const uint32_t kzstdgpu_DispatchSlot_PrefixSequenceOffsets        = 11;
 static const uint32_t kzstdgpu_DispatchSlot_ComputePrefixSum             = 12;
 static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizes             = 13;
-static const uint32_t kzstdgpu_DispatchSlot_MemcpyRAW                    = 14;
-static const uint32_t kzstdgpu_DispatchSlot_MemsetRLE                    = 15;
-static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 16;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 17;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_TableIndexLookback    = 18;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_LitStreamEnd          = 19;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 20;
-static const uint32_t kzstdgpu_DispatchSlot_Count                        = 21;
+static const uint32_t kzstdgpu_DispatchSlot_MemsetMemcpyRR               = 14;
+static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 15;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 16;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_TableIndexLookback    = 17;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_LitStreamEnd          = 18;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 19;
+static const uint32_t kzstdgpu_DispatchSlot_Count                        = 20;
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_DispatchSlot_CmdsPerSlot                  = 1;
@@ -662,6 +659,9 @@ static inline uint32_t zstdgpu_MaxI32(int32_t a, int32_t b)
     return a > b ? a : b;
 #endif
 }
+
+// Our max total compressed input or decompressed output bytes is <= INT_MAX.
+static const uint32_t kzstdgpu_RLEBlock_OffsetFlag = 1u << 31;
 
 static inline uint32_t zstdgpu_Encode30BitLookbackSelf(uint32_t x)
 {
@@ -1553,22 +1553,17 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 0)    \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_FrameInfo                    , Frames                        , 1)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRAW         , 2)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRLE         , 3)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 4)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 5)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRAW         , 6)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRLE         , 7)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RawBlockSizePrefix            , 8)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RleBlockSizePrefix            , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRR          , 2)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 3)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 4)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRR          , 5)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RRBlockSizePrefix             , 6)    \
     \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRAWRefs                 ,10)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRLERefs                 ,11)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 ,12)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               ,13)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRawBlock   ,14)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRleBlock   ,15)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,16)
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRRRefs                  , 7)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 , 8)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRRBlock    ,10)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,11)
 
 #define ZSTDGPU_INIT_RESOURCES_SRT()                                                                    \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbsDefault               , 0)    \
