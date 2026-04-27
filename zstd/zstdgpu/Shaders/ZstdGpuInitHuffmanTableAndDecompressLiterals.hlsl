@@ -55,5 +55,5 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
     if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;
 
-    zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, i);
+    zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, i, kzstdgpu_TgSizeX_DecompressLiterals);
 }
