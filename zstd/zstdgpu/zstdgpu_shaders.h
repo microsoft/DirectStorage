@@ -454,7 +454,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
             ZSTDGPU_BRANCH if (isRle)
             {
                 outBlocksRLERefs[outFrameInfo.rleBlockStart].offs = blockOffs;
-                outBlocksRLERefs[outFrameInfo.rleBlockStart].size = 1u;
+                outBlocksRLERefs[outFrameInfo.rleBlockStart].size = blockSize;
 
                 outRleBlockSizes[outFrameInfo.rleBlockStart] = outFrameInfo.rleBlockBytesStart;
                 outGlobalBlockIndexPerRleBlock[outFrameInfo.rleBlockStart] = blockIndex;
