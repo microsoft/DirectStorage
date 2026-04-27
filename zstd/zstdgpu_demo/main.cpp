@@ -350,9 +350,19 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
         srt.huffmanTableSlotCount       = gpuReadbackRes.Counters->Blocks_CMP;
 
-        for (uint32_t groupId = 0; groupId < gpuReadbackRes.Counters->DecompressLiteralsGroups; ++groupId)
+        // NOTE(pamartis): because on CPU we use `TGSize == 1`, the number of threadgroups per Huffman Table
+        // is the same as the number of literal streams
+        srt.inLitGroupEndPerHuffmanTable= srt.inLitStreamEndPerHuffmanTable;
+
+        uint32_t groupCount = 0;
+        if (srt.huffmanTableSlotCount > 0)
         {
-            zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0);
+            groupCount = srt.inLitGroupEndPerHuffmanTable[srt.huffmanTableSlotCount - 1];
+        }
+
+        for (uint32_t groupId = 0; groupId < groupCount; ++groupId)
+        {
+            zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
         }
 
         if (chkGpu)
@@ -772,7 +782,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             for (uint32_t i = 0; i < zstdCmpBlockCount; ++i)
             {
                 const uint32_t streamCount = zstdCpu.LitStreamEndPerHuffmanTable[i];
-                const uint32_t groupCount = ZSTDGPU_TG_COUNT(streamCount, kzstdgpu_TgSizeX_DecompressLiterals);
+                const uint32_t groupCount = streamCount;
                 streamPrefix += streamCount;
                 groupPrefix += groupCount;
                 zstdCpu.LitStreamEndPerHuffmanTable[i] = streamPrefix;
@@ -800,7 +810,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         srt.huffmanTableSlotCount = zstdCmpBlockCount;
         for (uint32_t groupId = 0; groupId < groupPrefix; ++groupId)
         {
-            zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0);
+            zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
         }
         VALIDATE(DecompressedLiterals(&zstdCpu));
     }

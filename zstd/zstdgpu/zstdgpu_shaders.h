@@ -2927,7 +2927,7 @@ static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_D
 ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_LDS(0, InitHuffmanTableAndDecompressLiterals);
 #include "zstdgpu_lds_decl_undef.h"
 
-static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT) srt, uint32_t groupId, uint32_t threadId)
+static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t tgSize)
 {
     uint32_t htIndex = 0;
     uint32_t htGroupStart = 0;
@@ -2964,7 +2964,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         srt.inDecompressedHuffmanWeightCount,
         htIndex,
         threadId,
-        kzstdgpu_TgSizeX_DecompressLiterals,
+        tgSize,
         bitsMax,
         codeTableSize,
         GS_PreInit,
@@ -2980,7 +2980,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
     const uint32_t statePairCnt = stateCnt >> 1u;
 
     // Expand Huffman Table
-    ZSTDGPU_FOR_WORK_ITEMS(statePairId, statePairCnt, threadId, kzstdgpu_TgSizeX_DecompressLiterals)
+    ZSTDGPU_FOR_WORK_ITEMS(statePairId, statePairCnt, threadId, tgSize)
     {
         const uint32_t stateId0 = statePairId << 1u;
         const uint32_t stateId1 = stateId0 + 1u;
@@ -3016,7 +3016,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         htLiteralStart,
         htLiteralCount,
         bitsMax,
-        kzstdgpu_TgSizeX_DecompressLiterals
+        tgSize
     );
 }
 
