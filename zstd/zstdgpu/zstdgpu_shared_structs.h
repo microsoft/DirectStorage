@@ -24,10 +24,8 @@ struct zstdgpu_FrameInfo
     uint64_t uncompSize;
     uint32_t dictionary;
 
-    uint32_t rawBlockStart;
-    uint32_t rleBlockStart;
+    uint32_t rrBlockStart;
     uint32_t cmpBlockStart;
 
-    uint32_t rawBlockBytesStart;
-    uint32_t rleBlockBytesStart;
+    uint32_t rrBlockBytesStart;
 };

@@ -29,15 +29,14 @@ struct UpdateDispatchArgsConsts
     uint32_t stage;
 
     uint32_t cmpBlockCountMax;
-    uint32_t rawBlockCountMax;
-    uint32_t rleBlockCountMax;
+    uint32_t rrBlockCountMax;
     uint32_t litByteCountMax;
     uint32_t seqElemCountMax;
 };
 
 ConstantBuffer<UpdateDispatchArgsConsts> Consts : register(b0);
 
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), RootConstants(b0, num32BitConstants=7)")]
+[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), RootConstants(b0, num32BitConstants=6)")]
 [numthreads(1, 1, 1)]
 void main()
 {
@@ -45,18 +44,15 @@ void main()
     {
         // Block-count dependent slots (valid after Stage 0 ParseFrames :: Count Blocks)
         const uint32_t cmpBlockCount = ZstdCounters[0].Blocks_CMP;
-        const uint32_t rawBlockCount = ZstdCounters[0].Blocks_RAW;
-        const uint32_t rleBlockCount = ZstdCounters[0].Blocks_RLE;
-        const uint32_t allBlockCount = rawBlockCount
-                                     + rleBlockCount
+        const uint32_t rrBlockCount  = ZstdCounters[0].Blocks_RR;
+        const uint32_t allBlockCount = rrBlockCount
                                      + cmpBlockCount;
 
 
         // the arguments dependent on block counts/sizes -- these could be computed after ParseFrames
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_ComputePrefixSum,         cmpBlockCount,                            kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizes,         allBlockCount,                            kzstdgpu_TgSizeX_PrefixSum);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_MemcpyRAW,                ZstdCounters[0].BlocksBytes_RAW,          kzstdgpu_TgSizeX_MemsetMemcpy);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_MemsetRLE,                ZstdCounters[0].BlocksBytes_RLE,          kzstdgpu_TgSizeX_MemsetMemcpy);
+        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_MemsetMemcpyRR,           ZstdCounters[0].BlocksBytes_RR,           kzstdgpu_TgSizeX_MemsetMemcpy);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_ParseCompressedBlocks,    cmpBlockCount,                            kzstdgpu_TgSizeX_ParseCompressedBlocks);
 
         // Memset dispatch slots for InitResources Stage 1
@@ -67,8 +63,7 @@ void main()
 
         const uint32_t predicateMask = 0
                                      | (cmpBlockCount > Consts.cmpBlockCountMax ? (1u << 0u) : 0u)
-                                     | (rawBlockCount > Consts.rawBlockCountMax ? (1u << 1u) : 0u)
-                                     | (rleBlockCount > Consts.rleBlockCountMax ? (1u << 2u) : 0u);
+                                     | (rrBlockCount  > Consts.rrBlockCountMax ?  (1u << 1u) : 0u);
 
         ZstdPredicate[0] = predicateMask; // lower 32-bits of Stage 1 predicate
         ZstdPredicate[2] = predicateMask; // lower 32-bits of Stage 2 predicate

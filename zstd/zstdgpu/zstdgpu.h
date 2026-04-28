@@ -24,8 +24,7 @@
 
 struct zstdgpu_CountFramesAndBlocksInfo
 {
-    uint32_t rawBlockCount;
-    uint32_t rleBlockCount;
+    uint32_t rrBlockCount;
     uint32_t cmpBlockCount;
     uint32_t frameCount;
     uint64_t frameByteCount;
@@ -92,7 +91,7 @@ ZSTDGPU_API void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu
  *  NB2: For RLE block `zstdgpu_OffsetAndSize::offs` stores the actual 8-bit symbol. At the same time `zstdgpu_OffsetAndSize::size`
  *       stores the number of times the symbol has to be repeated in the decompressed stream.
  */
-ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAndSize *outBlocksRLE, zstdgpu_OffsetAndSize *outBlocksCmp, const zstdgpu_OffsetAndSize *frames, const zstdgpu_FrameInfo *frameInfos, uint32_t frameIndex, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes);
+ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRR, zstdgpu_OffsetAndSize *outBlocksCmp, const zstdgpu_OffsetAndSize *frames, const zstdgpu_FrameInfo *frameInfos, uint32_t frameIndex, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes);
 
 struct zstdgpu_CountLiteralAndSequenceInfo
 {
@@ -195,7 +194,7 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
  *              the same command list without a CPU fence.
  *              Can be called before or after `zstdgpu_SetupInputs*` functions.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount);
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rrBlockCount, uint32_t cmpBlockCount);
 
 /**
  *  @brief      Specifies the total decoded literal byte count and sequence count.

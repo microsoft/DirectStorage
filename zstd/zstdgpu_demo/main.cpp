@@ -420,15 +420,10 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
                 const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerCmpBlock[i];
                 cpuRes.BlockSizePrefix[dstBlockIndex] = literalSize;
             }
-            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_RAW; ++i)
+            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_RR; ++i)
             {
-                const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerRawBlock[i];
-                cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRAWRefs[i].size;;
-            }
-            for (uint32_t i = 0; i < cpuRes.Counters->Blocks_RLE; ++i)
-            {
-                const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerRleBlock[i];
-                cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRLERefs[i].size;;
+                const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerRRBlock[i];
+                cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRRRefs[i].size;;
             }
 
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams; ++i)
@@ -437,8 +432,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             }
             // Compute prefix sum of block sizes
             const uint32_t allBlockCount = cpuRes.Counters->Blocks_CMP
-                                         + cpuRes.Counters->Blocks_RAW
-                                         + cpuRes.Counters->Blocks_RLE;
+                                         + cpuRes.Counters->Blocks_RR;
 
             // FIXUP(pamartis): because after `DecompreSequences` execution 'BlockSizePrefix' contain actual size of the block,
             // not the prefix (it's computed after `DecompreSequences`  on GPU) we update the prefix manually
@@ -491,15 +485,12 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 static void zstdgpu_Test_BlockPrefix(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes)
 {
     /** these buffers could be zero if some block types don't exist */
-    const uint32_t refRleBlockCount = cpuRes.Counters->Blocks_RLE;
-    const uint32_t refRawBlockCount = cpuRes.Counters->Blocks_RAW;
+    const uint32_t refRRBlockCount  = cpuRes.Counters->Blocks_RR;
     const uint32_t refCmpBlockCount = cpuRes.Counters->Blocks_CMP;
-    const uint32_t refAllBlockCount = refRleBlockCount
-                                    + refRawBlockCount
+    const uint32_t refAllBlockCount = refRRBlockCount
                                     + refCmpBlockCount;
 
-    VALIDATE_CND(refRleBlockCount == gpuReadbackRes.Counters->Blocks_RLE);
-    VALIDATE_CND(refRawBlockCount == gpuReadbackRes.Counters->Blocks_RAW);
+    VALIDATE_CND(refRRBlockCount == gpuReadbackRes.Counters->Blocks_RR);
     VALIDATE_CND(refCmpBlockCount == gpuReadbackRes.Counters->Blocks_CMP);
 
     if (NULL != cpuRes.GlobalBlockIndexPerCmpBlock)
@@ -507,15 +498,10 @@ static void zstdgpu_Test_BlockPrefix(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_R
     else
         VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerCmpBlock);
 
-    if (NULL != cpuRes.GlobalBlockIndexPerRawBlock)
-        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerRawBlock, gpuReadbackRes.GlobalBlockIndexPerRawBlock, sizeof(cpuRes.GlobalBlockIndexPerRawBlock[0]) * refRawBlockCount));
+    if (NULL != cpuRes.GlobalBlockIndexPerRRBlock)
+        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerRRBlock, gpuReadbackRes.GlobalBlockIndexPerRRBlock, sizeof(cpuRes.GlobalBlockIndexPerRRBlock[0]) * refRRBlockCount));
     else
-        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerRawBlock);
-
-    if (NULL != cpuRes.GlobalBlockIndexPerRleBlock)
-        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerRleBlock, gpuReadbackRes.GlobalBlockIndexPerRleBlock, sizeof(cpuRes.GlobalBlockIndexPerRleBlock[0]) * refRleBlockCount));
-    else
-        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerRleBlock);
+        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerRRBlock);
 
     VALIDATE_CND(0 == memcmp(cpuRes.BlockSizePrefix, gpuReadbackRes.BlockSizePrefix, sizeof(cpuRes.BlockSizePrefix[0]) * refAllBlockCount));
 }
@@ -605,15 +591,13 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     ZSTDGPU_ASSERT(zstdFrameCount == CNTRS(Frames));
     ZSTDGPU_ASSERT(zstdUncompressedFramesByteCount == CNTRS(Frames_UncompressedByteSize));
 
-    const uint32_t zstdRawBlockCount = CNTRS(Blocks_RAW);
-    const uint32_t zstdRleBlockCount = CNTRS(Blocks_RLE);
+    const uint32_t zstdRRBlockCount = CNTRS(Blocks_RR);
     const uint32_t zstdCmpBlockCount = CNTRS(Blocks_CMP);
 
-    const uint32_t zstdAllBlockCount = zstdRawBlockCount
-                                     + zstdRleBlockCount
+    const uint32_t zstdAllBlockCount = zstdRRBlockCount
                                      + zstdCmpBlockCount;
 
-    zstdgpu_ResourceInfo_Stage_1_Init(&zstdInfo, zstdRawBlockCount, zstdRleBlockCount, zstdCmpBlockCount);
+    zstdgpu_ResourceInfo_Stage_1_Init(&zstdInfo, zstdRRBlockCount, zstdCmpBlockCount);
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
     // NOTE(pamartis):On CPU, lookback regions for PerFrameBlockCount{RAW,RLE,CMP,All} and
@@ -622,16 +606,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         uint32_t prefix = 0;
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
-            uint32_t count = zstdCpu.PerFrameBlockCountRAW[i];
-            zstdCpu.PerFrameBlockCountRAW[i] = prefix;
-            prefix += count;
-        }
-
-        prefix = 0;
-        for (uint32_t i = 0; i < zstdFrameCount; ++i)
-        {
-            uint32_t count = zstdCpu.PerFrameBlockCountRLE[i];
-            zstdCpu.PerFrameBlockCountRLE[i] = prefix;
+            uint32_t count = zstdCpu.PerFrameBlockCountRR[i];
+            zstdCpu.PerFrameBlockCountRR[i] = prefix;
             prefix += count;
         }
 
@@ -668,7 +644,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         zstdgpu_InitResources_SRT srt = {};
         zstdgpu_Init_InitResources_SRT(srt, zstdCpu);
-        srt.allBlockCount       = zstdRawBlockCount + zstdRleBlockCount + zstdCmpBlockCount;
+        srt.allBlockCount       = zstdRRBlockCount + zstdCmpBlockCount;
         srt.cmpBlockCount       = zstdCmpBlockCount;
         srt.frameCount          = zstdFrameCount;
         srt.initResourcesStage  = 1; // 1 means -- right before "parse compressed blocks"
@@ -1258,7 +1234,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     }
 #endif
 
-    zstdgpu_ResourceDataCpu zstdCpu;
+    zstdgpu_ResourceDataCpu zstdCpu = {};
     if (chkCpu)
     {
         debugPrint(L"[VALIDATION] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
@@ -1331,7 +1307,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     }
     if (blkCnt)
     {
-        zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
+        zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rrBlockCount, fbInfo.cmpBlockCount);
         if (seqCnt)
         {
             zstdgpu_CountLiteralAndSequenceInfo blkInfo;
@@ -1540,20 +1516,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 
                             debugPrint(L"[FAIL] %u/%u frames failed validation.\n", failedFrameCount, fbInfo.frameCount);
 
-                            const uint32_t failedRawBlockCount = zstdgpu_Test_DecompressedDataPerBlockType(
-                                gpuData.GlobalBlockIndexPerRawBlock,
-                                fbInfo.rawBlockCount,
-                                gpuData.PerFrameBlockCountAll,
-                                zstdOutFrameRefs,
-                                fbInfo.frameCount,
-                                gpuData.BlockSizePrefix,
-                                ref,
-                                tst
-                            );
-
-                            const uint32_t failedRleBlockCount = zstdgpu_Test_DecompressedDataPerBlockType(
-                                gpuData.GlobalBlockIndexPerRleBlock,
-                                fbInfo.rleBlockCount,
+                            const uint32_t failedRRBlockCount = zstdgpu_Test_DecompressedDataPerBlockType(
+                                gpuData.GlobalBlockIndexPerRRBlock,
+                                fbInfo.rrBlockCount,
                                 gpuData.PerFrameBlockCountAll,
                                 zstdOutFrameRefs,
                                 fbInfo.frameCount,
@@ -1573,8 +1538,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                                 tst
                             );
 
-                            if (failedRawBlockCount > 0 || failedRleBlockCount > 0)
-                                debugPrint(L"[FAIL] %u/%u RAW blocks and %u/%u RLE blocks failed validation. Likely MemCpy/MemSet pass is broken, unless ExecuteSequence stomps the memory written by MemCpu/MemSet.\n", failedRawBlockCount, fbInfo.rawBlockCount, failedRleBlockCount, fbInfo.rleBlockCount);
+                            if (failedRRBlockCount > 0)
+                                debugPrint(L"[FAIL] %u/%u Raw+RLE blocks failed validation. Likely MemCpy/MemSet pass is broken, unless ExecuteSequence stomps the memory written by MemCpu/MemSet.\n", failedRRBlockCount, fbInfo.rrBlockCount);
 
                             if (failedCmpBlockCount > 0)
                                 debugPrint(L"[FAIL] %u/%u CMP blocks failed validation. ExecuteSequences is likely broken unless an issue happens earlier in the pipeline or unless TDR is hit.\n", failedCmpBlockCount, fbInfo.cmpBlockCount);

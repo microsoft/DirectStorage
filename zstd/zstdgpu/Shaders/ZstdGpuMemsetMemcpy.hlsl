@@ -22,7 +22,6 @@ struct Consts
     uint32_t workItemCount;
     uint32_t blockCount;
     uint32_t frameCount;
-    uint32_t flags;
 };
 
 ConstantBuffer<Consts>                  Constants                           : register(b0);
@@ -39,7 +38,7 @@ StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : re
 
 StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t7);
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=1)), SRV(t4), SRV(t5), SRV(t6), SRV(t7), RootConstants(b0, num32BitConstants=5)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=1)), SRV(t4), SRV(t5), SRV(t6), SRV(t7), RootConstants(b0, num32BitConstants=4)")]
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -81,14 +80,16 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
     if (byteIdx >= dstFrameOffsetAndSize.size)
         return;
 
-    [branch] if (Constants.flags & 0x1u)
+    uint value;
+    [branch] if (!(blockRef.offs & kzstdgpu_RLEBlock_OffsetFlag))
     {
         const uint32_t byteOfs = blockRef.offs + byteIdx;
 
-        ZstdInOutUnCompressedFramesData[dstBlockOffset + byteIdx] = (ZstdInCompressedData[byteOfs >> 2u] >> ((byteOfs & 3u) << 3u)) & 0xffu;
+        value = (ZstdInCompressedData[byteOfs >> 2u] >> ((byteOfs & 3u) << 3u)) & 0xffu;
     }
     else
     {
-        ZstdInOutUnCompressedFramesData[dstBlockOffset + byteIdx] = blockRef.offs;
+        value = blockRef.offs & 0xffu; // strip kzstdgpu_RLEBlock_OffsetFlag
     }
+    ZstdInOutUnCompressedFramesData[dstBlockOffset + byteIdx] = value;
 }
