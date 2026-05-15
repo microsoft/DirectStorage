@@ -380,7 +380,7 @@ static const uint32_t kzstdgpu_TgSizeX_PrefixSum = 64;
 static const uint32_t kzstdgpu_TgSizeX_PrefixSum = 32;
 #endif
 
-static const uint32_t kzstdgpu_TgSizeX_ParseCompressedBlocks = 32;
+#define kzstdgpu_TgSizeX_ParseCompressedBlocks 32 // #define since dxc may lack static_assert
 static const uint32_t kzstdgpu_TgSizeX_Memset = 64;
 
 // NOTE(pamartis): The rationale behind the below choice of TG sizes is the following
