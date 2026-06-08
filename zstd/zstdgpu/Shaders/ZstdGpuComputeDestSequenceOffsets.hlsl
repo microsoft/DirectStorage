@@ -60,7 +60,7 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
     }
     seqSize -= seqOffs;
 
-    const uint32_t blockIdx = srt.inSeqRefs[seqStreamIdx].blockId;
+    const uint32_t blockIdx = srt.inSeqStreamToBlockId[seqStreamIdx];
 
     const uint32_t frameCnt = srt.inCounters[0].Frames;
     const uint32_t frameIdx = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, frameCnt, blockIdx);

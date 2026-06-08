@@ -37,7 +37,7 @@ ConstantBuffer<Consts> Constants : register(b0);
 ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=6), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=10), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
 [numthreads(kzstdgpu_DecompressSequences_StreamsPerTG, 1, 1)]
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {

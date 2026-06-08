@@ -43,7 +43,7 @@ StructuredBuffer<uint32_t>      ZstdPerFrameSeqStreamMinIdx         : register(t
 
 StructuredBuffer<uint32_t>      ZstdFrameBlockCountAll              : register(t1);
 
-StructuredBuffer<zstdgpu_SeqStreamInfo> ZstdSeqRefs                 : register(t2);
+StructuredBuffer<uint32_t>      ZstdSeqStreamToBlockId              : register(t2);
 
 StructuredBuffer<zstdgpu_Counters>     ZstdCounters                 : register(t3);
 
@@ -68,7 +68,7 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     // Then, when frame index is known each block fetches the index of the first compressed block in that frame
     // with non-zero sequence count and if current compressed block's index (threadId) matches that index --
     // it resolves its "repeat" offsets (if any) using "default" start offsets per frame.
-    const uint32_t blockId = ZstdSeqRefs[i].blockId;
+    const uint32_t blockId = ZstdSeqStreamToBlockId[i];
     const uint32_t frameId = zstdgpu_BinarySearch(ZstdFrameBlockCountAll, 0, Constants.frameCount, blockId);
 
     const uint32_t seqStreamIdxFirstInFrame = ZstdPerFrameSeqStreamMinIdx[frameId];

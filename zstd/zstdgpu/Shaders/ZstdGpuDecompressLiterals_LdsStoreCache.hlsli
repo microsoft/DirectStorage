@@ -94,7 +94,10 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 
     zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(
         srt.inLitGroupEndPerHuffmanTable,
-        srt.inLitStreamEndPerHuffmanTable,
+        srt.inHufWIdToHufLitId,
+        srt.inHufLitIdToLitStreamId,
+        srt.inCounters[0].HufLit,
+        srt.inCounters[0].HUF_Streams,
         srt.huffmanTableSlotCount,
         groupId,
         htIndex,
@@ -143,7 +146,6 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 
     zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(
         srt.inCompressedData,
-        srt.inLitStreamRemap,
         srt.inLitRefs,
         srt.inoutDecompressedLiterals,
         srt.inoutDecompressedLiterals_Dwords,

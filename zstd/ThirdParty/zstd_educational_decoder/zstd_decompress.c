@@ -865,6 +865,10 @@ static size_t decode_literals_compressed(frame_context_t *const ctx,
     ostream_t lit_stream = IO_make_ostream(*literals, regenerated_size);
     istream_t huf_stream = IO_make_sub_istream(in, compressed_size);
 
+#ifdef ZSTDGPU_REFERENCE_STORE_H
+    zstdgpu_ReferenceStore_Report_CompressedLiteralDecompressedSizeAndStreamCount(regenerated_size, num_streams);
+#endif
+
     if (block_type == 2) {
         // Decode the provided Huffman table
         // "This section is only present when Literals_Block_Type type is
@@ -882,9 +886,6 @@ static size_t decode_literals_compressed(frame_context_t *const ctx,
             CORRUPTION();
         }
     }
-#ifdef ZSTDGPU_REFERENCE_STORE_H
-    zstdgpu_ReferenceStore_Report_CompressedLiteralDecompressedSizeAndStreamCount(regenerated_size, num_streams);
-#endif
 
     size_t symbols_decoded;
     if (num_streams == 1) {

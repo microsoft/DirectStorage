@@ -66,7 +66,6 @@
 #include "ZstdGpuExecuteSequences64.h"
 #include "ZstdGpuExecuteSequences32.h"
 #include "ZstdGpuFinaliseSequenceOffsets.h"
-#include "ZstdGpuGroupCompressedLiterals.h"
 #include "ZstdGpuInitFseTable.h"
 #include "ZstdGpuInitHuffmanTable.h"
 #include "ZstdGpuInitHuffmanTableAndDecompressLiterals.h"
@@ -77,6 +76,7 @@
 #include "ZstdGpuParseFrames.h"
 #include "ZstdGpuPrefixSequenceOffsets.h"
 #include "ZstdGpuPrefixSum.h"
+#include "ZstdGpuPropagateFseIndex.h"
 #include "ZstdGpuUpdateDispatchArgs.h"
 
 static const int16_t kzstdgpuFseProbsDefault[] =
@@ -729,7 +729,6 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     ZSTDGPU_KERNEL(ExecuteSequences64                               ,   L"Execute Sequences 64")                                                \
     ZSTDGPU_KERNEL(ExecuteSequences32                               ,   L"Execute Sequences 32")                                                \
     ZSTDGPU_KERNEL(FinaliseSequenceOffsets                          ,   L"Finalise Sequence Offsets")                                           \
-    ZSTDGPU_KERNEL(GroupCompressedLiterals                          ,   L"Group Huffman-compressed Literals")                                   \
     ZSTDGPU_KERNEL(InitFseTable                                     ,   L"Init Fse Table")                                                      \
     ZSTDGPU_KERNEL(InitHuffmanTable                                 ,   L"Init Huffman Table")                                                  \
     ZSTDGPU_KERNEL(InitHuffmanTableAndDecompressLiterals            ,   L"Init Huffman Table and Decompress Literals")                          \
@@ -740,6 +739,7 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     ZSTDGPU_KERNEL(ParseFrames                                      ,   L"Parse Frames")                                                        \
     ZSTDGPU_KERNEL(PrefixSequenceOffsets                            ,   L"Prefix Sequence Offsets")                                             \
     ZSTDGPU_KERNEL(PrefixSum                                        ,   L"Prefix Sum")                                                          \
+    ZSTDGPU_KERNEL(PropagateFseIndex                                ,   L"Propagate FSE Index")                                                 \
     ZSTDGPU_KERNEL(UpdateDispatchArgs                               ,   L"Update Dispatch Args")
 
 typedef enum zstdgpu_CompiledShaderId
@@ -771,7 +771,6 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_DISPATCH32_CMD_SIG(DecompressLiterals       , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(DecompressSequences      , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(FinaliseSequenceOffsets  , 1)    \
-    ZSTDGPU_DISPATCH32_CMD_SIG(GroupCompressedLiterals  , 4)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(InitFseTable             , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(InitHuffmanTable         , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(Memset                   , 1)    \
@@ -779,7 +778,8 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_DISPATCH32_CMD_SIG(PrefixSequenceOffsets    , 10)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(PrefixSum                , 2)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(ComputePrefixSum         , 5)    \
-    ZSTDGPU_DISPATCH32_CMD_SIG(ParseCompressedBlocks    , 1)
+    ZSTDGPU_DISPATCH32_CMD_SIG(ParseCompressedBlocks    , 1)    \
+    ZSTDGPU_DISPATCH32_CMD_SIG(PropagateFseIndex        , 0)
 
 #define ZSTDGPU_RUNTIME_KERNEL_LIST_SHARED()        \
     ZSTDGPU_KERNEL(ComputeDestSequenceOffsets)      \
@@ -787,7 +787,6 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL(DecodeHuffmanWeights)            \
     ZSTDGPU_KERNEL(DecompressHuffmanWeights)        \
     ZSTDGPU_KERNEL(FinaliseSequenceOffsets)         \
-    ZSTDGPU_KERNEL(GroupCompressedLiterals)         \
     ZSTDGPU_KERNEL(InitFseTable)                    \
     ZSTDGPU_KERNEL(InitHuffmanTable)                \
     ZSTDGPU_KERNEL(InitResources)                   \
@@ -797,6 +796,7 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL(ParseFrames)                     \
     ZSTDGPU_KERNEL(PrefixSequenceOffsets)           \
     ZSTDGPU_KERNEL(PrefixSum)                       \
+    ZSTDGPU_KERNEL(PropagateFseIndex)               \
     ZSTDGPU_KERNEL(UpdateDispatchArgs)
 
 #define ZSTDGPU_RUNTIME_KERNEL_LIST_SPECIALISED()   \
@@ -818,12 +818,12 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL_SCOPE_X(ParseFrames                          , L"Parse Frames"               )
 
 #define ZSTDGPU_KERNEL_SCOPE_LIST_STAGE_1_CMP_BLOCKS() \
-    ZSTDGPU_KERNEL_SCOPE_X(ParseCompressedBlocks                , L"Parse Compressed Blocks"    )
+    ZSTDGPU_KERNEL_SCOPE_X(ParseCompressedBlocks                , L"Parse Compressed Blocks"    )   \
+    ZSTDGPU_KERNEL_SCOPE_X(PropagateFseIndex                    , L"Propagate FSE Index"        )
 
 #define ZSTDGPU_KERNEL_SCOPE_LIST_STAGE_2_CMP_BLOCKS() \
     ZSTDGPU_KERNEL_SCOPE_X(UpdateDispatchArgs                   , L"Update Dispatch Arguments"  )   \
     ZSTDGPU_KERNEL_SCOPE_X(ComputePrefixSum                     , L"Compute Prefix Sums"        )   \
-    ZSTDGPU_KERNEL_SCOPE_X(GroupCompressedLiterals              , L"Group Compressed Literals"  )   \
     ZSTDGPU_KERNEL_SCOPE_X(InitFseTable                         , L"Init FSE Tables"            )   \
     ZSTDGPU_KERNEL_SCOPE_X(DecompressHuffmanWeights             , L"Decompress Huffman Weights" )   \
     ZSTDGPU_KERNEL_SCOPE_X(DecodeHuffmanWeights                 , L"Decode Huffman Weights"     )   \
@@ -2128,22 +2128,44 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.BlockSeqCountPrefixLookback->GetGPUVirtualAddress());
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.CmpLitCompactionLookback->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.LitStreamCountPrefixLookback->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.HufLitCompactionLookback->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
 
-        // Group 2: TableIndexLookback
-        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.TableIndexLookback->GetGPUVirtualAddress());
-        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_TableIndexLookback);
+        // Group 2: FseIndexLookback{HufW,LLen,Offs,MLen} -- same shape as CmpBlockLookback (lookbackBlockCount uint32 each)
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackHufW->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackLLen->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackOffs->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackMLen->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
 
-        // Group 3: LitStreamEndPerHuffmanTable (prefix + lookback region)
-        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.LitStreamEndPerHuffmanTable->GetGPUVirtualAddress());
-        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_LitStreamEnd);
+        // Group 3: HufWIdToHufLitId -- init to ~0 marking all potential Huffman table indices as unused. [Parse Compressed Blocks]
+        // would fill in this table with corresponding literal blocks.
+        cmdList->SetComputeRoot32BitConstant(1, 0xFFFFFFFFu /* value */, 2);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.HufWIdToHufLitId->GetGPUVirtualAddress());
+        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockCount);
 
+        PIXEndEvent(cmdList);
+    }
+
+    {
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[InitResources :: Memset :: Stage 1 :: BlockSize Lookback]");
         // Group 4: BlockSizePrefix lookback (allBlockCount-sized)
-        {
-            const uint32_t allBlockCount = req->zstdRawBlockCountMax
-                                         + req->zstdRleBlockCountMax
-                                         + req->zstdCmpBlockCountMax;
-            cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.BlockSizePrefix->GetGPUVirtualAddress() + allBlockCount * sizeof(uint32_t));
-        }
+        const uint32_t allBlockCount = req->zstdRawBlockCountMax
+                                     + req->zstdRleBlockCountMax
+                                     + req->zstdCmpBlockCountMax;
+
+        d3d12aid_ComputeRsPs_Set(&req->Memset, cmdList);
+
+        // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
+        cmdList->SetComputeRoot32BitConstant(1, 0 /* value */, 2);
+        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.BlockSizePrefix->GetGPUVirtualAddress() + allBlockCount * sizeof(uint32_t));
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_AllBlockLookback);
 
         PIXEndEvent(cmdList);
@@ -2172,7 +2194,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Parse Compressed Blocks] and [Memcpy RAW blocks, Memset RLE blocks]");
-        D3D12_RESOURCE_BARRIER barriers[15];
+        D3D12_RESOURCE_BARRIER barriers[21];
 
         uint32_t bc = 0;
         if (req->zstdCmpBlockCountMax > 0)
@@ -2187,11 +2209,16 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseInfos);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseProbs);
             // last written by [InitResources :: Memset :: Stage 1]
-            // next written/updated by [Parse Compressed Blocks] -- both "lookback" and "prefix" sub-buffers
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.TableIndexLookback);
-            // last written by [InitResources :: Memset :: Stage 1]
+            // next written/updated by [Propagate FSE Index]
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackHufW);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackLLen);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackOffs);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackMLen);
+            // last written by [InitResources :: Memset :: Stage 1] to initialise "lookback" region.
+            // next written/updated by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitGroupEndPerHuffmanTable);
+            // last written by [InitResources :: Memset :: Stage 0]
             // next written/updated by [Parse Compressed Blocks]
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitStreamEndPerHuffmanTable);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Parse Compressed Blocks]
@@ -2206,6 +2233,9 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // next written/updated by [Parse Compressed Blocks]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.SeqCountPrefixLookback);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSeqCountPrefixLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitStreamCountPrefixLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.HufLitCompactionLookback);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.HufWIdToHufLitId);
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Parse Compressed Blocks] -- to be able to get global index to index into BlockSizePrefix
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock);
@@ -2219,7 +2249,8 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // next read by [Readback Counters :: After Block Parse] and updated by [Update Dispatch Args]
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.Counters);
 
-            // last written by [Parse Frames :: Collect Blocks]
+            // the actual buffer last written by [Parse Frames :: Collect Blocks]
+            // the lookback buffer last written by [InitResources :: Memset :: Stage 1 :: BlockSize Lookback]
             // next updated by [Prefix Block Sizes]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
         }

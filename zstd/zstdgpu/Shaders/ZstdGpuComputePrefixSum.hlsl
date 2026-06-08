@@ -1,10 +1,10 @@
 /**
  * ZstdGpuComputePrefixSum.hlsl
  *
- * A compute shader producing a prefix sum (of the number of Huffman-compressed literals and of the number
- * of threadgroups required to decompress them) from elements stored in the supplied buffer,
- * and storing the prefix sum back to the supplied buffer. The computation is based on
- * "Decoupled Lookback" approach.
+ * A compute shader producing per Huffman table the number of threadgroups required
+ * to decompress all Huffman-compressed literal streams the require this table,
+ * and storing the prefix sum of those group counts used by [Decompress Literals]
+ * to map a flat groupId back to a Huffman table.
  *
  * Copyright (c) Microsoft. All rights reserved.
  * This code is licensed under the MIT License (MIT).
@@ -28,18 +28,17 @@ struct Consts
 
 ConstantBuffer<Consts>          Constants                           : register(b0);
 
-RWStructuredBuffer<uint32_t>    ZstdLitStreamCountToPrefix          : register(u0);
-RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefix           : register(u1);
+StructuredBuffer<uint32_t>      ZstdHufWIdToHufLitId                : register(t0);
+StructuredBuffer<uint32_t>      ZstdHufLitIdToLitStreamId           : register(t1);
+
+RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefix           : register(u0);
 
 globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdLitStreamCountToPrefixLookback  : register(u2);
+RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefixLookback   : register(u1);
 
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefixLookback   : register(u3);
+RWStructuredBuffer<zstdgpu_Counters>  ZstdCounters                  : register(u2);
 
-RWStructuredBuffer<zstdgpu_Counters>  ZstdCounters                 : register(u4);
-
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature("SRV(t0), SRV(t1), UAV(u0), UAV(u1), UAV(u2), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
@@ -53,89 +52,32 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 
     const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
 
-    const uint32_t streamCount = ZstdLitStreamCountToPrefix[i];
-    const uint32_t groupCount = ZSTDGPU_TG_COUNT(streamCount, Constants.literalsPerGroup);
+    const uint32_t hufLitId = ZstdHufWIdToHufLitId[i];
+    uint32_t hufLitStreamCount = 0;
 
-    const uint32_t streamPrefix = WavePrefixSum(streamCount);
-    const uint32_t groupPrefix = WavePrefixSum(groupCount);
-
-    uint32_t prevBlockTotalStreamPrefix = 0;
-    uint32_t prevBlockTotalGroupPrefix = 0;
-
-    // NOTE(pamartis): the last element writes the sum of the exclusive prefix and the it's own element -- which is the cross-block sum
-    // this cuts down on WaveActiveSum and re-uses WavePrefixSum instead
-    if (thisLocalIndex == lastLocalIndex)
+    // NOTE(pamartis): ~0u marks unused Huffman table indices (no actual Huffman table exist for this index, no literal streams using such table exist)
+    ZSTDGPU_BRANCH if (~0u != hufLitId)
     {
-        #if 0
-            #define LOOKBACK_STORE(name, prev, value) ZstdLit##name##CountToPrefixLookback[thisBlockIndex] = (value)
-        #else
-            #define LOOKBACK_STORE(name, prev, value) InterlockedCompareStore(ZstdLit##name##CountToPrefixLookback[thisBlockIndex], prev, (value))
-        #endif
+        const uint32_t hufLitStreamStart = ZstdHufLitIdToLitStreamId[hufLitId];
 
-        // NOTE(pamartis): 0x40000000u is used to mark that the data we're storing is the sum
-        const uint32_t lookbackStreamSum = ((streamPrefix + streamCount) & 0x3fffffffu) | 0x40000000u;
-        const uint32_t lookbackGroupSum = ((groupPrefix + groupCount) & 0x3fffffffu) | 0x40000000u;
-
-        LOOKBACK_STORE(Stream, 0, lookbackStreamSum);
-        LOOKBACK_STORE(Group, 0, lookbackGroupSum);
-
-        if (thisBlockIndex > 0)
+        // NOTE(pamartis): recompute the number of Huffman-compressed literal streams from prefix.
+        ZSTDGPU_BRANCH if (hufLitId + 1u < ZstdCounters[0].HufLit)
         {
-            uint32_t prevBlockIndex = thisBlockIndex - 1u;
-            #if 0
-                // BUG(pamartis): this varaint of code reads incorrect values on some HW, so it looks like `globallycoherent`
-                // keyword doesn't work for reads
-                #define LOOKBACK_READ(name)    \
-                    const uint32_t prevBlock##name##PrfxOrSum = ZstdLit##name##CountToPrefixLookback[prevBlockIndex]
-            #else
-                #define LOOKBACK_READ(name)              \
-                    uint32_t prevBlock##name##PrfxOrSum; \
-                    InterlockedAdd(ZstdLit##name##CountToPrefixLookback[prevBlockIndex], 0, prevBlock##name##PrfxOrSum)
-            #endif
-
-            #define LOOKBACK_LOOP(name)                                                             \
-                for (;;)                                                                            \
-                {                                                                                   \
-                    LOOKBACK_READ(name);                                                            \
-                    const uint32_t flags = prevBlock##name##PrfxOrSum & 0xc0000000u;                \
-                    if (flags > 0)                                                                  \
-                    {                                                                               \
-                        /* NOTE(pamartis): this is the sum of the previous block or prefix sum of all previous blocks, so we accumulate it */\
-                        prevBlockTotal##name##Prefix += prevBlock##name##PrfxOrSum & 0x3fffffffu;   \
-                        /* ... and if it's a prefix sum or we reached the first block, we break ...*/\
-                        if (flags == 0x80000000u || prevBlockIndex == 0)                            \
-                        {                                                                           \
-                            break;                                                                  \
-                        }                                                                           \
-                        else                                                                        \
-                        {                                                                           \
-                            /* in case we encountered a sum -- we already accumulated it*/          \
-                            /* at the same time we didn't reach the first block, so we go backward */\
-                            --prevBlockIndex;                                                       \
-                        }                                                                           \
-                    }                                                                               \
-                    /* else -- just loop waiting for the current block */                           \
-                }
-
-            LOOKBACK_LOOP(Stream);
-
-            // NOTE(pamartis): 0x80000000u is used to mark that the data we're storing is the prefix sum
-            const uint32_t lookbackStreamPrfx = ((prevBlockTotalStreamPrefix + streamPrefix + streamCount) & 0x3fffffffu) | 0x80000000u;
-            LOOKBACK_STORE(Stream, lookbackStreamSum, lookbackStreamPrfx);
-
-            prevBlockIndex = thisBlockIndex - 1u;
-
-            LOOKBACK_LOOP(Group);
-
-            const uint32_t lookbackGroupPrfx = ((prevBlockTotalGroupPrefix + groupPrefix + groupCount) & 0x3fffffffu) | 0x80000000u;
-            LOOKBACK_STORE(Group, lookbackGroupSum, lookbackGroupPrfx);
+            hufLitStreamCount = ZstdHufLitIdToLitStreamId[hufLitId + 1u] - hufLitStreamStart;
+        }
+        else
+        {
+            hufLitStreamCount = ZstdCounters[0].HUF_Streams - hufLitStreamStart;
         }
     }
-    ZstdLitStreamCountToPrefix[i] = WaveReadLaneAt(prevBlockTotalStreamPrefix, lastLocalIndex) + streamPrefix + streamCount;
-    ZstdLitGroupCountToPrefix[i] = WaveReadLaneAt(prevBlockTotalGroupPrefix, lastLocalIndex) + groupPrefix + groupCount;
+    const uint32_t groupCount = ZSTDGPU_TG_COUNT(hufLitStreamCount, Constants.literalsPerGroup);
+    const uint32_t waveExclusiveGroupPrefix = WavePrefixSum(groupCount);
+    const uint32_t globalExclusiveGroupPrefix = zstdgpu_GlobalExclusivePrefixSum(ZstdLitGroupCountToPrefixLookback, waveExclusiveGroupPrefix, groupCount, i, kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
 
-    // NOTE(pamartis): the last thread in the dispatch writes its "inclusive" prefix sum because it's the total number of threadgroups
-    // to be dispatched for literal decompression
+    ZstdLitGroupCountToPrefix[i] = globalExclusiveGroupPrefix + groupCount;
+
+    // NOTE(pamartis): the last thread writes its inclusive prefix -- the total number of threadgroups
+    // to dispatch for literal decompression.
     if (i == Constants.workItemCount - 1)
     {
         ZstdCounters[0].DecompressLiteralsGroups = ZstdLitGroupCountToPrefix[i];

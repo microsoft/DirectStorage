@@ -37,6 +37,12 @@ static uint32_t GBlockIndexRAW = 0;
 static uint32_t GBlockIndexRLE = 0;
 static uint32_t GBlockIndexCMP = 0;
 
+// This mirrors GPU `Counters.Cmp_Lit`-- a compacted index that increments per Compressed_Block
+// whose literal section is a Huffman-compressed literal (Cmp/Treeless, i.e., `literalBlockType >= 2`).
+
+// It's used to index to build `CmpLitToHufWFseId`
+static uint32_t GCmpLitIndex = 0;
+
 static uint32_t GHufCompressedLiteralCount = 0;
 static uint32_t GHufDecompressedLiteralOffset = 0;
 static uint32_t GHufDecompressedLiteralSize = 0;
@@ -190,9 +196,6 @@ void zstdgpu_ReferenceStore_Report_CompressedLiteral(const void* base, uint32_t 
     GZstd.LitRefs[hufCompressedLiteralIndex].src.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
     GZstd.LitRefs[hufCompressedLiteralIndex].src.size = size;
 
-    GZstd.LitStreamBuckets[hufCompressedLiteralIndex].huffmanBucketIndex = GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndexHufW;
-    GZstd.LitStreamBuckets[hufCompressedLiteralIndex].huffmanBucketOffset = 0;
-
     if (GHufDecompressedLiteralStreamCount == 1)
     {
         GZstd.LitRefs[hufCompressedLiteralIndex].dst.offs = GHufDecompressedLiteralOffset;
@@ -225,6 +228,7 @@ void zstdgpu_ReferenceStore_Report_CompressedLiteralDecompressedSizeAndStreamCou
 {
     GHufDecompressedLiteralSize = size;
     GHufDecompressedLiteralStreamCount = streamCount;
+    GCmpLitIndex++;
     zstdgpu_AppendLastBlockSize(size);
 }
 
@@ -268,6 +272,11 @@ void zstdgpu_ReferenceStore_Report_FseProbTableType(ZSTDGPU_ENUM(ReferenceStore_
 {
     ZSTDGPU_ASSERT(type != ZSTDGPU_ENUM_CONST(ReferenceStore_FseForceInt));
     GFseProbTableTypePending = type;
+
+    if (type == ZSTDGPU_ENUM_CONST(ReferenceStore_FseHufW))
+    {
+        GZstd.CmpLitToHufWFseId[GCmpLitIndex - 1] = GLastTableIndex_FseHufW;
+    }
 }
 
 #include <intrin.h>
@@ -345,7 +354,6 @@ void zstdgpu_ReferenceStore_Report_FseTable(const int16_t *probs, uint32_t symCo
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(localIdx, GBlockCountCMP);                  \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(localIdx, GBlockCountCMP);          \
         const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndex##name = storeExpr;                         \
         GLastTableIndex_Fse##name = storeExpr;                                                              \
         GZstd.FseInfos[fseIndex] = zstdgpu_CreateFseInfo(symCount, accuracyLog2);                           \
         memcpy(&GZstd.FseProbs[fseProbStart], probs, sizeof(probs[0]) * symCount);                          \
@@ -378,7 +386,6 @@ void zstdgpu_ReferenceStore_Report_FseDefaultTable(const int16_t *probs, uint32_
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(0, GBlockCountCMP);                         \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(0, GBlockCountCMP);                 \
         const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndex##name = fseIndex;                          \
         GLastTableIndex_Fse##name = fseIndex;                                                               \
         if (GFseProbDefaultTable##name##Stored == 0)                                                        \
         {                                                                                                   \
@@ -409,7 +416,6 @@ void zstdgpu_ReferenceStore_Report_FseProbSymbol(uint32_t symbol)
 #define STORE(name)                                                                 \
     if (GFseProbTableTypePending == kzstdgpu_ReferenceStore_Fse##name)              \
     {                                                                               \
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndex##name = symbol;    \
         GLastTableIndex_Fse##name = symbol;                                         \
     }
 
@@ -428,9 +434,9 @@ void zstdgpu_ReferenceStore_Report_FseProbSymbol(uint32_t symbol)
 void zstdgpu_ReferenceStore_Report_FseProbRepeatTable()
 {
 #define STORE(name)                                                     \
-    if (GFseProbTableTypePending == kzstdgpu_ReferenceStore_Fse##name)        \
+    if (GFseProbTableTypePending == kzstdgpu_ReferenceStore_Fse##name)  \
     {                                                                   \
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndex##name = GLastTableIndex_Fse##name;   \
+        /*STORE_AOS_##name(GLastTableIndex_Fse##name);*/                \
     }
     STORE(HufW)
     else
@@ -454,6 +460,8 @@ void zstdgpu_ReferenceStore_Report_FseCompressedHuffmanWeightSubBlock(const void
     GZstd.HufRefs[index].size = size;
 
     GZstd.DecompressedHuffmanWeightCount[index] = 0;
+
+    GZstd.CmpLitToHufWFseId[GCmpLitIndex - 1] = GLastTableIndex_FseHufW = index;
 }
 
 void zstdgpu_ReferenceStore_Report_HuffmanWeightSubBlock(const void *base, uint32_t size, uint32_t weightCount)
@@ -467,8 +475,7 @@ void zstdgpu_ReferenceStore_Report_HuffmanWeightSubBlock(const void *base, uint3
     ZSTDGPU_ASSERT(weightCount < kzstdgpu_MaxCount_HuffmanWeights);
     GZstd.DecompressedHuffmanWeightCount[index] = (uint8_t)weightCount;
 
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].fseTableIndexHufW = index;
-    GLastTableIndex_FseHufW = index;
+    GZstd.CmpLitToHufWFseId[GCmpLitIndex - 1] = GLastTableIndex_FseHufW = index;
 }
 
 void zstdgpu_ReferenceStore_Report_DecompressedHuffmanWeights(const uint8_t *weights, uint32_t weightCount)
@@ -498,17 +505,17 @@ void zstdgpu_ReferenceStore_Report_CompressedSequences(const void *base, uint32_
 {
     ZSTDGPU_UNUSED(sequenceCount);
     const uint32_t i = GSequenceStreamCount ++;
-    GZstd.SeqRefs[i].src.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
-    GZstd.SeqRefs[i].src.size = size;
+    GZstd.SeqStreamToRef[i].offs = izstdgpu_ReferenceStore_PtrToOffs(base);
+    GZstd.SeqStreamToRef[i].size = size;
 
     GZstd.PerSeqStreamSeqStart[i] = GSequenceCount;
 
     const uint32_t blockId = zstdgpu_GetLastBlockIndex();
     const uint32_t cmpBlockId = GBlockIndexCMP - 1;
-    GZstd.SeqRefs[i].fseLLen = GZstd.CompressedBlocks[cmpBlockId].fseTableIndexLLen;
-    GZstd.SeqRefs[i].fseOffs = GZstd.CompressedBlocks[cmpBlockId].fseTableIndexOffs;
-    GZstd.SeqRefs[i].fseMLen = GZstd.CompressedBlocks[cmpBlockId].fseTableIndexMLen;
-    GZstd.SeqRefs[i].blockId = blockId;
+    GZstd.SeqStreamToLLenFseId[i] = GLastTableIndex_FseLLen;
+    GZstd.SeqStreamToOffsFseId[i] = GLastTableIndex_FseOffs;
+    GZstd.SeqStreamToMLenFseId[i] = GLastTableIndex_FseMLen;
+    GZstd.SeqStreamToBlockId[i]   = blockId;
     GZstd.CompressedBlocks[cmpBlockId].seqStreamIndex = i;
 }
 
@@ -899,13 +906,17 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
     if (tst->Counters->FseHufW != GFseCompressedHuffmanWeightCount)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
+    if (tst->Counters->Cmp_Lit != GCmpLitIndex)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+    uint32_t cmpLitId = 0;
     for (uint32_t i = 0; i < GBlockCountCMP; ++i)
     {
          // Validate Referred FSE Tables
-        #define VALIDATE_FSE_TABLE_CONTENT(name, infoOfs, elemFn) \
+        #define VALIDATE_FSE_TABLE_CONTENT(refIdx, tstIdx, infoOfs, elemFn) \
             izstdgpu_ReferenceStore_Validate_FseTable(          \
-                ref->CompressedBlocks[i].fseTableIndex##name,   \
-                tst->CompressedBlocks[i].fseTableIndex##name,   \
+                refIdx,                                         \
+                tstIdx,                                         \
                 infoOfs, GBlockCountCMP, elemFn,                \
                 ref->FseInfos,                                  \
                 tst->FseInfos,                                  \
@@ -918,23 +929,54 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
         // NOTE(pamartis): When FSE HufW table index is less than the total number of FSE table count --
         // it's an actual FSE index, when it's greater or equal --
         // it encodes the index of an uncompressed Huffman Weights Stream
-        if (ref->CompressedBlocks[i].fseTableIndexHufW < GFseProbTableIndexHufW)
+        if (ref->CompressedBlocks[i].litStreamIndex != ~0u)
         {
-            if (!(tst->CompressedBlocks[i].fseTableIndexHufW < GFseProbTableIndexHufW))
-                return ZSTDGPU_ENUM_CONST(Validate_Failed);
+            if (ref->CmpLitToHufWFseId[cmpLitId] < GFseProbTableIndexHufW)
+            {
+                if (!(tst->CmpLitToHufWFseId[cmpLitId] < GFseProbTableIndexHufW))
+                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(HufW, kzstdgpu_FseRleTableCount, zstdgpu_ComputeFseDataStartHufW))
-                return ZSTDGPU_ENUM_CONST(Validate_Failed);
+                if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
+                        ref->CmpLitToHufWFseId[cmpLitId],
+                        tst->CmpLitToHufWFseId[cmpLitId],
+                        kzstdgpu_FseRleTableCount, zstdgpu_ComputeFseDataStartHufW))
+                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+            }
+            cmpLitId += 1;
         }
 
-        if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(LLen, 0, zstdgpu_ComputeFseDataStartFromFseIndexLLen))
-            return ZSTDGPU_ENUM_CONST(Validate_Failed);
+        // FSE LLen/Offs/MLen indices are now stored per-sequence-stream in `SeqStreamTo*FseId`.
+        // Compressed blocks with no sequences (`seqStreamIndex == ~0u`) have no FSE seq tables to validate.
+        const uint32_t refSeqStreamIdx = ref->CompressedBlocks[i].seqStreamIndex;
+        const uint32_t tstSeqStreamIdx = tst->CompressedBlocks[i].seqStreamIndex;
+        if (refSeqStreamIdx == ~0u)
+        {
+            if (tstSeqStreamIdx != ~0u)
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
+        }
+        else
+        {
+            if (tstSeqStreamIdx == ~0u)
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-        if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(Offs, 0, zstdgpu_ComputeFseDataStartFromFseIndexOffs))
-            return ZSTDGPU_ENUM_CONST(Validate_Failed);
+            if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
+                    ref->SeqStreamToLLenFseId[refSeqStreamIdx],
+                    tst->SeqStreamToLLenFseId[tstSeqStreamIdx],
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexLLen))
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-        if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(MLen, 0, zstdgpu_ComputeFseDataStartFromFseIndexMLen))
-            return ZSTDGPU_ENUM_CONST(Validate_Failed);
+            if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
+                    ref->SeqStreamToOffsFseId[refSeqStreamIdx],
+                    tst->SeqStreamToOffsFseId[tstSeqStreamIdx],
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexOffs))
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+            if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
+                    ref->SeqStreamToMLenFseId[refSeqStreamIdx],
+                    tst->SeqStreamToMLenFseId[tstSeqStreamIdx],
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexMLen))
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
+        }
 
 
         #undef VALIDATE_FSE_TABLE_CONTENT
@@ -961,11 +1003,15 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
     if (resourceDataCpu->Counters->FseHufW != GFseCompressedHuffmanWeightCount)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
+    const zstdgpu_ResourceDataCpu *ref = &GZstd;
+    const zstdgpu_ResourceDataCpu *tst = resourceDataCpu;
+
     const zstdgpu_CompressedBlockData *refCmpBlocks = GZstd.CompressedBlocks;
     const zstdgpu_CompressedBlockData *tstCmpBlocks = resourceDataCpu->CompressedBlocks;
 
     //if (0 != memcmp(tstCmpBlocks, refCmpBlocks, sizeof(refCmpBlocks[0]) * GBlockCountCMP))
     {
+        uint32_t cmpLitId = 0;
         for (uint32_t i = 0; i < GBlockCountCMP; ++i)
         {
             if (tstCmpBlocks[i].litStreamIndex == ~0u)
@@ -982,8 +1028,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                 uint32_t refLiteralOffset = refCmpBlocks[i].litStreamIndex;
                 uint32_t tstLitaralOffset = tstCmpBlocks[i].litStreamIndex;
 
-                const zstdgpu_LitStreamInfo *refHufLiteral = &GZstd.LitRefs[refLiteralOffset];
-                const zstdgpu_LitStreamInfo *tstHufLiteral = &resourceDataCpu->LitRefs[tstLitaralOffset];
+                const zstdgpu_LitStreamInfo *refHufLiteral = &ref->LitRefs[refLiteralOffset];
+                const zstdgpu_LitStreamInfo *tstHufLiteral = &tst->LitRefs[tstLitaralOffset];
 
                 // Disabled because "block data" contains offset as "compressed block data size + offset"
                 //ZSTDGPU_ASSERT(refCompressedBlockData.literal.offs == refHufLiteral[0].dstOffs);
@@ -1018,19 +1064,28 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }
 
-            // Validate offsets of Fse-compressed Huffman Weights
-            uint32_t tstFseCompressedHuffmanWeightsIndex = tstCmpBlocks[i].fseTableIndexHufW;
-            uint32_t refFseCompressedHuffmanWeightsIndex = refCmpBlocks[i].fseTableIndexHufW;
-            if (refFseCompressedHuffmanWeightsIndex != kzstdgpu_FseProbTableIndex_Unused)
+            if (refCmpBlocks[i].litStreamIndex != ~0u)
             {
-                if (refFseCompressedHuffmanWeightsIndex == kzstdgpu_FseProbTableIndex_Repeat)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-                if (tstFseCompressedHuffmanWeightsIndex == kzstdgpu_FseProbTableIndex_Repeat)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-                if (tstFseCompressedHuffmanWeightsIndex == kzstdgpu_FseProbTableIndex_Unused)
+                if (tstCmpBlocks[i].litStreamIndex == ~0u)
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-                if (ZSTDGPU_ENUM_CONST(Validate_Success) != izstdgpu_ReferenceStore_Validate_OffsetAndSize(&GZstd.HufRefs[refFseCompressedHuffmanWeightsIndex], &resourceDataCpu->HufRefs[tstFseCompressedHuffmanWeightsIndex]))
+                uint32_t refFseCompressedHuffmanWeightsIndex = ref->CmpLitToHufWFseId[cmpLitId];
+                uint32_t tstFseCompressedHuffmanWeightsIndex = tst->CmpLitToHufWFseId[cmpLitId];
+
+                if (refFseCompressedHuffmanWeightsIndex >= kzstdgpu_FseProbTableIndex_Repeat)
+                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+                if (tstFseCompressedHuffmanWeightsIndex >= kzstdgpu_FseProbTableIndex_Repeat)
+                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+                if (ZSTDGPU_ENUM_CONST(Validate_Success) != izstdgpu_ReferenceStore_Validate_OffsetAndSize(&ref->HufRefs[refFseCompressedHuffmanWeightsIndex], &tst->HufRefs[tstFseCompressedHuffmanWeightsIndex]))
+                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+                cmpLitId += 1;
+            }
+            else
+            {
+                if (refCmpBlocks[i].litStreamIndex != tstCmpBlocks[i].litStreamIndex)
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }
         }
@@ -1040,57 +1095,42 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffmanWeights(const zstdgpu_ResourceDataCpu *resourceDataCpu)
 {
-    if (resourceDataCpu->Counters->Blocks_CMP != GBlockCountCMP)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
+    if (resourceDataCpu->Counters->Cmp_Lit != GCmpLitIndex)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     const zstdgpu_ResourceDataCpu *ref = &GZstd;
     const zstdgpu_ResourceDataCpu *tst = resourceDataCpu;
 
-    for (uint32_t i = 0; i < GBlockCountCMP; ++i)
+    for (uint32_t i = 0; i < GCmpLitIndex; ++i)
     {
         // Validate decompressed Fse-compressed Huffman Weights and their counts
-        uint32_t tstHuffmanWeightStreamIndex = tst->CompressedBlocks[i].fseTableIndexHufW;
-        uint32_t refHuffmanWeightStreamIndex = ref->CompressedBlocks[i].fseTableIndexHufW;
+        uint32_t tstHuffmanWeightStreamIndex = tst->CmpLitToHufWFseId[i];
+        uint32_t refHuffmanWeightStreamIndex = ref->CmpLitToHufWFseId[i];
 
-        if (refHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Repeat)
+        if (refHuffmanWeightStreamIndex >= kzstdgpu_FseProbTableIndex_Repeat)
             return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-        if (refHuffmanWeightStreamIndex != kzstdgpu_FseProbTableIndex_Unused)
+        if (tstHuffmanWeightStreamIndex >= kzstdgpu_FseProbTableIndex_Repeat)
+            return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+        if (refHuffmanWeightStreamIndex < GFseCompressedHuffmanWeightCount)
         {
-            if (tstHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Repeat)
+            if (tstHuffmanWeightStreamIndex >= GFseCompressedHuffmanWeightCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (tstHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Unused)
+            uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
+            uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
+
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+
+            if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (refHuffmanWeightStreamIndex < GFseCompressedHuffmanWeightCount)
-            {
-                if (tstHuffmanWeightStreamIndex >= GFseCompressedHuffmanWeightCount)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+            if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-                uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
-                uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
-
-                const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-                const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-
-                if (refCount != tstCount)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (0 != memcmp(refStart, tstStart, refCount))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-            }
-        }
-        else
-        {
-            // NOTE(pamartis): because ref is Unused, tst must be Unused too.
-            if (tstHuffmanWeightStreamIndex != kzstdgpu_FseProbTableIndex_Unused)
+            if (0 != memcmp(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }
@@ -1099,59 +1139,42 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
 
 ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeights(const zstdgpu_ResourceDataCpu * resourceDataCpu)
 {
-    if (resourceDataCpu->Counters->Blocks_CMP != GBlockCountCMP)
+    if (resourceDataCpu->Counters->Cmp_Lit != GCmpLitIndex)
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-    if (resourceDataCpu->Counters->Blocks_CMP != GBlockIndexCMP)
-        return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
 
     const zstdgpu_ResourceDataCpu *ref = &GZstd;
     const zstdgpu_ResourceDataCpu *tst = resourceDataCpu;
 
-    for (uint32_t i = 0; i < GBlockCountCMP; ++i)
+    for (uint32_t i = 0; i < GCmpLitIndex; ++i)
     {
         // Validate decoded uncompressed Huffman Weights and their counts
-        uint32_t tstHuffmanWeightStreamIndex = tst->CompressedBlocks[i].fseTableIndexHufW;
-        uint32_t refHuffmanWeightStreamIndex = ref->CompressedBlocks[i].fseTableIndexHufW;
+        uint32_t tstHuffmanWeightStreamIndex = tst->CmpLitToHufWFseId[i];
+        uint32_t refHuffmanWeightStreamIndex = ref->CmpLitToHufWFseId[i];
 
-        if (refHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Repeat)
+        if (refHuffmanWeightStreamIndex >= kzstdgpu_FseProbTableIndex_Repeat)
+        return ZSTDGPU_ENUM_CONST(Validate_Failed);
+
+        if (tstHuffmanWeightStreamIndex >= kzstdgpu_FseProbTableIndex_Repeat)
             return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-        if (refHuffmanWeightStreamIndex != kzstdgpu_FseProbTableIndex_Unused)
+        if (refHuffmanWeightStreamIndex >= GFseCompressedHuffmanWeightCount)
         {
-            if (tstHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Repeat)
+            if (tstHuffmanWeightStreamIndex < GFseCompressedHuffmanWeightCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (tstHuffmanWeightStreamIndex == kzstdgpu_FseProbTableIndex_Unused)
+            uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
+            uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
+
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+
+            if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
+            if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
+                return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (refHuffmanWeightStreamIndex >= GFseCompressedHuffmanWeightCount)
-            {
-                if (tstHuffmanWeightStreamIndex < GFseCompressedHuffmanWeightCount)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
-                uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
-
-                const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-                const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-
-                if (refCount != tstCount)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (0 != memcmp(refStart, tstStart, refCount))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-            }
-        }
-        else
-        {
-            // NOTE(pamartis): because ref is Unused, tst must be Unused too.
-            if (tstHuffmanWeightStreamIndex != kzstdgpu_FseProbTableIndex_Unused)
+            if (0 != memcmp(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }
@@ -1234,9 +1257,6 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
             if (refData->PerSeqStreamFinalOffset3[refSeqSteamIndex] != tstData->PerSeqStreamFinalOffset3[tstSeqSteamIndex])
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            const zstdgpu_SeqStreamInfo *refSeqRefs = &refData->SeqRefs[refSeqSteamIndex];
-            const zstdgpu_SeqStreamInfo *tstSeqRefs = &tstData->SeqRefs[tstSeqSteamIndex];
-
             const uint32_t refSeqOffs = refData->PerSeqStreamSeqStart[refSeqSteamIndex];
             const uint32_t tstSeqOffs = tstData->PerSeqStreamSeqStart[tstSeqSteamIndex];
 
@@ -1264,33 +1284,6 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }
 
-            // Validate FSE tables accessed through references are the same
-            {
-                // NOTE: can't be the same due to non-deterministic allocation
-                //ZSTDGPU_ASSERT(refSeqRefs[refSeqSteamIndex].fseLLen == tstSeqRefs[tstSeqSteamIndex].fseLLen);
-                //ZSTDGPU_ASSERT(refSeqRefs[refSeqSteamIndex].fseOffs == tstSeqRefs[tstSeqSteamIndex].fseOffs);
-                //ZSTDGPU_ASSERT(refSeqRefs[refSeqSteamIndex].fseMLen == tstSeqRefs[tstSeqSteamIndex].fseMLen);
-
-                if (refSeqRefs->fseLLen != refData->CompressedBlocks[i].fseTableIndexLLen)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (refSeqRefs->fseOffs != refData->CompressedBlocks[i].fseTableIndexOffs)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (refSeqRefs->fseMLen != refData->CompressedBlocks[i].fseTableIndexMLen)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-
-                if (tstSeqRefs->fseLLen != tstData->CompressedBlocks[i].fseTableIndexLLen)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (tstSeqRefs->fseOffs != tstData->CompressedBlocks[i].fseTableIndexOffs)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (tstSeqRefs->fseMLen != tstData->CompressedBlocks[i].fseTableIndexMLen)
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-            }
         }
     }
     return ZSTDGPU_ENUM_CONST(Validate_Success);

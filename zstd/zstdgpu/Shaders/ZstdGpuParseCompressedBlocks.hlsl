@@ -38,7 +38,7 @@ ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=16)), RootConstants(b0, num32BitConstants=4)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=26)), RootConstants(b0, num32BitConstants=4)")]
 [numthreads(kzstdgpu_TgSizeX_ParseCompressedBlocks, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
