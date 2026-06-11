@@ -1426,70 +1426,97 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             //      [Stage1 - Req J]                  [Stage2 - Req J  ]                  [Stage0 - Req J+1]                  [Stage1 - Req J+1]
             //
             {
-                uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
-                uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
-                for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                #define RECREATE_HEAP(name, i)                      \
+                    if (name##HeapSizeReq > name##HeapSize[i])      \
+                    {                                               \
+                        D3D12AID_SAFE_RELEASE(name##Heap[i]);       \
+                        name##Heap[i] = d3d12aid_Heap_Create(device, name##HeapSizeReq, 0, name##Type);\
+                        name##HeapSize[i] = name##HeapSizeReq;      \
+                    }
+                D3D12_HEAP_TYPE defaultType = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_HEAP_TYPE uploadType = D3D12_HEAP_TYPE_UPLOAD;
+                D3D12_HEAP_TYPE readbackType = D3D12_HEAP_TYPE_READBACK;
+                if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext))
                 {
-                    if (extMem /** a scenario with supplying external memory */)
+                    if (extMem)
                     {
                         uint32_t defaultHeapSizeReq = 0;
                         uint32_t uploadHeapSizeReq = 0;
                         uint32_t readbackHeapSizeReq = 0;
                         uint32_t descriptorCountReq = 0;
 
-                        zstdgpu_GetGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext, stageIndex);
+                        zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext);
 
-                        if (defaultHeapSizeReq > defaultHeapSize[stageIndex])
+                        RECREATE_HEAP(default, 0)
+                        RECREATE_HEAP(upload, 0)
+                        RECREATE_HEAP(readback, 0)
+
+                        if (descriptorCountReq > descriptorCount[0])
                         {
-                            D3D12AID_SAFE_RELEASE(defaultHeap[stageIndex]);
-
-                            defaultHeap[stageIndex] = d3d12aid_Heap_Create(device, defaultHeapSizeReq, 0, D3D12_HEAP_TYPE_DEFAULT);
-                            defaultHeapSize[stageIndex] = defaultHeapSizeReq;
+                            D3D12AID_SAFE_RELEASE(descriptorHeap[0]);
+                            descriptorHeap[0] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+                            descriptorCount[0] = descriptorCountReq;
                         }
 
-                        if (uploadHeapSizeReq > uploadHeapSize[stageIndex])
-                        {
-                            D3D12AID_SAFE_RELEASE(uploadHeap[stageIndex]);
-
-                            uploadHeap[stageIndex] = d3d12aid_Heap_Create(device, uploadHeapSizeReq, 0, D3D12_HEAP_TYPE_UPLOAD);
-                            uploadHeapSize[stageIndex] = uploadHeapSizeReq;
-                        }
-
-                        if (readbackHeapSizeReq > readbackHeapSize[stageIndex])
-                        {
-                            D3D12AID_SAFE_RELEASE(readbackHeap[stageIndex]);
-
-                            readbackHeap[stageIndex] = d3d12aid_Heap_Create(device, readbackHeapSizeReq, 0, D3D12_HEAP_TYPE_READBACK);
-                            readbackHeapSize[stageIndex] = readbackHeapSizeReq;
-                        }
-
-                        if (descriptorCountReq > descriptorCount[stageIndex])
-                        {
-                            D3D12AID_SAFE_RELEASE(descriptorHeap[stageIndex]);
-                            descriptorHeap[stageIndex] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-                            descriptorCount[stageIndex] = descriptorCountReq;
-                        }
-
-                        d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
-                            zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
+                        d3d12aid_Timestamp_PushScope(Stage0_Stamp, timestamps, cmdList,
+                            zstdgpu_SubmitAllStagesWithExternalMemory(perRequestContext, cmdList, defaultHeap[0], 0, uploadHeap[0], 0, readbackHeap[0], 0, descriptorHeap[0], 0);
                         );
-
                     }
                     else
                     {
-                        d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
-                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
-                        );
-                    }
-                    if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
-                    {
-                        d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
-                            d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                            d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                            cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
+                        d3d12aid_Timestamp_PushScope(Stage0_Stamp, timestamps, cmdList,
+                            zstdgpu_SubmitAllStagesWithInteralMemory(perRequestContext, cmdList);
                         );
                     }
                 }
+                else
+                {
+                    uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
+                    uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
+                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    {
+                        if (extMem /** a scenario with supplying external memory */)
+                        {
+                            uint32_t defaultHeapSizeReq = 0;
+                            uint32_t uploadHeapSizeReq = 0;
+                            uint32_t readbackHeapSizeReq = 0;
+                            uint32_t descriptorCountReq = 0;
+
+                            zstdgpu_GetGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext, stageIndex);
+
+                            RECREATE_HEAP(default, stageIndex)
+                            RECREATE_HEAP(upload, stageIndex)
+                            RECREATE_HEAP(readback, stageIndex)
+
+                            if (descriptorCountReq > descriptorCount[stageIndex])
+                            {
+                                D3D12AID_SAFE_RELEASE(descriptorHeap[stageIndex]);
+                                descriptorHeap[stageIndex] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+                                descriptorCount[stageIndex] = descriptorCountReq;
+                            }
+
+                            d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
+                                zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
+                            );
+
+                        }
+                        else
+                        {
+                            d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
+                                zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
+                            );
+                        }
+                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
+                        {
+                            d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
+                                d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
+                                d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+                                cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
+                            );
+                        }
+                    }
+                }
+                #undef RECREATE_HEAP
 
                 {
                     D3D12_RESOURCE_BARRIER barrier;

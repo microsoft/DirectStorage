@@ -255,6 +255,7 @@ static void zstdgpu_ResourceInfo_InitZero(zstdgpu_ResourceInfo *outInfo)
 }
 
 #define ZSTDGPU_ALIGN_DEFAULT(offset) zstdgpu_AlignUp(offset, 0x10000)
+#define ZSTDGPU_IS_DEFAULT_ALIGNED(offset) (0 == (offset & (0x10000 - 1)))
 
 // initialize the counts, sizes and offsets
 #define ZSTDGPU_BUFFER(type, name)                                      \

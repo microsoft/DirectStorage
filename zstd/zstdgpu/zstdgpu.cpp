@@ -1381,6 +1381,12 @@ uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerRequestContex
     return 0;
 }
 
+uint32_t zstdgpu_IsAnyStageReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext)
+{
+    uint32_t requiredFlags = kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasBlockInfoConstants;
+    return (requiredFlags == (inPerRequestContext->setupFlags & requiredFlags)) ? 0 : 1;
+}
+
 ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
 {
     uint32_t proceed = 1;
@@ -1454,6 +1460,70 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
         *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs_Stage(stageIndex);
 
         #undef CNTRS
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefaultHeapByteCount,
+                                                            uint32_t *outUploadHeapByteCount,
+                                                            uint32_t *outReadbackHeapByteCount,
+                                                            zstdgpu_PerRequestContext req)
+{
+    uint32_t cntRaw, cntRle, cntCmp, cntLit, cntSeq;
+    zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
+
+    cntRaw = req->zstdRawBlockCountMax;
+    cntRle = req->zstdRleBlockCountMax;
+    cntCmp = req->zstdCmpBlockCountMax;
+    zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
+
+    cntLit = req->zstdUncompressedLitByteCountMax;
+    cntSeq = req->zstdUncompressedSeqElemCountMax;
+    zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
+
+    *outDefaultHeapByteCount    = req->resInfo.gpuOnly_ByteCount[0]
+                                + req->resInfo.gpuOnly_ByteCount[1]
+                                + req->resInfo.gpuOnly_ByteCount[2];
+
+    *outUploadHeapByteCount     = req->resInfo.cpu2Gpu_ByteCount[0]
+                                + req->resInfo.cpu2Gpu_ByteCount[1]
+                                + req->resInfo.cpu2Gpu_ByteCount[2];
+
+    *outReadbackHeapByteCount   = req->resInfo.gpu2Cpu_ByteCount[0]
+                                + req->resInfo.gpu2Cpu_ByteCount[1]
+                                + req->resInfo.gpu2Cpu_ByteCount[2];
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount,
+                                                             uint32_t *outUploadHeapByteCount,
+                                                             uint32_t *outReadbackHeapByteCount,
+                                                             uint32_t *outShaderVisibleDescriptorCount,
+                                                             zstdgpu_PerRequestContext req)
+{
+    uint32_t proceed = 1;
+
+    proceed = proceed && (NULL != outDefaultHeapByteCount);
+    proceed = proceed && (NULL != outUploadHeapByteCount);
+    proceed = proceed && (NULL != outReadbackHeapByteCount);
+    proceed = proceed && (NULL != outShaderVisibleDescriptorCount);
+    proceed = proceed && (NULL != req);
+    proceed = proceed && (req->thisMemoryBlock == (void *)req);
+    proceed = proceed && (req->zstdFrameCount > 0);
+    proceed = proceed && (req->zstdCompressedFramesByteCount > 0);
+    proceed = proceed && (req->zstdUncompressedFrameCount == req->zstdFrameCount);
+    proceed = proceed && (req->zstdUncompressedFramesByteCount > 0);
+    proceed = proceed && (0 == zstdgpu_IsAnyStageReadbackRequired(req));
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        zstdgpu_GetAllStageGpuMemoryRequirementInternal(outDefaultHeapByteCount, outUploadHeapByteCount, outReadbackHeapByteCount, req);
+
+        *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs_Stage(0)
+                                            + zstdgpu_Count_SRTs_Stage(1)
+                                            + zstdgpu_Count_SRTs_Stage(2);
+
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
@@ -1561,6 +1631,115 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
         {
             zstdgpu_SubmitStage2(req, cmdList);
         }
+
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext req,
+                                                               struct ID3D12GraphicsCommandList *cmdList,
+                                                               struct ID3D12Heap *defaultHeap,
+                                                               uint32_t defaultHeap_OffsetInBytes,
+                                                               struct ID3D12Heap *uploadHeap,
+                                                               uint32_t uploadHeap_OffsetInBytes,
+                                                               struct ID3D12Heap *readbackHeap,
+                                                               uint32_t readbackHeap_OffsetInBytes,
+                                                               struct ID3D12DescriptorHeap *shaderVisibleHeap,
+                                                               uint32_t shaderVisibileHeap_OffsetInDescriptors)
+{
+    uint32_t proceed = 1;
+    uint32_t defaultHeapMemReq = 0;
+    uint32_t uploadHeapMemReq = 0;
+    uint32_t readbackHeapMemReq = 0;
+    uint32_t shaderVisibleHeapDscCount = 0;
+    proceed = proceed && (0 == zstdgpu_IsAnyStageReadbackRequired(req));
+    proceed = proceed && (ZSTDGPU_ENUM_CONST(StatusSuccess) == zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapMemReq, &uploadHeapMemReq, &readbackHeapMemReq, &shaderVisibleHeapDscCount, req));
+    proceed = proceed && (NULL != cmdList);
+    proceed = proceed && (NULL != defaultHeap || 0 == defaultHeapMemReq);
+    proceed = proceed && (NULL != uploadHeap || 0 == uploadHeapMemReq);
+    proceed = proceed && (NULL != readbackHeap || 0 == readbackHeapMemReq);
+    proceed = proceed && (NULL != shaderVisibleHeap || 0 == shaderVisibleHeapDscCount);
+    proceed = proceed && (req->zstdUncompressedLitByteCountMax == 0 || req->zstdCmpBlockCountMax > 0);
+    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(defaultHeap_OffsetInBytes);
+    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(uploadHeap_OffsetInBytes);
+    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(readbackHeap_OffsetInBytes);
+    ZSTDGPU_ASSERT(proceed > 0);
+    if (proceed)
+    {
+        uint32_t defaultOffs = defaultHeap_OffsetInBytes;
+        uint32_t uploadOffs = uploadHeap_OffsetInBytes;
+        uint32_t readbackOffs = readbackHeap_OffsetInBytes;
+        zstdgpu_ResourceDataGpu_Term(&req->resData, 0);
+        zstdgpu_ResourceDataGpu_Term(&req->resData, 1);
+        zstdgpu_ResourceDataGpu_Term(&req->resData, 2);
+
+        for (uint32_t stageIndex = 0; stageIndex < ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount); ++stageIndex)
+        {
+            if (NULL != defaultHeap)
+                defaultHeap->AddRef();
+
+            if (NULL != uploadHeap)
+                uploadHeap->AddRef();
+
+            if (NULL != readbackHeap)
+                readbackHeap->AddRef();
+
+            req->resData.gpuOnly_Heap[stageIndex] = defaultHeap;
+            req->resData.gpuOnly_HeapOffset[stageIndex] = defaultOffs;
+
+            req->resData.cpu2Gpu_Heap[stageIndex] = uploadHeap;
+            req->resData.cpu2Gpu_HeapOffset[stageIndex] = uploadOffs;
+
+            req->resData.gpu2Cpu_Heap[stageIndex] = readbackHeap;
+            req->resData.gpu2Cpu_HeapOffset[stageIndex] = readbackOffs;
+
+            defaultOffs   += req->resInfo.gpuOnly_ByteCount[stageIndex];
+            uploadOffs    += req->resInfo.cpu2Gpu_ByteCount[stageIndex];
+            readbackOffs  += req->resInfo.gpu2Cpu_ByteCount[stageIndex];
+
+            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(defaultOffs));
+            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(uploadOffs));
+            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(readbackOffs));
+        }
+        ZSTDGPU_ASSERT(defaultHeapMemReq == defaultOffs - defaultHeap_OffsetInBytes);
+        ZSTDGPU_ASSERT(uploadHeapMemReq == uploadOffs - uploadHeap_OffsetInBytes);
+        ZSTDGPU_ASSERT(readbackHeapMemReq == readbackOffs - readbackHeap_OffsetInBytes);
+
+        zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 0);
+        zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 1);
+        zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 2);
+
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory))
+        {
+            zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
+        }
+        zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+
+        // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
+        {
+            req->uploadCallback(req->resData.cpu2Gpu.CompressedDataCpu, req->zstdCompressedFramesByteCount, req->resData.cpu2Gpu.FramesRefsCpu, req->zstdFrameCount, req->uploadUserdata);
+        }
+        memcpy(req->resData.cpu2Gpu.FseProbsDefaultCpu, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
+
+        D3D12AID_SAFE_RELEASE(req->srts.heap);
+        req->srts.heap = shaderVisibleHeap;
+        req->srts.heap->AddRef();
+        req->srts.heapOffset = shaderVisibileHeap_OffsetInDescriptors;
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 0);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(0);
+
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 1);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(1);
+
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 2);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(2);
+
+        ZSTDGPU_ASSERT(shaderVisibleHeapDscCount == req->srts.heapOffset - shaderVisibileHeap_OffsetInDescriptors);
+        zstdgpu_SubmitStage0(req, cmdList);
+        zstdgpu_SubmitStage1(req, cmdList);
+        zstdgpu_SubmitStage2(req, cmdList);
 
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
@@ -1694,6 +1873,185 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         {
             zstdgpu_SubmitStage2(req, cmdList);
         }
+
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequestContext req,
+                                                              ID3D12GraphicsCommandList *cmdList)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (0 == zstdgpu_IsAnyStageReadbackRequired(req));
+    proceed = proceed && (NULL != req);
+    proceed = proceed && (NULL != cmdList);
+    proceed = proceed && (req->thisMemoryBlock == (void *)req);
+    proceed = proceed && (req->zstdFrameCount > 0);
+    proceed = proceed && (req->zstdCompressedFramesByteCount > 0);
+    proceed = proceed && (req->zstdUncompressedFrameCount == req->zstdFrameCount);
+    proceed = proceed && (req->zstdUncompressedFramesByteCount > 0);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        ID3D12Device *device = req->device;
+        uint32_t dflt, upld, rdbk;
+        uint32_t dfltP, upldP, rdbkP;
+        zstdgpu_GetAllStageGpuMemoryRequirementInternal(&dflt, &upld, &rdbk, req);
+
+        dfltP = req->resData.gpuOnly_ByteCount[0]
+              + req->resData.gpuOnly_ByteCount[1]
+              + req->resData.gpuOnly_ByteCount[2];
+
+        upldP = req->resData.cpu2Gpu_ByteCount[0]
+              + req->resData.cpu2Gpu_ByteCount[1]
+              + req->resData.cpu2Gpu_ByteCount[2];
+
+        rdbkP = req->resData.gpu2Cpu_ByteCount[0]
+              + req->resData.gpu2Cpu_ByteCount[1]
+              + req->resData.gpu2Cpu_ByteCount[2];
+
+        // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
+        //                 but this must be done at some point
+        #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(req->resData.gpuOnly.name);
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
+        #undef ZSTDGPU_BUFFER
+
+        #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu.name);
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1()
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2()
+        #undef ZSTDGPU_BUFFER
+
+        #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu.name);
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_1()
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
+        #undef ZSTDGPU_BUFFER
+
+        if (dfltP < dflt)
+        {
+            D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[0]);
+            D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[1]);
+            D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[2]);
+        }
+
+        if (upldP < upld)
+        {
+            D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[0]);
+            D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[1]);
+            D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[2]);
+        }
+
+        if (rdbkP < rdbk)
+        {
+            D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu_Heap[0]);
+            D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu_Heap[1]);
+            D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu_Heap[2]);
+        }
+
+        // NOTE(pamartis): when initialising a heap in single submission mode, we set exact memory requirement
+        // use shared pointer
+        #define INIT_HEAP(name, stage, heap)                                            \
+            req->resData.name##_Heap[stage] = heap;                                     \
+            req->resData.name##_HeapOffset[stage] = offs;                               \
+            req->resData.name##_ByteCount[stage] = req->resInfo.name##_ByteCount[stage];\
+            offs += req->resInfo.name##_ByteCount[stage];                               \
+            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(offs))
+
+        if (NULL == req->resData.gpuOnly_Heap[0] && 0 != dflt)
+        {
+            ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, dflt, 0, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+            uint32_t offs = 0;
+            INIT_HEAP(gpuOnly, 0, heap);
+            INIT_HEAP(gpuOnly, 1, heap);
+            INIT_HEAP(gpuOnly, 2, heap);
+            ZSTDGPU_ASSERT(offs == dflt);
+
+            heap->AddRef();
+            heap->AddRef();
+        }
+        // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
+        //                 but this must be done at some point
+        zstdgpu_ResourceDataGpu_Init_GpuOnly(&req->resData, &req->resInfo, device, 0);
+        zstdgpu_ResourceDataGpu_Init_GpuOnly(&req->resData, &req->resInfo, device, 1);
+        zstdgpu_ResourceDataGpu_Init_GpuOnly(&req->resData, &req->resInfo, device, 2);
+
+        if (NULL == req->resData.cpu2Gpu_Heap[0] && 0 != upld)
+        {
+            ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, upld, 0, D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+            uint32_t offs = 0;
+            INIT_HEAP(cpu2Gpu, 0, heap);
+            INIT_HEAP(cpu2Gpu, 1, heap);
+            INIT_HEAP(cpu2Gpu, 2, heap);
+            ZSTDGPU_ASSERT(offs == upld);
+            heap->AddRef();
+            heap->AddRef();
+        }
+        // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
+        //                 but this must be done at some point
+        zstdgpu_ResourceDataGpu_Init_CpuToGpu(&req->resData, &req->resInfo, device, 0);
+        zstdgpu_ResourceDataGpu_Init_CpuToGpu(&req->resData, &req->resInfo, device, 1);
+        zstdgpu_ResourceDataGpu_Init_CpuToGpu(&req->resData, &req->resInfo, device, 2);
+
+        if (NULL == req->resData.gpu2Cpu_Heap[0] && 0 != rdbk)
+        {
+            ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, rdbk, 0, D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+            uint32_t offs = 0;
+            INIT_HEAP(gpu2Cpu, 0, heap);
+            INIT_HEAP(gpu2Cpu, 1, heap);
+            INIT_HEAP(gpu2Cpu, 2, heap);
+            ZSTDGPU_ASSERT(offs == rdbk);
+            heap->AddRef();
+            heap->AddRef();
+        }
+        // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
+        //                 but this must be done at some point
+        zstdgpu_ResourceDataGpu_Init_GpuToCpu(&req->resData, &req->resInfo, device, 0);
+        zstdgpu_ResourceDataGpu_Init_GpuToCpu(&req->resData, &req->resInfo, device, 1);
+        zstdgpu_ResourceDataGpu_Init_GpuToCpu(&req->resData, &req->resInfo, device, 2);
+        #undef INIT_HEAP
+
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory))
+        {
+            zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
+        }
+
+        zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
+        {
+            req->uploadCallback(req->resData.cpu2Gpu.CompressedDataCpu, req->zstdCompressedFramesByteCount, req->resData.cpu2Gpu.FramesRefsCpu, req->zstdFrameCount, req->uploadUserdata);
+        }
+        memcpy(req->resData.cpu2Gpu.FseProbsDefaultCpu, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
+
+        if (NULL == req->srts.heap)
+        {
+            const uint32_t srtCount = zstdgpu_Count_SRTs_Stage(0)
+                                    + zstdgpu_Count_SRTs_Stage(1)
+                                    + zstdgpu_Count_SRTs_Stage(2);
+
+            req->srts.heap = d3d12aid_DescriptorHeap_Create(req->device, srtCount, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+            req->srts.heapOffset = 0;
+        }
+
+        // TODO(pamartis): descriptors should be re-created only when buffers were re-created
+        //                 but currently we always re-create buffers
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 0);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(0);
+
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 1);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(1);
+
+        zstdgpu_ReCreate_SRTs(req->srts, req->device, req->resInfo, req->resData, 2);
+        req->srts.heapOffset += zstdgpu_Count_SRTs_Stage(2);
+
+        zstdgpu_SubmitStage0(req, cmdList);
+        zstdgpu_SubmitStage1(req, cmdList);
+        zstdgpu_SubmitStage2(req, cmdList);
 
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
