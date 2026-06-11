@@ -384,10 +384,13 @@ static const uint32_t kzstdgpu_TgSizeX_PrefixSum = 32;
 
 static const uint32_t kzstdgpu_TgSizeX_ParseCompressedBlocks = 32;
 
+// NOTE(pamartis): Propagation works at wave-level through `WaveReadLaneAt` wave intrinsic,
+// however, we limit the size of threadgroup to be 32 because it's the maximal safe number of lanes
+// `WaveReadLaneAt` works reliably.
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 64;
+static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 32;
 #else
-static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 256;
+static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 32;
 #endif
 
 static const uint32_t kzstdgpu_TgSizeX_Memset = 64;
