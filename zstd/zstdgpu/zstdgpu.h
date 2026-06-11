@@ -213,8 +213,20 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestCon
  */
 ZSTDGPU_API uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
+/**
+ *  @brief      Returns memory requirement for each heap type per submission stage for a given `zstdgpu_PerRequestContext`
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
+/**
+ *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with externally
+ *              supplied memory.
+ *
+ *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
+ *              for `stageIndex` supplied into this function.
+ *
+ *  @note       The caller must compute required memory for a given `stageIndex` via `zstdgpu_GetGpuMemoryRequirement`
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
                                                             uint32_t stageIndex,
                                                             struct ID3D12GraphicsCommandList *cmdList,
@@ -227,4 +239,11 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
                                                             struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                             uint32_t shaderVisibileHeapOffsetInDescriptors);
 
+/**
+ *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with internally
+ *              allocated memory.
+ *
+ *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
+ *              for `stageIndex` supplied into this function.
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList);
