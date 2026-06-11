@@ -968,6 +968,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool simGpu = false;
     bool d3dDbg = false;
     bool d3dGfx = false;
+    bool outFrm = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
     wchar_t *zstFilePathStorage = NULL;
@@ -1096,6 +1097,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     nextMaxFrame = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--out-frm"))
+                {
+                    outFrm = true;
+                }
                 else
                 {
                     debugPrint(L"Unknown argv[%d] %s\n", argi, argv[argi]);
@@ -1119,6 +1124,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
+                debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
                 if (badArg)
                 {
                     return 1;
@@ -1596,7 +1602,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     }
                 }
 
-                if (frameIndex == 0)
+                if (frameIndex == 0 && outFrm /** output decompressed frame data to files if requested via command line */)
                 {
 #ifdef _MSC_VER
                     __pragma(warning(push))
