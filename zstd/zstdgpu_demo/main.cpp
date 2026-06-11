@@ -1271,26 +1271,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
     }
 
-#if 0
-    {
-        for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
-        {
-            zstdgpu_CollectBlocks(
-                zstdCpu.BlocksRAWRefs,
-                zstdCpu.BlocksRLERefs,
-                zstdCpu.BlocksCMPRefs,
-                zstdCpu.FramesRefs,
-                zstdCpu.Frames,
-                i,
-                fbInfo.frameCount,
-                zstdData,
-                zstdBufferSize,
-                zstdDataSize
-            );
-        }
-    }
-#endif
-
     zstdgpu_ResourceDataCpu zstdCpu;
     if (chkCpu)
     {
