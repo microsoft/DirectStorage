@@ -1426,11 +1426,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             //      [Stage1 - Req J]                  [Stage2 - Req J  ]                  [Stage0 - Req J+1]                  [Stage1 - Req J+1]
             //
             {
-                if (extMem)
+                uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
+                uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
+                for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
                 {
-                    uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
-                    uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
-                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    if (extMem /** a scenario with supplying external memory */)
                     {
                         uint32_t defaultHeapSizeReq = 0;
                         uint32_t uploadHeapSizeReq = 0;
@@ -1474,36 +1474,23 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                             zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
                         );
 
-                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
-                        {
-                            d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
-                                d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                                d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                                cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
-                            );
-                        }
                     }
-                }
-                else
-                {
-                    uint32_t *const StageTimestampInt[3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
-                    uint32_t *const ReadbackTimestampInt[2] = { &Readback0_Stamp, &Readback1_Stamp };
-                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    else
                     {
-                        d3d12aid_Timestamp_PushScope(*StageTimestampInt[stageIndex], timestamps, cmdList,
+                        d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
                             zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
                         );
-
-                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
-                        {
-                            d3d12aid_Timestamp_PushScope(*ReadbackTimestampInt[stageIndex], timestamps, cmdList,
-                                d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                                d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                                cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
-                            );
-                        }
+                    }
+                    if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
+                    {
+                        d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
+                            d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
+                            d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+                            cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
+                        );
                     }
                 }
+
                 {
                     D3D12_RESOURCE_BARRIER barrier;
                     d3d12aid_MappedBuffer_BeginTransfer(&barrier, &zstdUnCompressedFramesMemory, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
