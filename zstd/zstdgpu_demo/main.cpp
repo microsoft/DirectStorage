@@ -179,12 +179,7 @@ static const int16_t kzstdgpuFseProbsDefault[] =
 
 static void zstdgpu_Init_InitResources_SRT(zstdgpu_InitResources_SRT & srt, zstdgpu_ResourceDataCpu & resources)
 {
-    // HACK(pamartis): redefine one macro to allow casts (needed by TableIndexLookback)
-#undef ZSTDGPU_RW_BUFFER_DECL
-#define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      srt.inout##name = (type *)resources.name;
     ZSTDGPU_INIT_RESOURCES_SRT();
-#undef ZSTDGPU_RW_BUFFER_DECL
-#define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                      srt.inout##name = resources.name;
 }
 
 static void zstdgpu_Init_ParseFrames_SRT(zstdgpu_ParseFrames_SRT & srt, zstdgpu_ResourceDataCpu & resources)
@@ -326,6 +321,29 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
     }
 }
 
+static uint32_t zstdgpu_HufLitStreamCountToGroupCount(zstdgpu_ResourceDataCpu & zstdCpu, uint32_t hufLitCount, uint32_t hufLitStreamCountTotal, uint32_t zstdCmpBlockCount)
+{
+    uint32_t groupPrefix = 0;
+    for (uint32_t i = 0; i < zstdCmpBlockCount; ++i)
+    {
+        const uint32_t hufLitId = zstdCpu.HufWIdToHufLitId[i];
+        uint32_t hufLitStreamCount = 0;
+        if (~0u != hufLitId)
+        {
+            const uint32_t hufLitStreamStart = zstdCpu.HufLitIdToLitStreamId[hufLitId];
+
+            const uint32_t hufLitStreamEnd   = (hufLitId + 1u < hufLitCount)
+                                             ? zstdCpu.HufLitIdToLitStreamId[hufLitId + 1u]
+                                             : hufLitStreamCountTotal;
+            hufLitStreamCount = hufLitStreamEnd - hufLitStreamStart;
+        }
+        const uint32_t groupCount = hufLitStreamCount; // streamsPerGroup == 1 on CPU
+        groupPrefix += groupCount;
+        zstdCpu.LitGroupEndPerHuffmanTable[i] = groupPrefix;
+    }
+    return groupPrefix;
+}
+
 static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, bool chkGpu, bool simGpu)
 {
     ZSTDGPU_UNUSED(cpuRes);
@@ -350,20 +368,26 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
         srt.huffmanTableSlotCount       = gpuReadbackRes.Counters->Blocks_CMP;
 
-        // NOTE(pamartis): because on CPU we use `TGSize == 1`, the number of threadgroups per Huffman Table
-        // is the same as the number of literal streams
-        srt.inLitGroupEndPerHuffmanTable= srt.inLitStreamEndPerHuffmanTable;
+        const uint32_t htSlotCount = srt.huffmanTableSlotCount;
+        const uint32_t hufLitCount = gpuReadbackRes.Counters->HufLit;
+        const uint32_t hufLitStreamCountTotal = gpuReadbackRes.Counters->HUF_Streams;
 
-        uint32_t groupCount = 0;
-        if (srt.huffmanTableSlotCount > 0)
-        {
-            groupCount = srt.inLitGroupEndPerHuffmanTable[srt.huffmanTableSlotCount - 1];
-        }
+        uint32_t *tmpLitGroupEndPerHuffmanTable = gpuReadbackRes.LitGroupEndPerHuffmanTable;
+
+        // NOTE(pamartis): Because we need to re-run [Decompress Literals] on CPU with tgSize == 1,
+        // we need to recompute `srt.inLitGroupEndPerHuffmanTable`, so we re-use cpuRes buffer to  replace GPU buffer
+        // temporally
+        gpuReadbackRes.LitGroupEndPerHuffmanTable = cpuRes.LitGroupEndPerHuffmanTable;
+        const uint32_t groupCount = zstdgpu_HufLitStreamCountToGroupCount(gpuReadbackRes, hufLitCount, hufLitStreamCountTotal, htSlotCount);
+
+        // NOTE(pamartis): also replace `srt.inLitGroupEndPerHuffmanTable` in SRT
+        srt.inLitGroupEndPerHuffmanTable = cpuRes.LitGroupEndPerHuffmanTable;
 
         for (uint32_t groupId = 0; groupId < groupCount; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
         }
+        gpuReadbackRes.LitGroupEndPerHuffmanTable = tmpLitGroupEndPerHuffmanTable;
 
         if (chkGpu)
         {
@@ -378,7 +402,6 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
             gpuReadbackRes.CompressedData       = CompressedData;
             gpuReadbackRes.DecompressedLiterals = DecompressedLiterals;
         }
-
     }
 }
 
@@ -575,7 +598,10 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
     // TODO: consider if we can avoid this temporal copies (compressed data and frame references)
-    memcpy(zstdCpu.CompressedData, zstdGpuCompressedData, zstdCompressedFramesByteCount);
+    for (uint32_t i = 0; i < zstdFrameCount; ++i)
+    {
+        memcpy((char *)zstdCpu.CompressedData + zstdFrameRefs[i].offs, (char *)zstdGpuCompressedData + zstdFrameRefs[i].offs, zstdFrameRefs[i].size);
+    }
     memcpy(zstdCpu.FramesRefs, zstdFrameRefs, sizeof(zstdgpu_OffsetAndSize) * zstdFrameCount);
     memcpy(zstdCpu.FseProbsDefault, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
 
@@ -675,17 +701,11 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         zstdgpu_ShaderEntry_InitResources(srt, 0);
 
     }
-    // NOTE(pamartis): On GPU, `LitStreamEndPerHuffmanTable` is zeroed by an indirect Memset dispatch
-    // (via the `Memset_LitStreamEnd` dispatch slot, populated by `UpdateDispatchArgs` from Counters).
-    // On CPU, the Memset shader doesn't run, so we zero the buffer explicitly here.
-    // `LitStreamEndPerHuffmanTable` accumulates per-Huffman-table literal stream counts during
-    // `ParseCompressedBlocks` (via InterlockedAdd on GPU, sequential read-modify-write on CPU),
-    // so it must start at zero before the loop.
-    // `TableIndexLookback` does NOT need CPU zeroing because the CPU path in
-    // `ParseCompressedBlocks` uses `static` local variables instead of the decoupled lookback buffer
-    // (the lookback buffer read/write code is inside `#ifdef __hlsl_dx_compiler`, GPU-only).
+    // NOTE(pamartis): On GPU, HufWIdToHufLitId is initialized to ~0u by a direct Memset dispatch.
+    // The meaning of ~0 is -- no HufLitStreams were assigned to a Huffman table with a given index.
+    // [Compute Prefix Sum] skips such slots.
     {
-        memset(zstdCpu.LitStreamEndPerHuffmanTable, 0, zstdCmpBlockCount * sizeof(uint32_t));
+        memset(zstdCpu.HufWIdToHufLitId, 0xFF, zstdCmpBlockCount * sizeof(uint32_t));
     }
     // NOTE(pamartis): On GPU, PerFrameSeqStreamMinIdx is initialized to ~0u by a direct Memset dispatch.
     // On CPU, we fill explicitly. Each entry stores the minimum compressed block index with non-zero
@@ -706,6 +726,38 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         {
             zstdgpu_ShaderEntry_ParseCompressedBlocks(srt, i);
         }
+    }
+    {
+        // CPU equivalent of [Propagate FSE Index] dispatches: propagate LLen / Offs / MLen
+        // FSE table indices across all sequence streams. The GPU lookback buffers are zeroed
+        // by Memset at the start of every request, so the CPU side mirrors that by using
+        // plain (non-static) locals initialised to `Unused` here -- using `static` would leak
+        // state across multiple decompressions in the same process.
+        {
+            uint32_t cpuLastLLenIndex = kzstdgpu_FseProbTableIndex_Unused;
+            uint32_t cpuLastOffsIndex = kzstdgpu_FseProbTableIndex_Unused;
+            uint32_t cpuLastMLenIndex = kzstdgpu_FseProbTableIndex_Unused;
+
+            const uint32_t seqStreamCount = CNTRS(Seq_Streams);
+            for (uint32_t i = 0; i < seqStreamCount; ++i)
+            {
+                zstdgpu_PropagateFseIndexCpu(zstdCpu.SeqStreamToLLenFseId[i], cpuLastLLenIndex);
+                zstdgpu_PropagateFseIndexCpu(zstdCpu.SeqStreamToOffsFseId[i], cpuLastOffsIndex);
+                zstdgpu_PropagateFseIndexCpu(zstdCpu.SeqStreamToMLenFseId[i], cpuLastMLenIndex);
+            }
+        }
+
+        // CPU equivalent of the [Propagate FSE Index] dispatch that propagates FSE/Huffman table indices
+        // across all Huffman-compressed literals
+        {
+            uint32_t cpuLastHufWIndex = kzstdgpu_FseProbTableIndex_Unused;
+            const uint32_t cmpLitCount = CNTRS(Cmp_Lit);
+            for (uint32_t i = 0; i < cmpLitCount; ++i)
+            {
+                zstdgpu_PropagateFseIndexCpu(zstdCpu.CmpLitToHufWFseId[i], cpuLastHufWIndex);
+            }
+        }
+
         VALIDATE(CompressedBlocksData(&zstdCpu));
     }
     const uint32_t literalCount = CNTRS(HUF_Streams_DecodedBytes);
@@ -775,33 +827,14 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         // NOTE(pamartis): some helper passes that don't have CPU/GPU portability
-        uint32_t streamPrefix = 0;
         uint32_t groupPrefix = 0;
         {
-            // Compute prefix sum of literal stream count and literal decompression group count per Huffman Table
-            for (uint32_t i = 0; i < zstdCmpBlockCount; ++i)
-            {
-                const uint32_t streamCount = zstdCpu.LitStreamEndPerHuffmanTable[i];
-                const uint32_t groupCount = streamCount;
-                streamPrefix += streamCount;
-                groupPrefix += groupCount;
-                zstdCpu.LitStreamEndPerHuffmanTable[i] = streamPrefix;
-                zstdCpu.LitGroupEndPerHuffmanTable[i] = groupPrefix;
-            }
+            // CPU equivalent of [Compute Prefix Sum]
+            const uint32_t hufLitCount = CNTRS(HufLit);
+            const uint32_t hufLitStreamCountTotal = CNTRS(HUF_Streams);
+            groupPrefix = zstdgpu_HufLitStreamCountToGroupCount(zstdCpu, hufLitCount, hufLitStreamCountTotal, zstdCmpBlockCount);
 
-            // Group literals per Huffman Table
-            for (uint32_t i = 0; i < CNTRS(HUF_Streams); ++i)
-            {
-                const zstdgpu_CompressedLiteralHuffmanBucket& bucket = zstdCpu.LitStreamBuckets[i];
-
-                uint32_t groupStart = 0;
-                if (bucket.huffmanBucketIndex != 0)
-                {
-                    groupStart = zstdCpu.LitStreamEndPerHuffmanTable[bucket.huffmanBucketIndex - 1];
-                }
-                const uint32_t groupOffset = bucket.huffmanBucketOffset;
-                zstdCpu.LitStreamRemap[groupStart + groupOffset] = i;
-            }
+            CNTRS(DecompressLiteralsGroups) = groupPrefix;
         }
 
         // Run Literal Decompression

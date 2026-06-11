@@ -311,6 +311,8 @@ typedef struct zstdgpu_Counters
     uint32_t HUF_Streams_DecodedBytes;
     uint32_t Seq_Streams;
     uint32_t HUF_Streams;
+    uint32_t Cmp_Lit;
+    uint32_t HufLit;
     uint32_t RAW_Streams;
     uint32_t RLE_Streams;
     uint32_t Blocks_RAW;
@@ -329,21 +331,21 @@ static const uint32_t kzstdgpu_DispatchSlot_FseOffs                      = 2;
 static const uint32_t kzstdgpu_DispatchSlot_FseMLen                      = 3;
 static const uint32_t kzstdgpu_DispatchSlot_DecompressHuffmanWeights     = 4;
 static const uint32_t kzstdgpu_DispatchSlot_DecodeHuffmanWeights         = 5;
-static const uint32_t kzstdgpu_DispatchSlot_GroupCompressedLiterals      = 6;
-static const uint32_t kzstdgpu_DispatchSlot_HUF_WgtStreams               = 7;
-static const uint32_t kzstdgpu_DispatchSlot_DecompressLiterals           = 8;
-static const uint32_t kzstdgpu_DispatchSlot_DecompressSequences          = 9;
-static const uint32_t kzstdgpu_DispatchSlot_FinaliseSequenceOffsets      = 10;
-static const uint32_t kzstdgpu_DispatchSlot_PrefixSequenceOffsets        = 11;
-static const uint32_t kzstdgpu_DispatchSlot_ComputePrefixSum             = 12;
-static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizes             = 13;
-static const uint32_t kzstdgpu_DispatchSlot_MemcpyRAW                    = 14;
-static const uint32_t kzstdgpu_DispatchSlot_MemsetRLE                    = 15;
-static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 16;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 17;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_TableIndexLookback    = 18;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_LitStreamEnd          = 19;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 20;
+static const uint32_t kzstdgpu_DispatchSlot_HUF_WgtStreams               = 6;
+static const uint32_t kzstdgpu_DispatchSlot_DecompressLiterals           = 7;
+static const uint32_t kzstdgpu_DispatchSlot_DecompressSequences          = 8;
+static const uint32_t kzstdgpu_DispatchSlot_FinaliseSequenceOffsets      = 9;
+static const uint32_t kzstdgpu_DispatchSlot_PrefixSequenceOffsets        = 10;
+static const uint32_t kzstdgpu_DispatchSlot_ComputePrefixSum             = 11;
+static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizes             = 12;
+static const uint32_t kzstdgpu_DispatchSlot_MemcpyRAW                    = 13;
+static const uint32_t kzstdgpu_DispatchSlot_MemsetRLE                    = 14;
+static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 15;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 16;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 17;
+static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex            = 18;
+static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex_HufW       = 19;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockCount         = 20;
 static const uint32_t kzstdgpu_DispatchSlot_Count                        = 21;
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
@@ -381,6 +383,16 @@ static const uint32_t kzstdgpu_TgSizeX_PrefixSum = 32;
 #endif
 
 static const uint32_t kzstdgpu_TgSizeX_ParseCompressedBlocks = 32;
+
+// NOTE(pamartis): Propagation works at wave-level through `WaveReadLaneAt` wave intrinsic,
+// however, we limit the size of threadgroup to be 32 because it's the maximal safe number of lanes
+// `WaveReadLaneAt` works reliably.
+#if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
+static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 32;
+#else
+static const uint32_t kzstdgpu_TgSizeX_PropagateFseIndex = 32;
+#endif
+
 static const uint32_t kzstdgpu_TgSizeX_Memset = 64;
 
 // NOTE(pamartis): The rationale behind the below choice of TG sizes is the following
@@ -1457,11 +1469,6 @@ typedef struct zstdgpu_CompressedBlockData
 
     uint32_t litStreamIndex;  //< CONSIDER REMOVING: The starting index of Huffman compressed literal streams in `compressedLiteralRefs`
     uint32_t seqStreamIndex;
-
-    uint32_t fseTableIndexHufW; //< Can be an in range defined by 'zstdgpu_ComputeFseIndexHufW' or kzstdgpu_FseProbTableIndex_Unused/Repeat
-    uint32_t fseTableIndexLLen; //< Can be an in range [0; 255] - meaning RLE, or in range defined by 'zstdgpu_ComputeFseIndexLLen' or kzstdgpu_FseProbTableIndex_Unused/Repeat
-    uint32_t fseTableIndexOffs; //< Can be an in range [0; 255] - meaning RLE, or in range defined by 'zstdgpu_ComputeFseIndexOffs' or kzstdgpu_FseProbTableIndex_Unused/Repeat
-    uint32_t fseTableIndexMLen; //< Can be an in range [0; 255] - meaning RLE, or in range defined by 'zstdgpu_ComputeFseIndexMLen' or kzstdgpu_FseProbTableIndex_Unused/Repeat
 } zstdgpu_CompressedBlockData;
 
 static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_CompressedBlockData) outBlockData)
@@ -1470,34 +1477,13 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
 
     outBlockData.litStreamIndex = ~0u;
     outBlockData.seqStreamIndex = ~0u;
-
-    outBlockData.fseTableIndexHufW = kzstdgpu_FseProbTableIndex_Unused;
-    outBlockData.fseTableIndexLLen = kzstdgpu_FseProbTableIndex_Unused;
-    outBlockData.fseTableIndexOffs = kzstdgpu_FseProbTableIndex_Unused;
-    outBlockData.fseTableIndexMLen = kzstdgpu_FseProbTableIndex_Unused;
 }
-
-typedef struct zstdgpu_TableIndexLookback
-{
-    uint32_t fseTableIndexHufW; //< this index is a bit special:
-                                //< it can be the index of FSE for Huffman Weights (which is identical to compressed Huffman Weights) or
-                                //< `compresssedBlockCount - uncompressed Huffman Weights index`
-    uint32_t fseTableIndexLLen;
-    uint32_t fseTableIndexOffs;
-    uint32_t fseTableIndexMLen;
-} zstdgpu_TableIndexLookback;
 
 typedef struct zstdgpu_LitStreamInfo
 {
     zstdgpu_OffsetAndSize src;       //< offset and size of the compressed literal stream in the source compressed data
     zstdgpu_OffsetAndSize dst;       //< offset and size of the decompressed literal stream in the transient uncompressed literal buffer
 } zstdgpu_LitStreamInfo;
-
-typedef struct zstdgpu_CompressedLiteralHuffmanBucket
-{
-    uint32_t huffmanBucketIndex;    //< The index of the Huffman Weights table used to decode this literal stream
-    uint32_t huffmanBucketOffset;   //< The offset of the this literal within a block of literals with the same Huffman table
-} zstdgpu_CompressedLiteralHuffmanBucket;
 
 typedef struct zstdgpu_SeqStreamInfo
 {
@@ -1515,11 +1501,6 @@ typedef struct zstdgpu_SeqStreamInfo
 static inline uint32_t zstdgpu_GetLookbackBlockCount(uint32_t elemCount)
 {
     return ZSTDGPU_TG_COUNT(elemCount, kzstdgpu_WaveSize_Min);
-}
-
-static inline uint32_t zstdgpu_GetHufFseTableIndexLookbackUInt32Count(uint32_t compressedBlockCount)
-{
-    return zstdgpu_GetLookbackBlockCount(compressedBlockCount) * (sizeof(zstdgpu_TableIndexLookback) / sizeof(uint32_t));
 }
 
 static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResourceStage)
@@ -1590,20 +1571,31 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 1)    \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_CompressedBlockData          , CompressedBlocks              , 2)    \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , HufRefs                       , 3)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , LitStreamEndPerHuffmanTable   , 4)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 5)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_SeqStreamInfo                , SeqRefs                       , 6)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_CompressedLiteralHuffmanBucket,LitStreamBuckets              , 7)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               , 8)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameSeqStreamMinIdx       , 9)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 10)   \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 4)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , SeqStreamToRef                , 5)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , SeqStreamToLLenFseId          , 6)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , SeqStreamToOffsFseId          , 7)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , SeqStreamToMLenFseId          , 8)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , SeqStreamToBlockId            , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               , 10)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameSeqStreamMinIdx       , 11)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 12)   \
     \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(zstdgpu_TableIndexLookback       , TableIndexLookback            , 11)   \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , SeqCountPrefixLookback        , 12)   \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , BlockSeqCountPrefixLookback   , 13)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , FseIndexLookbackLLen          , 13)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , FseIndexLookbackOffs          , 14)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , FseIndexLookbackMLen          , 15)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , SeqCountPrefixLookback        , 16)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , BlockSeqCountPrefixLookback   , 17)   \
     \
-    ZSTDGPU_RW_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbs                      , 14)   \
-    ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 15)
+    ZSTDGPU_RW_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbs                      , 18)   \
+    ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 19)   \
+    \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , CmpLitCompactionLookback      , 20)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , CmpLitToHufWFseId             , 21)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , LitStreamCountPrefixLookback  , 22)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufWIdToHufLitId              , 23)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufLitIdToLitStreamId         , 24)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , HufLitCompactionLookback      , 25)
 
 #define ZSTDGPU_INIT_FSE_TABLE_SRT()                                                                    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 0)    \
@@ -1640,29 +1632,31 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HuffmanTableRankIndex         , 2)
 
 #define ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()                                        \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitStreamEndPerHuffmanTable   , 0)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitGroupEndPerHuffmanTable    , 1)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 2)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitStreamRemap                , 3)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 4)    \
-    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 5)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitGroupEndPerHuffmanTable    , 0)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 1)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 2)    \
+    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 3)    \
     \
-    ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeights    , 6)    \
-    ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 7)    \
+    ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeights    , 4)    \
+    ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 5)    \
+    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HufWIdToHufLitId              , 6)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HufLitIdToLitStreamId         , 7)    \
     \
     ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedLiterals          , 0)
 
 #define ZSTDGPU_DECOMPRESS_LITERALS_SRT()                                                               \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitStreamEndPerHuffmanTable   , 0)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitGroupEndPerHuffmanTable    , 1)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 2)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitStreamRemap                , 3)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 4)    \
-    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 5)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , LitGroupEndPerHuffmanTable    , 0)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 1)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_LitStreamInfo                , LitRefs                       , 2)    \
+    ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 3)    \
     \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableInfo              , 6)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableCodeAndSymbol     , 7)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableRankIndex         , 8)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableInfo              , 4)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableCodeAndSymbol     , 5)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HuffmanTableRankIndex         , 6)    \
+    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HufWIdToHufLitId              , 7)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , HufLitIdToLitStreamId         , 8)    \
     \
     ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedLiterals          , 0)    \
     \
@@ -1671,11 +1665,15 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
 #define ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()                                                              \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 0)    \
     ZSTDGPU_RO_RAW_BUFFER_DECL(uint32_t                         , CompressedData                , 1)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_SeqStreamInfo                , SeqRefs                       , 2)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 3)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 4)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , SeqStreamToRef                , 2)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToLLenFseId          , 3)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToOffsFseId          , 4)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToMLenFseId          , 5)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToBlockId            , 6)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 7)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 8)    \
     \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , FseElems                      , 5)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , FseElems                      , 9)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , DecompressedSequenceLLen      , 0)    \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , DecompressedSequenceMLen      , 1)    \
@@ -1693,7 +1691,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 4)    \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 5)    \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerFrameSeqStreamMinIdx       , 6)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_SeqStreamInfo                , SeqRefs                       , 7)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToBlockId            , 7)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , DecompressedSequenceOffs      , 0)
 
@@ -1724,7 +1722,7 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , DecompressedSequenceMLen      , 4)    \
     ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerSeqStreamSeqStart          , 5)    \
     \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_SeqStreamInfo                , SeqRefs                       , 6)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , SeqStreamToBlockId            , 6)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , DestSequenceOffsets           , 0)
 

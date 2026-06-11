@@ -61,9 +61,8 @@ void main()
 
         // Memset dispatch slots for InitResources Stage 1
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockLookback,    zstdgpu_GetLookbackBlockCount(cmpBlockCount),                    kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_TableIndexLookback,  zstdgpu_GetHufFseTableIndexLookbackUInt32Count(cmpBlockCount),   kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_LitStreamEnd,        cmpBlockCount + zstdgpu_GetLookbackBlockCount(cmpBlockCount),    kzstdgpu_TgSizeX_Memset);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_AllBlockLookback,    zstdgpu_GetLookbackBlockCount(allBlockCount),                    kzstdgpu_TgSizeX_Memset);
+        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockCount,       cmpBlockCount,                                                   kzstdgpu_TgSizeX_Memset);
 
         const uint32_t predicateMask = 0
                                      | (cmpBlockCount > Consts.cmpBlockCountMax ? (1u << 0u) : 0u)
@@ -92,10 +91,11 @@ void main()
         // NOTE(pamartis): We also do decoding of uncompressed Huffman Weights stored as two nibbles per byte to make sure final representation
         // (a byte per weight) becomes identical, so identical representation simplfies initialisation of Huffman tables to use during literal decoding
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_DecodeHuffmanWeights,     ZstdCounters[0].HUF_WgtStreams,           kzstdgpu_TgSizeX_DecodeHuffmanWeights);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_GroupCompressedLiterals,  ZstdCounters[0].HUF_Streams,              32);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_DecompressSequences,      ZstdCounters[0].Seq_Streams,              Consts.decompressSequences_StreamsPerTG);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_FinaliseSequenceOffsets,  ZstdCounters[0].Seq_Streams_DecodedItems, kzstdgpu_TgSizeX_FinaliseSequenceOffsets);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PrefixSequenceOffsets,    ZstdCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PrefixSequenceOffsets);
+        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex,        ZstdCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PropagateFseIndex);
+        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex_HufW,   ZstdCounters[0].Cmp_Lit,                  kzstdgpu_TgSizeX_PropagateFseIndex);
 
         // Update derived counter field in Counters (kept for shader bounds checks)
         ZstdCounters[0].DecompressSequencesGroups = ZSTDGPU_TG_COUNT(ZstdCounters[0].Seq_Streams, Consts.decompressSequences_StreamsPerTG);

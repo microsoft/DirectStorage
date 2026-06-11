@@ -51,7 +51,7 @@ groupshared uint32_t Lds[kzstdgpu_DecompressSequences_MultiStream_LdsOutCache_Ld
 #define ZSTDGPU_LDS Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=6), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=10), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
 [numthreads(NUM_THREADS, 1, 1)]
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {

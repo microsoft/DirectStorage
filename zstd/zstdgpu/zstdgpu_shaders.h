@@ -609,6 +609,8 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
             srt.inoutCounters[0].HUF_Streams_DecodedBytes                    = 0;
             srt.inoutCounters[0].Seq_Streams                                 = 0;
             srt.inoutCounters[0].HUF_Streams                                 = 0;
+            srt.inoutCounters[0].Cmp_Lit                                     = 0;
+            srt.inoutCounters[0].HufLit                                      = 0;
             srt.inoutCounters[0].RAW_Streams                                 = 0;
             srt.inoutCounters[0].RLE_Streams                                 = 0;
             srt.inoutCounters[0].Blocks_RAW                                  = 0;
@@ -777,6 +779,180 @@ static void zstdgpu_ParseFseHeader(ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer
     outFseInfo[outFseTableIndex] = zstdgpu_CreateFseInfo(symbol, accuracyLog2);
 }
 
+#ifdef __hlsl_dx_compiler
+
+static uint32_t zstdgpu_PropagateFseTableIndex(ZSTDGPU_RW_BUFFER_GLC(uint32_t) inoutLookback,
+                                               uint32_t fseIndex,
+                                               uint32_t threadId)
+{
+    const uint32_t blockSize = min(WaveGetLaneCount(), kzstdgpu_TgSizeX_PropagateFseIndex);
+    const uint32_t thisBlockIndex = WaveReadLaneFirst(threadId / blockSize);
+    const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
+
+    #define WAVE_SHUFFLE(v, and_mask, or_mask, xor_mask) WaveReadLaneAt(v, ((WaveGetLaneIndex() & (and_mask)) | (or_mask)) ^ (xor_mask))
+    #define WAVE_BROADCAST(v, group_size, group_lane) WAVE_SHUFFLE(v, ~(group_size - 1u), group_lane, 0)
+    #define WAVE_PROPAGATE_STEP(p, group_size)                                                                  \
+        if (blockSize >= group_size /** this condition is expected to be a compile-time condition, so no real branch */) \
+        {                                                                                                       \
+            /* for every group of `group_size` consecutive lanes, broadcast the value from the last lane of the "odd" sub-group of 2x smaller size) */ \
+            uint32_t b = WAVE_BROADCAST(p, group_size, group_size / 2u - 1u);                                   \
+            /* for every group of `group_size` consecutive lanes */                                             \
+            /* propagate element from the last lane of the "odd" sub-group of 2x smaller size  */               \
+            /* into all elements of the "even" sub-group of 2x smaller size when propagated value makes sense */\
+            [flatten] if ((WaveGetLaneIndex() & (group_size / 2u)))                                             \
+            {                                                                                                   \
+                /* We propagate only non-Repeat and not-Unused values to lanes containing Repeat/Unused values*/\
+                if (p >= kzstdgpu_FseProbTableIndex_Repeat && b < kzstdgpu_FseProbTableIndex_Repeat)            \
+                    p = b;                                                                                      \
+            }                                                                                                   \
+        }
+
+    // To propagate FSE table indices, we use a variant of "Decoupled Lookback"
+    //      1. Each block (a group of `blockSize` threads) looks at indices of each type of FSE table
+    //         and checks for each of FSE table type if there's any FSE table "index" that is not `Unused`
+    //         and is not `Repeat` which means the block can propagate its last not `Repeat` and not `Unused` value
+    //         to the next block. If the block can propagate indices for all FSE table types, it does so and stores
+    //         the result in the Lookback buffer (so the next block can read it sooner) and marks them as 'Ready'
+    //      2. If the block can't propagate all indices to the succeeding blocks because it contains only `Repeat` and `Unused`
+    //         indices, it also marks the buffer as 'Ready' (but stored indices are still `Unused` or `Repeat`)
+    //      3. If the block needs previous block to complete (the first "index" that is not `Unused` has `Repeat` for any of the FSE table types)
+    //         it does the lookback (it goes looking for the first `Ready' block, it skips `Ready` block with `Unused` values, and stops at `Ready' block with valid values)
+    //      4. The block uses previous indices to do propagation and stores its own results, it also stores "lookback"
+    //         indices for succeeding block if it didn't do so in Step 1.
+    const bool indexValid = fseIndex < kzstdgpu_FseProbTableIndex_Repeat;
+
+    // STEP 2. All lanes of this index are `Repeat` or `Unused` -- mark `Ready` with `Unused`.
+    if (WaveActiveAllTrue(!indexValid))
+    {
+        if (WaveIsFirstLane())
+        {
+            InterlockedCompareStore(inoutLookback[thisBlockIndex], 0, zstdgpu_Encode31BitLookbackFull(kzstdgpu_FseProbTableIndex_Unused));
+        }
+    }
+
+    // STEP 1. At least one lane is valid -- propagate within wave and store the last propagated value.
+    if (WaveActiveAnyTrue(indexValid))
+    {
+        uint32_t x = fseIndex;
+        WAVE_PROPAGATE_STEP(x, 2)
+        WAVE_PROPAGATE_STEP(x, 4)
+        WAVE_PROPAGATE_STEP(x, 8)
+        WAVE_PROPAGATE_STEP(x, 16)
+        WAVE_PROPAGATE_STEP(x, 32)
+        const uint32_t xLast = WaveReadLaneAt(x, lastLocalIndex);
+        if (WaveIsFirstLane())
+        {
+            InterlockedCompareStore(inoutLookback[thisBlockIndex], 0, zstdgpu_Encode31BitLookbackFull(xLast));
+        }
+    }
+
+    // STEP 3. Determine if we need to lookback to a preceding block to resolve `Repeat`.
+    bool needsLookback = false;
+    if (fseIndex != kzstdgpu_FseProbTableIndex_Unused)
+    {
+        needsLookback = WaveReadLaneFirst(fseIndex) == kzstdgpu_FseProbTableIndex_Repeat;
+    }
+    const bool needsLookbackUniform = WaveActiveAnyTrue(needsLookback);
+
+    uint32_t fseIndexPropagated = fseIndex;
+
+    if (0 != thisBlockIndex && needsLookbackUniform)
+    {
+        uint32_t fseTableIndexLookback = fseIndex;
+        if (WaveIsFirstLane())
+        {
+            uint32_t prevBlockIndex = thisBlockIndex - 1u;
+            bool needsLookbackLoop = needsLookbackUniform;
+            while (needsLookbackLoop)
+            {
+                uint32_t lookbackIndex;
+                InterlockedAdd(inoutLookback[prevBlockIndex], 0, lookbackIndex);
+                if (zstdgpu_Decode31BitLookbackFlags(lookbackIndex) > 0)
+                {
+                    const uint32_t maskedLookbackIndex = zstdgpu_Decode31BitLookbackValue(lookbackIndex);
+                    if (maskedLookbackIndex == kzstdgpu_FseProbTableIndex_Unused)
+                    {
+                        /**
+                         *  NOTE(pamartis): There's no useful data in the current `lookback`
+                         *  so proceed to the next one (backward).
+                         *  If we reach the first `lookback` which always contain the correct indices for propagation,
+                         *  we terminate early without going into the next iteration
+                         */
+                        if (prevBlockIndex == 0)
+                        {
+                            needsLookbackLoop = false;
+                        }
+                        else
+                        {
+                            --prevBlockIndex;
+                        }
+                        /**
+                         *  NOTE(pamartis): We found the `lookback` index in `Ready` state that is `Unused`,
+                         *  and decremented the block index for lookback, so continue into the next iteration
+                         */
+                    }
+                    else
+                    {
+                        /** NOTE(pamartis): We found the `lookback` index in `Ready` state other than `Unused` */
+                        needsLookbackLoop = false;
+                        fseTableIndexLookback = maskedLookbackIndex;
+                    }
+                }
+            }
+        }
+
+        // Replace the first lane's `Repeat` value with the value from the preceding block.
+        const uint32_t fseTableIndexLookbackUniform = WaveReadLaneFirst(fseTableIndexLookback);
+        if (needsLookback)
+        {
+            if (WaveIsFirstLane())
+            {
+                fseIndexPropagated = fseTableIndexLookbackUniform;
+            }
+        }
+    }
+
+    // STEP 4. With the first lane resolved, propagate across the wave to fill remaining `Repeat` lanes.
+    const bool needPropagateAcrossWave = fseIndexPropagated == kzstdgpu_FseProbTableIndex_Repeat;
+    if (WaveActiveAnyTrue(needPropagateAcrossWave))
+    {
+        uint32_t x = fseIndexPropagated;
+        WAVE_PROPAGATE_STEP(x, 2)
+        WAVE_PROPAGATE_STEP(x, 4)
+        WAVE_PROPAGATE_STEP(x, 8)
+        WAVE_PROPAGATE_STEP(x, 16)
+        WAVE_PROPAGATE_STEP(x, 32)
+        if (needPropagateAcrossWave)
+        {
+            fseIndexPropagated = x;
+        }
+    }
+
+    #undef WAVE_PROPAGATE_STEP
+    #undef WAVE_BROADCAST
+    #undef WAVE_SHUFFLE
+
+    return fseIndexPropagated;
+}
+
+#else
+
+#define zstdgpu_PropagateFseIndexCpu(inoutFseIndex, inoutLastFseIndex)  \
+    do                                                                  \
+    {                                                                   \
+        if (inoutFseIndex < kzstdgpu_FseProbTableIndex_Repeat)          \
+        {                                                               \
+            inoutLastFseIndex = inoutFseIndex;                          \
+        }                                                               \
+        else if (inoutFseIndex == kzstdgpu_FseProbTableIndex_Repeat)    \
+        {                                                               \
+            inoutFseIndex = inoutLastFseIndex;                          \
+        }                                                               \
+    }                                                                   \
+    while (0)
+
+#endif
+
 static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseCompressedBlocks_SRT) srt, uint32_t threadId)
 {
     if (threadId >= srt.compressedBlockCount)
@@ -787,6 +963,8 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     zstdgpu_CompressedBlockData outBlockData;
     zstdgpu_Init_CompressedBlockData(outBlockData);
+
+    uint32_t fseTableIndexHufW = kzstdgpu_FseProbTableIndex_Unused;
 
     zstdgpu_Forward_BitBuffer_Refill(buffer, 2 + 2);
 
@@ -814,6 +992,13 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     //
     const uint32_t literalBlockSzFmt = zstdgpu_Forward_BitBuffer_GetNoRefill(buffer, 2);
+
+    const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
+    #ifdef __hlsl_dx_compiler
+        const uint32_t hufLitStreamStart = zstdgpu_OrderedAppendIndex(srt.inoutLitStreamCountPrefixLookback, hufLitStreamCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
+    #else
+        const uint32_t hufLitStreamStart = srt.inoutCounters[0].HUF_Streams;
+    #endif
 
     uint32_t regeneratedSize = 0;
     // `Size_Format` is divided into 2 families :
@@ -916,19 +1101,17 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         const uint32_t streamCountPerWave = WaveActiveSum(streamCount);
         const uint32_t regeneratedSizePerWave = WaveActiveSum(regeneratedSize);
 
-        uint32_t streamOffsetPerWave = 0;
         uint32_t regeneratedOffsetPerWave = 0;
         if (WaveIsFirstLane())
         {
-            InterlockedAdd(srt.inoutCounters[0].HUF_Streams, streamCountPerWave, streamOffsetPerWave);
+            InterlockedAdd(srt.inoutCounters[0].HUF_Streams, streamCountPerWave);
             InterlockedAdd(srt.inoutCounters[0].HUF_Streams_DecodedBytes, regeneratedSizePerWave, regeneratedOffsetPerWave);
         }
-        const uint32_t streamOffset = WaveReadLaneFirst(streamOffsetPerWave) + WavePrefixSum(streamCount);
         const uint32_t regeneratedOffset = WaveReadLaneFirst(regeneratedOffsetPerWave) + WavePrefixSum(regeneratedSize);
 
         outBlockData.literal.offs = zstdgpu_EncodeCmpLitOffset(regeneratedOffset);
         outBlockData.literal.size = regeneratedSize;
-        outBlockData.litStreamIndex = streamOffset;
+        outBlockData.litStreamIndex = hufLitStreamStart;
 
         //  Note: `Compressed_Size` includes the size of the Huffman Tree description when it is present.
         //  Note 2: `Compressed_Size` can never be `==0`.
@@ -976,26 +1159,26 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
                             fseWaveTableStart##name                                         \
                         );                                                                  \
                     }                                                                       \
-                    outBlockData.fseTableIndex##name = zstdgpu_ComputeFseIndex##name(       \
+                    fseTableIndex##name = zstdgpu_ComputeFseIndex##name(                    \
                         WaveReadLaneFirst(fseWaveTableStart##name) + WavePrefixCountBits(true),\
                         srt.compressedBlockCount                                            \
                     );                                                                      \
-                    zstdgpu_ParseFseHeader(buffer, srt.inoutFseInfos, srt.inoutFseProbs, outBlockData.fseTableIndex##name, kzstdgpu_FseProbMaxAccuracy_##name)
+                    zstdgpu_ParseFseHeader(buffer, srt.inoutFseInfos, srt.inoutFseProbs, fseTableIndex##name, kzstdgpu_FseProbMaxAccuracy_##name)
 
                 ALLOCATE_FSE_TABLE_INDEX(HufW);
 
-                outBlockData.fseTableIndexHufW -= zstdgpu_ComputeFseIndexHufW(0, srt.compressedBlockCount);
+                fseTableIndexHufW -= zstdgpu_ComputeFseIndexHufW(0, srt.compressedBlockCount);
 
                 zstdgpu_OffsetAndSize fseCompressedHuffmanWeights;
                 fseCompressedHuffmanWeights.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
                 fseCompressedHuffmanWeights.size = headerByte - (fseCompressedHuffmanWeights.offs - fseProbOffs);
                 zstdgpu_Forward_BitBuffer_Skip(buffer, fseCompressedHuffmanWeights.size);
 
-                srt.inoutHufRefs[outBlockData.fseTableIndexHufW] = fseCompressedHuffmanWeights;
+                srt.inoutHufRefs[fseTableIndexHufW] = fseCompressedHuffmanWeights;
 
                 // NOTE(pamartis): We write zero here to initialize `counts` because the actual number
                 // of Huffman Weights becomes known after they are decompressed (which happens in another kernel)
-                srt.inoutDecompressedHuffmanWeightCount[outBlockData.fseTableIndexHufW] = 0;
+                srt.inoutDecompressedHuffmanWeightCount[fseTableIndexHufW] = 0;
 
                 ZSTDGPU_ASSERT(fseCompressedHuffmanWeights.offs - fseProbOffs < headerByte);
 
@@ -1020,7 +1203,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
                 {
                     InterlockedAdd(srt.inoutCounters[0].HUF_WgtStreams, uncompressedHuffmanWeightsCountPerWave, uncompressedHuffmanWeightsStartPerWave);
                 }
-                outBlockData.fseTableIndexHufW = WaveReadLaneFirst(uncompressedHuffmanWeightsStartPerWave) + WavePrefixCountBits(true);
+                fseTableIndexHufW = WaveReadLaneFirst(uncompressedHuffmanWeightsStartPerWave) + WavePrefixCountBits(true);
 
                 const uint32_t huffWeightCnt = headerByte - 127;
 
@@ -1032,10 +1215,10 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
                 // NOTE(pamartis): store the reference to the uncompressed weights at the end of the stream
                 // to save memory and use `compressedBlockCount` references for both FSE-compressed and
                 // uncompressed references
-                outBlockData.fseTableIndexHufW = srt.compressedBlockCount - 1 - outBlockData.fseTableIndexHufW;
+                fseTableIndexHufW = srt.compressedBlockCount - 1 - fseTableIndexHufW;
 
-                srt.inoutHufRefs[outBlockData.fseTableIndexHufW] = uncompressedHuffmanWeights;
-                zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeightCount, outBlockData.fseTableIndexHufW, huffWeightCnt);
+                srt.inoutHufRefs[fseTableIndexHufW] = uncompressedHuffmanWeights;
+                zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeightCount, fseTableIndexHufW, huffWeightCnt);
 
                 // +1: account for `headerByte`
                 compressedSize -= uncompressedHuffmanWeights.size + 1;
@@ -1043,15 +1226,15 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         }
         else
         {
-            outBlockData.fseTableIndexHufW = kzstdgpu_FseProbTableIndex_Repeat;
+            fseTableIndexHufW = kzstdgpu_FseProbTableIndex_Repeat;
         }
 
         if (1 == streamCount)
         {
-            srt.inoutLitRefs[streamOffset].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            srt.inoutLitRefs[streamOffset].src.size = compressedSize;
-            srt.inoutLitRefs[streamOffset].dst.offs = regeneratedOffset;
-            srt.inoutLitRefs[streamOffset].dst.size = regeneratedSize;
+            srt.inoutLitRefs[hufLitStreamStart].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
+            srt.inoutLitRefs[hufLitStreamStart].src.size = compressedSize;
+            srt.inoutLitRefs[hufLitStreamStart].dst.offs = regeneratedOffset;
+            srt.inoutLitRefs[hufLitStreamStart].dst.size = regeneratedSize;
             zstdgpu_Forward_BitBuffer_Skip(buffer, compressedSize);
         }
         else
@@ -1061,9 +1244,9 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             const uint32_t litStream1Size = zstdgpu_Forward_BitBuffer_GetNoRefill(buffer, 16);
             const uint32_t litStream2Size = zstdgpu_Forward_BitBuffer_Get(buffer, 16);
 
-            srt.inoutLitRefs[streamOffset + 0].src.size = litStream0Size;
-            srt.inoutLitRefs[streamOffset + 1].src.size = litStream1Size;
-            srt.inoutLitRefs[streamOffset + 2].src.size = litStream2Size;
+            srt.inoutLitRefs[hufLitStreamStart + 0].src.size = litStream0Size;
+            srt.inoutLitRefs[hufLitStreamStart + 1].src.size = litStream1Size;
+            srt.inoutLitRefs[hufLitStreamStart + 2].src.size = litStream2Size;
 
             compressedSize -= 6;
 
@@ -1073,32 +1256,32 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
             ZSTDGPU_ASSERT(compressedSize >= compressedSize3Streams);
             const uint32_t litStream3Size = compressedSize - compressedSize3Streams;
-            srt.inoutLitRefs[streamOffset + 3].src.size = litStream3Size;
+            srt.inoutLitRefs[hufLitStreamStart + 3].src.size = litStream3Size;
 
             const uint32_t dstSize = (regeneratedSize + 3) / 4;
             uint32_t dstOffs = regeneratedOffset;
 
-            srt.inoutLitRefs[streamOffset + 0].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            srt.inoutLitRefs[streamOffset + 0].dst.offs = dstOffs;
-            srt.inoutLitRefs[streamOffset + 0].dst.size = dstSize;
+            srt.inoutLitRefs[hufLitStreamStart + 0].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
+            srt.inoutLitRefs[hufLitStreamStart + 0].dst.offs = dstOffs;
+            srt.inoutLitRefs[hufLitStreamStart + 0].dst.size = dstSize;
             dstOffs += dstSize;
             zstdgpu_Forward_BitBuffer_Skip(buffer, litStream0Size);
 
-            srt.inoutLitRefs[streamOffset + 1].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            srt.inoutLitRefs[streamOffset + 1].dst.offs = dstOffs;
-            srt.inoutLitRefs[streamOffset + 1].dst.size = dstSize;
+            srt.inoutLitRefs[hufLitStreamStart + 1].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
+            srt.inoutLitRefs[hufLitStreamStart + 1].dst.offs = dstOffs;
+            srt.inoutLitRefs[hufLitStreamStart + 1].dst.size = dstSize;
             dstOffs += dstSize;
             zstdgpu_Forward_BitBuffer_Skip(buffer, litStream1Size);
 
-            srt.inoutLitRefs[streamOffset + 2].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            srt.inoutLitRefs[streamOffset + 2].dst.offs = dstOffs;
-            srt.inoutLitRefs[streamOffset + 2].dst.size = dstSize;
+            srt.inoutLitRefs[hufLitStreamStart + 2].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
+            srt.inoutLitRefs[hufLitStreamStart + 2].dst.offs = dstOffs;
+            srt.inoutLitRefs[hufLitStreamStart + 2].dst.size = dstSize;
             dstOffs += dstSize;
             zstdgpu_Forward_BitBuffer_Skip(buffer, litStream2Size);
 
-            srt.inoutLitRefs[streamOffset + 3].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            srt.inoutLitRefs[streamOffset + 3].dst.offs = dstOffs;
-            srt.inoutLitRefs[streamOffset + 3].dst.size = regeneratedSize - dstSize * 3;
+            srt.inoutLitRefs[hufLitStreamStart + 3].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
+            srt.inoutLitRefs[hufLitStreamStart + 3].dst.offs = dstOffs;
+            srt.inoutLitRefs[hufLitStreamStart + 3].dst.size = regeneratedSize - dstSize * 3;
             zstdgpu_Forward_BitBuffer_Skip(buffer, litStream3Size);
         }
     }
@@ -1113,6 +1296,50 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     const uint32_t blockIndexInFrame = srt.inGlobalBlockIndexPerCmpBlock[threadId];
 
     srt.inoutBlockSizePrefix[blockIndexInFrame] = outBlockData.literal.size;
+
+    const bool isCmpLit = (literalBlockType >= 2);
+    // A "HufLit" is a literal block that carries a Huffman Table (literalBlockType == 2, i.e. FullTree).
+    // Its hufLitId (compacted, in cmpLit-encounter order) keys the per-HT literal stream range.
+    const bool isHufLit = (literalBlockType == 2);
+
+    #ifndef __hlsl_dx_compiler
+        const uint32_t cmpLitId = srt.inoutCounters[0].Cmp_Lit;
+        const uint32_t hufLitId = srt.inoutCounters[0].HufLit;
+    #endif
+
+    const uint32_t cmpLitCountPerWave = WaveActiveCountBits(isCmpLit);
+    const uint32_t hufLitCountPerWave = WaveActiveCountBits(isHufLit);
+    if (WaveIsFirstLane())
+    {
+        InterlockedAdd(srt.inoutCounters[0].Cmp_Lit, cmpLitCountPerWave);
+        InterlockedAdd(srt.inoutCounters[0].HufLit, hufLitCountPerWave);
+    }
+
+    #ifdef __hlsl_dx_compiler
+        const uint32_t cmpLitId = zstdgpu_OrderedAppendIndex(srt.inoutCmpLitCompactionLookback, isCmpLit, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
+        const uint32_t hufLitId = zstdgpu_OrderedAppendIndex(srt.inoutHufLitCompactionLookback, isHufLit, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
+    #endif
+
+    ZSTDGPU_BRANCH if (isCmpLit)
+    {
+        srt.inoutCmpLitToHufWFseId[cmpLitId] = fseTableIndexHufW;
+    }
+
+    //
+    // NOTE(pamartis): every thread with a literal block storing Huffman table writes:
+    //  - `HufWIdToHufLitId` - a backward mapping from Huffman Weight table index
+    //    to this literal block index*
+    //
+    //  - `HufLitIdToLitStreamId` - a mapping from this literal block* index to the index of the first
+    //    stream (compacted in-order)
+    //
+    //  * (compacted across similar literal blocks with Huffman table)
+    //
+    ZSTDGPU_BRANCH if (isHufLit)
+    {
+        srt.inoutHufWIdToHufLitId[fseTableIndexHufW]  = hufLitId;
+        srt.inoutHufLitIdToLitStreamId[hufLitId]      = outBlockData.litStreamIndex;
+    }
 
     // `Sequences_Section_Header`
     // Consists of 2 items:
@@ -1145,6 +1372,10 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     const uint32_t waveSeqStreamCount = WaveActiveCountBits(seqStreamPresent);
     const uint32_t waveSeqCount = WaveActiveSum(seqCount);
+
+    uint32_t fseTableIndexLLen = kzstdgpu_FseProbTableIndex_Unused;
+    uint32_t fseTableIndexOffs = kzstdgpu_FseProbTableIndex_Unused;
+    uint32_t fseTableIndexMLen = kzstdgpu_FseProbTableIndex_Unused;
 
     #ifndef __hlsl_dx_compiler
         const uint32_t seqStreamIndex = srt.inoutCounters[0].Seq_Streams;
@@ -1197,15 +1428,15 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             else if (0 == mode##name)                                                       \
             {                                                                               \
                 /** default FSE table is always at index '0' in a chunk of appropriate type*/\
-                outBlockData.fseTableIndex##name = zstdgpu_ComputeFseIndex##name(0, srt.compressedBlockCount);\
+                fseTableIndex##name = zstdgpu_ComputeFseIndex##name(0, srt.compressedBlockCount);\
             }                                                                               \
             else if (1 == mode##name)                                                       \
             {                                                                               \
-                outBlockData.fseTableIndex##name = zstdgpu_Forward_BitBuffer_Get(buffer, 8); \
+                fseTableIndex##name = zstdgpu_Forward_BitBuffer_Get(buffer, 8);              \
             }                                                                               \
             else/* if (3 == mode##name)*/                                                   \
             {                                                                               \
-                outBlockData.fseTableIndex##name = kzstdgpu_FseProbTableIndex_Repeat;        \
+                fseTableIndex##name = kzstdgpu_FseProbTableIndex_Repeat;                     \
             }
 
         PARSE_FSE_TABLE(6, LLen)
@@ -1216,8 +1447,8 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         #undef ALLOCATE_FSE_TABLE_INDEX
 
         const uint32_t offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].src.offs = offs;
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].src.size = buffer.datasz - offs;
+        srt.inoutSeqStreamToRef[outBlockData.seqStreamIndex].offs = offs;
+        srt.inoutSeqStreamToRef[outBlockData.seqStreamIndex].size = buffer.datasz - offs;
 
         // NOTE(pamartis): given the prefix sum (exclusive) of compressed block counts in each frame (srt.inPerFrameBlockCountCMP)
         // each threadId (compressed block index) does a binary search of its ZSTD frame index
@@ -1230,357 +1461,12 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         }
     }
 
-#ifdef __hlsl_dx_compiler
-
-    // Setup default FSE-indices we are going to propagate
-    uint32_t4 fseTableIndices = uint32_t4(
-        outBlockData.fseTableIndexHufW,
-        outBlockData.fseTableIndexLLen,
-        outBlockData.fseTableIndexOffs,
-        outBlockData.fseTableIndexMLen
-    );
-
-    const uint32_t blockSize = min(WaveGetLaneCount(), kzstdgpu_TgSizeX_ParseCompressedBlocks);
-
-    const uint32_t thisBlockIndex = WaveReadLaneFirst(threadId / blockSize);
-    const uint32_t thisLocalIndex = threadId % blockSize;
-
-    const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
-
-    #define WAVE_SHUFFLE(v, and_mask, or_mask, xor_mask) WaveReadLaneAt(v, ((WaveGetLaneIndex() & (and_mask)) | (or_mask)) ^ (xor_mask))
-
-    #define WAVE_BROADCAST(v, group_size, group_lane) WAVE_SHUFFLE(v, ~(group_size - 1u), group_lane, 0)
-
-    #define WAVE_PROPAGATE_STEP(p, group_size)  \
-        if (blockSize >= group_size /** this condition is expected to be a compile-time condition, so no real branch */) \
-        { \
-            /* for every group of `group_size` consecutive lanes, broadcast the value from the last lane of the "odd" sub-group of 2x smaller size) */     \
-            uint32_t b = WAVE_BROADCAST(p, group_size, group_size / 2u - 1u);                                   \
-            /* for every group of `group_size` consecutive lanes */                                             \
-            /* propagate element from the last lane of the "odd" sub-group of 2x smaller size  */               \
-            /* into all elements of the "even" sub-group of 2x smaller size when propagated value makes sense */\
-            [flatten] if ((WaveGetLaneIndex() & (group_size / 2u)))                                             \
-            {                                                                                                   \
-                /* We propagate only non-Repeat and not-Unused values to lanes containing Repeat/Unused values*/\
-                if (p >= kzstdgpu_FseProbTableIndex_Repeat && b < kzstdgpu_FseProbTableIndex_Repeat)              \
-                    p = b;                                                                                      \
-            }                                                                                                   \
-        }
-
-    // To propagate FSE table indices, we use a variant of "Decoupled Lookback"
-    //      1. Each block (a group of `blockSize` threads) looks at indices of each type of FSE table
-    //         and checks for each of FSE table type if there's any FSE table "index" that is not `Unused`
-    //         and is not `Repeat` which means the block can propagate its last not `Repeat` and not `Unused` value
-    //         to the next block. If the block can propagate indices for all FSE table types, it does so and stores
-    //         the result in the Lookback buffer (so the next block can read it sooner) and marks them as 'Ready'
-    //      2. If the block can't propagate all indices to the succeeding blocks because it contains only `Repeat` and `Unused`
-    //         indices, it also marks the buffer as 'Ready' (but stored indices are still `Unused` or `Repeat`)
-    //      3. If the block needs previous block to complete (the first "index" that is not `Unused` has `Repeat` for any of the FSE table types)
-    //         it does the lookback (it goes looking for the first `Ready' block, it skips `Ready` block with `Unused` values, and stops at `Ready' block with valid values)
-    //      4. The block uses previous indices to do propagation and stores its own results, it also stores "lookback"
-    //         indices for succeeding block if it didn't do so in Step 1.
-
-    #if 0
-        #define LOOKBACK_STORE(name, value) \
-            srt.inoutTableIndexLookback[thisBlockIndex].fseTableIndex##name = (value)
-    #else
-        #define LOOKBACK_STORE(name, value) \
-            InterlockedCompareStore(srt.inoutTableIndexLookback[thisBlockIndex].fseTableIndex##name, 0, (value))
-    #endif
-
-    #if 0
-        // BUG(pamartis): this varaint of code reads incorrect values on some HW, so it looks like `globallycoherent`
-        // keyword doesn't work for reads
-        #define LOOKBACK_READ(name, index)  \
-            const uint32_t lookbackIndex##name = srt.inoutTableIndexLookback[index].fseTableIndex##name
-    #else
-        #define LOOKBACK_READ(name, index)  \
-            uint32_t lookbackIndex##name;   \
-            InterlockedAdd(srt.inoutTableIndexLookback[index].fseTableIndex##name, 0, lookbackIndex##name)
-    #endif
-
-    const bool indexValidHufW = outBlockData.fseTableIndexHufW < kzstdgpu_FseProbTableIndex_Repeat;
-    const bool indexValidLLen = outBlockData.fseTableIndexLLen < kzstdgpu_FseProbTableIndex_Repeat;
-    const bool indexValidOffs = outBlockData.fseTableIndexOffs < kzstdgpu_FseProbTableIndex_Repeat;
-    const bool indexValidMLen = outBlockData.fseTableIndexMLen < kzstdgpu_FseProbTableIndex_Repeat;
-
-    #define LOOKBACK_STORE_EARLY_ALL_INVALID(name)                                                              \
-        if (WaveActiveAllTrue(!indexValid##name))                                                               \
-        {                                                                                                       \
-            if (WaveIsFirstLane())                                                                              \
-            {                                                                                                   \
-                LOOKBACK_STORE(name, zstdgpu_Encode31BitLookbackFull(kzstdgpu_FseProbTableIndex_Unused));       \
-            }                                                                                                   \
-        }
-
-    // NOTE(pamartis): STEP 2. Check that it's possible to prepare FSE/Huffman table index for the
-    // succeeding blocks early (all lanes of each "index" are either `Repeat` or `Unused`)
-    LOOKBACK_STORE_EARLY_ALL_INVALID(HufW)
-    LOOKBACK_STORE_EARLY_ALL_INVALID(LLen)
-    LOOKBACK_STORE_EARLY_ALL_INVALID(Offs)
-    LOOKBACK_STORE_EARLY_ALL_INVALID(MLen)
-
-    #undef LOOKBACK_STORE_EARLY_ALL_INVALID
-
-    #define LOOKBACK_STORE_EARLY_ANY_VALID(name)            \
-        if (WaveActiveAnyTrue(indexValid##name))            \
-        {                                                   \
-            uint32_t x = outBlockData.fseTableIndex##name;  \
-            WAVE_PROPAGATE_STEP(x, 2)                       \
-            WAVE_PROPAGATE_STEP(x, 4)                       \
-            WAVE_PROPAGATE_STEP(x, 8)                       \
-            WAVE_PROPAGATE_STEP(x, 16)                      \
-            WAVE_PROPAGATE_STEP(x, 32)                      \
-            const uint32_t xLast = WaveReadLaneAt(x, lastLocalIndex); \
-            if (WaveIsFirstLane())                          \
-            {                                               \
-                LOOKBACK_STORE(name, zstdgpu_Encode31BitLookbackFull(xLast));\
-            }                                               \
-        }
-
-    // NOTE(pamartis): STEP 1. Check that if it's possible to prepare FSE/Huffman table index for
-    // the succeeding blocks early (at least one lane of each "index" is other than `Repeat` and `Unused`)
-    LOOKBACK_STORE_EARLY_ANY_VALID(HufW)
-    LOOKBACK_STORE_EARLY_ANY_VALID(LLen)
-    LOOKBACK_STORE_EARLY_ANY_VALID(Offs)
-    LOOKBACK_STORE_EARLY_ANY_VALID(MLen)
-
-    #undef LOOKBACK_STORE_EARLY_ANY_VALID
-    #undef LOOKBACK_STORE
-
-    #define INIT_NEEDS_LOOKBACK(name)                                                                                       \
-        bool needsLookback##name = false;                                                                                   \
-        if (outBlockData.fseTableIndex##name != kzstdgpu_FseProbTableIndex_Unused)                                           \
-        {                                                                                                                   \
-            needsLookback##name = WaveReadLaneFirst(outBlockData.fseTableIndex##name) == kzstdgpu_FseProbTableIndex_Repeat;  \
-        }                                                                                                                   \
-        const bool needsLookbackUniform##name = WaveActiveAnyTrue(needsLookback##name)
-
-    //  NOTE(pamartis): STEP 3. for each index type, check the first lane that doesn't contain
-    //      `kzstdgpu_FseProbTableIndex_Unused` if it is kzstdgpu_FseProbTableIndex_Repeat
-    //      (otherwise the index can be fully propagated)
-    INIT_NEEDS_LOOKBACK(HufW);
-    INIT_NEEDS_LOOKBACK(LLen);
-    INIT_NEEDS_LOOKBACK(Offs);
-    INIT_NEEDS_LOOKBACK(MLen);
-
-    uint32_t fseTableIndexPropagatedHufW = outBlockData.fseTableIndexHufW;
-    uint32_t fseTableIndexPropagatedLLen = outBlockData.fseTableIndexLLen;
-    uint32_t fseTableIndexPropagatedOffs = outBlockData.fseTableIndexOffs;
-    uint32_t fseTableIndexPropagatedMLen = outBlockData.fseTableIndexMLen;
-
-    if (0 != thisBlockIndex && (needsLookbackUniformHufW || needsLookbackUniformLLen || needsLookbackUniformOffs || needsLookbackUniformMLen))
-    {
-        uint32_t fseTableIndexLookbackHufW = outBlockData.fseTableIndexHufW;
-        uint32_t fseTableIndexLookbackLLen = outBlockData.fseTableIndexLLen;
-        uint32_t fseTableIndexLookbackOffs = outBlockData.fseTableIndexOffs;
-        uint32_t fseTableIndexLookbackMLen = outBlockData.fseTableIndexMLen;
-        if (WaveIsFirstLane())
-        {
-            uint32_t prevBlockIndexHufW = thisBlockIndex - 1u;
-            uint32_t prevBlockIndexLLen = thisBlockIndex - 1u;
-            uint32_t prevBlockIndexOffs = thisBlockIndex - 1u;
-            uint32_t prevBlockIndexMLen = thisBlockIndex - 1u;
-
-            bool needsLookbackLoopHufW = needsLookbackUniformHufW;
-            bool needsLookbackLoopLLen = needsLookbackUniformLLen;
-            bool needsLookbackLoopOffs = needsLookbackUniformOffs;
-            bool needsLookbackLoopMLen = needsLookbackUniformMLen;
-
-            while (needsLookbackLoopHufW || needsLookbackLoopLLen || needsLookbackLoopOffs || needsLookbackLoopMLen)
-            {
-                #define UPDATA_LOOKBACK_STATE(name)                                                                             \
-                    if (needsLookbackLoop##name)                                                                                \
-                    {                                                                                                           \
-                        LOOKBACK_READ(name, prevBlockIndex##name);                                                              \
-                        if (zstdgpu_Decode31BitLookbackFlags(lookbackIndex##name) > 0)                                          \
-                        {                                                                                                       \
-                            const uint32_t maskedLookbackIndex##name = zstdgpu_Decode31BitLookbackValue(lookbackIndex##name);   \
-                            if (maskedLookbackIndex##name == kzstdgpu_FseProbTableIndex_Unused)                                 \
-                            {                                                                                                   \
-                                /* NOTE(pamartis): There's no useful data in the current `lookback`, so proceed to the next one (backward)*/\
-                                /* If we reach the first `lookback` which always contain the correct indices for propagation,   */\
-                                /* we terminate early without going into the next iteration                                     */\
-                                if (prevBlockIndex##name == 0)                                                                  \
-                                {                                                                                               \
-                                    needsLookbackLoop##name = false;                                                            \
-                                }                                                                                               \
-                                else                                                                                            \
-                                {                                                                                               \
-                                    --prevBlockIndex##name;                                                                     \
-                                }                                                                                               \
-                                /* NOTE(pamartis): We found the `lookback` index in `Ready` state that is `Unused`,     */      \
-                                /* and decremented the block index for lookback, and continue into the next iteration   */      \
-                            }                                                                                                   \
-                            else                                                                                                \
-                            {                                                                                                   \
-                                /* NOTE(pamartis): We found the `lookback` index in `Ready` state other than `Unused`*/         \
-                                needsLookbackLoop##name = false;                                                                \
-                                fseTableIndexLookback##name = maskedLookbackIndex##name;                                        \
-                            }                                                                                                   \
-                        }                                                                                                       \
-                    }
-
-                UPDATA_LOOKBACK_STATE(HufW)
-                UPDATA_LOOKBACK_STATE(LLen)
-                UPDATA_LOOKBACK_STATE(Offs)
-                UPDATA_LOOKBACK_STATE(MLen)
-                #undef UPDATA_LOOKBACK_STATE
-                #undef LOOKBACK_READ
-            }
-        }
-
-        // replace the first lane's "Repeat" values with the values from the last compressed block
-        #define SET_PROPAGATED_FSE_INDEX_LOOKBACK(name)                                                             \
-            if (needsLookbackUniform##name)                                                                         \
-            {                                                                                                       \
-                const uint32_t fseTableIndexLookbackUniform##name = WaveReadLaneFirst(fseTableIndexLookback##name); \
-                if (needsLookback##name)                                                                            \
-                    if (WaveIsFirstLane())                                                                          \
-                        fseTableIndexPropagated##name = fseTableIndexLookbackUniform##name;                         \
-            }
-
-        SET_PROPAGATED_FSE_INDEX_LOOKBACK(HufW)
-        SET_PROPAGATED_FSE_INDEX_LOOKBACK(LLen)
-        SET_PROPAGATED_FSE_INDEX_LOOKBACK(Offs)
-        SET_PROPAGATED_FSE_INDEX_LOOKBACK(MLen)
-
-        #undef SET_PROPAGATED_FSE_INDEX_LOOKBACK
-    }
-
-    // NOTE(pamartis): Because the first lane containining "non-Unused" index was set to something other than `Repeat`,
-    // we can propagate indices across the wave (if needed of course, if the wave needs that -- contains any number of lanes with `Repeat` indices)
-    #define PROPAGATE_ACROSS_WAVE_IF_NEEDED(name)                                                                       \
-        const bool needPropagateAcrossWave##name = fseTableIndexPropagated##name == kzstdgpu_FseProbTableIndex_Repeat;   \
-        if (WaveActiveAnyTrue(needPropagateAcrossWave##name))                                                           \
-        {                                                                                                               \
-            uint32_t x = fseTableIndexPropagated##name;                                                                 \
-            WAVE_PROPAGATE_STEP(x, 2)                                                                                   \
-            WAVE_PROPAGATE_STEP(x, 4)                                                                                   \
-            WAVE_PROPAGATE_STEP(x, 8)                                                                                   \
-            WAVE_PROPAGATE_STEP(x, 16)                                                                                  \
-            WAVE_PROPAGATE_STEP(x, 32)                                                                                  \
-            if (needPropagateAcrossWave##name)                                                                          \
-            {                                                                                                           \
-                fseTableIndexPropagated##name = x;                                                                      \
-            }                                                                                                           \
-        }
-
-    PROPAGATE_ACROSS_WAVE_IF_NEEDED(HufW)
-    PROPAGATE_ACROSS_WAVE_IF_NEEDED(LLen)
-    PROPAGATE_ACROSS_WAVE_IF_NEEDED(Offs)
-    PROPAGATE_ACROSS_WAVE_IF_NEEDED(MLen)
-
-    #undef PROPAGATE_ACROSS_WAVE_IF_NEEDED
-
-    outBlockData.fseTableIndexHufW = fseTableIndexPropagatedHufW;
-    outBlockData.fseTableIndexLLen = fseTableIndexPropagatedLLen;
-    outBlockData.fseTableIndexOffs = fseTableIndexPropagatedOffs;
-    outBlockData.fseTableIndexMLen = fseTableIndexPropagatedMLen;
-
-    #undef WAVE_PROPAGATE_STEP
-    #undef WAVE_BROADCAST
-    #undef WAVE_SHUFFLE
-
-#else
-    // use static variables on CPU because this function is expected to be called in a loop for all compressed blocks
-    static uint32_t lastHufWIndex = kzstdgpu_FseProbTableIndex_Unused;
-    static uint32_t lastLLenIndex = kzstdgpu_FseProbTableIndex_Unused;
-    static uint32_t lastOffsIndex = kzstdgpu_FseProbTableIndex_Unused;
-    static uint32_t lastMLenIndex = kzstdgpu_FseProbTableIndex_Unused;
-
-    #define PROPAGATE_FSE_HUF_INDEX(name) \
-        if (outBlockData.fseTableIndex##name < kzstdgpu_FseProbTableIndex_Repeat)    \
-        {                                                                           \
-            last##name##Index = outBlockData.fseTableIndex##name;                   \
-        }                                                                           \
-        else if (outBlockData.fseTableIndex##name == kzstdgpu_FseProbTableIndex_Repeat)\
-        {                                                                           \
-            outBlockData.fseTableIndex##name = last##name##Index;                   \
-        }
-
-    PROPAGATE_FSE_HUF_INDEX(HufW)
-    PROPAGATE_FSE_HUF_INDEX(LLen)
-    PROPAGATE_FSE_HUF_INDEX(Offs)
-    PROPAGATE_FSE_HUF_INDEX(MLen)
-
-    #undef PROPAGATE_FSE_HUF_INDEX
-#endif
-
     if (0 != seqCount)
     {
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].fseLLen = outBlockData.fseTableIndexLLen;
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].fseOffs = outBlockData.fseTableIndexOffs;
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].fseMLen = outBlockData.fseTableIndexMLen;
-        srt.inoutSeqRefs[outBlockData.seqStreamIndex].blockId = blockIndexInFrame;
-    }
-
-    if (0x1 < literalBlockType)
-    {
-        const uint32_t literalStreamCount = (0x0 == literalBlockSzFmt) ? 1 : 4;
-
-#ifdef __hlsl_dx_compiler
-        #if 0
-        uint32_t literalStreamCountPerHuffmanTablePerWave = 0;
-
-#define ENABLE_DXC_RECONVERGENCE_BUG_WORKAROUND 1
-
-#if ENABLE_DXC_RECONVERGENCE_BUG_WORKAROUND
-        bool isLaneEnabled = true;
-        do
-#else
-        for (;;)
-#endif
-        {
-            const uint32_t huffmanTableIndexUniform = WaveReadLaneFirst(outBlockData.fseTableIndexHufW);
-            [branch] if (huffmanTableIndexUniform == outBlockData.fseTableIndexHufW)
-            {
-                const uint32_t literalStreamCountPerWaveThisHuffmanTable = WaveActiveSum(literalStreamCount);
-                if (WaveIsFirstLane())
-                {
-                    //InterlockedAdd(srt.literalStreamCountPerHuffmanTable[huffmanTableIndexUniform], literalStreamCountPerWaveThisHuffmanTable);
-                    literalStreamCountPerHuffmanTablePerWave = literalStreamCountPerWaveThisHuffmanTable;
-                }
-#if ENABLE_DXC_RECONVERGENCE_BUG_WORKAROUND
-                isLaneEnabled = false;
-#else
-                break;
-#endif
-            }
-        }
-#if ENABLE_DXC_RECONVERGENCE_BUG_WORKAROUND
-        while (isLaneEnabled);
-#endif
-
-        if (literalStreamCountPerHuffmanTablePerWave > 0)
-        {
-            InterlockedAdd(srt.literalStreamCountPerHuffmanTable[outBlockData.fseTableIndexHufW], literalStreamCountPerHuffmanTablePerWave);
-        }
-        #else
-        uint32_t huffmanBucketOffset = 0;
-        InterlockedAdd(srt.inoutLitStreamEndPerHuffmanTable[outBlockData.fseTableIndexHufW], literalStreamCount, huffmanBucketOffset);
-        #endif
-#else
-        uint32_t huffmanBucketOffset = srt.inoutLitStreamEndPerHuffmanTable[outBlockData.fseTableIndexHufW];
-        srt.inoutLitStreamEndPerHuffmanTable[outBlockData.fseTableIndexHufW] = huffmanBucketOffset + literalStreamCount;
-#endif
-        // NOTE(pamartis): when Huffman table indices are valid, update them for every compressed literal stream
-        if (0x0 == literalBlockSzFmt)
-        {
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex].huffmanBucketIndex  = outBlockData.fseTableIndexHufW;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex].huffmanBucketOffset = huffmanBucketOffset;
-        }
-        else
-        {
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 0].huffmanBucketIndex = outBlockData.fseTableIndexHufW;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 0].huffmanBucketOffset= huffmanBucketOffset + 0;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 1].huffmanBucketIndex = outBlockData.fseTableIndexHufW;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 1].huffmanBucketOffset= huffmanBucketOffset + 1;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 2].huffmanBucketIndex = outBlockData.fseTableIndexHufW;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 2].huffmanBucketOffset= huffmanBucketOffset + 2;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 3].huffmanBucketIndex = outBlockData.fseTableIndexHufW;
-            srt.inoutLitStreamBuckets[outBlockData.litStreamIndex + 3].huffmanBucketOffset= huffmanBucketOffset + 3;
-        }
+        srt.inoutSeqStreamToLLenFseId[outBlockData.seqStreamIndex] = fseTableIndexLLen;
+        srt.inoutSeqStreamToOffsFseId[outBlockData.seqStreamIndex] = fseTableIndexOffs;
+        srt.inoutSeqStreamToMLenFseId[outBlockData.seqStreamIndex] = fseTableIndexMLen;
+        srt.inoutSeqStreamToBlockId[outBlockData.seqStreamIndex]   = blockIndexInFrame;
     }
 
     srt.inoutCompressedBlocks[threadId] = outBlockData;
@@ -2768,7 +2654,6 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable(ZSTDGPU_PARAM_INOUT(zstdgpu_Ini
 }
 
 static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
-                                                               ZSTDGPU_RO_BUFFER(uint32_t) LitStreamRemap,
                                                                ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                                ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
                                                                ZSTDGPU_PARAM_LDS_IN(uint32_t) GS_HuffmanTable,
@@ -2782,13 +2667,16 @@ static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BU
 
 
 static void zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(ZSTDGPU_RO_BUFFER(uint32_t) LitGroupEndPerHuffmanTable,
-                                                                   ZSTDGPU_RO_BUFFER(uint32_t) LitStreamEndPerHuffmanTable,
+                                                                   ZSTDGPU_RO_BUFFER(uint32_t) HufWIdToHufLitId,
+                                                                   ZSTDGPU_RO_BUFFER(uint32_t) HufLitIdToLitStreamId,
+                                                                   uint32_t hufLitCount,
+                                                                   uint32_t hufLitStreamCountTotal,
                                                                    uint32_t htCount,
                                                                    uint32_t groupId,
                                                                    ZSTDGPU_PARAM_INOUT(uint32_t) htIndex,
                                                                    ZSTDGPU_PARAM_INOUT(uint32_t) htGroupStart,
-                                                                   ZSTDGPU_PARAM_INOUT(uint32_t) htLiteralStart,
-                                                                   ZSTDGPU_PARAM_INOUT(uint32_t) htLiteralCount)
+                                                                   ZSTDGPU_PARAM_INOUT(uint32_t) hufLitStreamStart,
+                                                                   ZSTDGPU_PARAM_INOUT(uint32_t) hufLitStreamCount)
 {
     htIndex = 0;
     {
@@ -2816,18 +2704,22 @@ static void zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(ZSTDGPU_RO_BU
         htIndex = rangeBase;
     }
 
-    htLiteralCount = LitStreamEndPerHuffmanTable[htIndex];
-    htLiteralStart = 0;
-    //uint32_t htGroupCount = ZstdLitGroupStartPerHuffmanTable[rangeBase];
     htGroupStart = 0;
-    if (htIndex > 0)
+    ZSTDGPU_BRANCH if (htIndex > 0)
     {
-        htLiteralStart = LitStreamEndPerHuffmanTable[htIndex - 1];
-        htLiteralCount -= htLiteralStart;
-
         htGroupStart = LitGroupEndPerHuffmanTable[htIndex - 1];
-        //htGroupCount -= htGroupStart;
     }
+
+    const uint32_t hufLitId = HufWIdToHufLitId[htIndex];
+
+    uint32_t hufLitStreamEnd = hufLitStreamCountTotal;
+    ZSTDGPU_BRANCH if (hufLitId + 1u < hufLitCount)
+    {
+        hufLitStreamEnd = HufLitIdToLitStreamId[hufLitId + 1u];
+    }
+
+    hufLitStreamStart = HufLitIdToLitStreamId[hufLitId];
+    hufLitStreamCount = hufLitStreamEnd - hufLitStreamStart;
 }
 
 // LDS partitioning macro lists for Huffman Table Initialisation (standalone shader)
@@ -2849,7 +2741,10 @@ static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_D
 
     zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(
         srt.inLitGroupEndPerHuffmanTable,
-        srt.inLitStreamEndPerHuffmanTable,
+        srt.inHufWIdToHufLitId,
+        srt.inHufLitIdToLitStreamId,
+        srt.inCounters[0].HufLit,
+        srt.inCounters[0].HUF_Streams,
         srt.huffmanTableSlotCount,
         groupId,
         htIndex,
@@ -2899,7 +2794,6 @@ static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_D
 
     zstdgpu_DecompressHuffmanCompressedLiterals(
         srt.inCompressedData,
-        srt.inLitStreamRemap,
         srt.inLitRefs,
         srt.inoutDecompressedLiterals,
         GS_HuffmanTable,
@@ -2936,7 +2830,10 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
 
     zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(
         srt.inLitGroupEndPerHuffmanTable,
-        srt.inLitStreamEndPerHuffmanTable,
+        srt.inHufWIdToHufLitId,
+        srt.inHufLitIdToLitStreamId,
+        srt.inCounters[0].HufLit,
+        srt.inCounters[0].HUF_Streams,
         srt.huffmanTableSlotCount,
         groupId,
         htIndex,
@@ -3006,7 +2903,6 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
 
     zstdgpu_DecompressHuffmanCompressedLiterals(
         srt.inCompressedData,
-        srt.inLitStreamRemap,
         srt.inLitRefs,
         srt.inoutDecompressedLiterals,
         GS_HuffmanTable,
@@ -3033,7 +2929,6 @@ static inline void zstdgpu_SampleHuffmanSymbolAndBitcnt(ZSTDGPU_PARAM_INOUT(uint
 }
 
 void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
-                                                 ZSTDGPU_RO_BUFFER(uint32_t) LitStreamRemap,
                                                  ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                  ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
                                                  ZSTDGPU_PARAM_LDS_IN(uint32_t) GS_HuffmanTable,
@@ -3053,7 +2948,7 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
     const uint32_t thisGroupLiteralRemain = zstdgpu_MinU32(htLiteralCount - thisGroupLiteralStart, tgSize);
     ZSTDGPU_FOR_WORK_ITEMS(literalIndex, thisGroupLiteralRemain, threadId, tgSize)
     {
-        const uint32_t literalStreamId = LitStreamRemap[htLiteralStart + thisGroupLiteralStart + literalIndex];
+        const uint32_t literalStreamId = htLiteralStart + thisGroupLiteralStart + literalIndex;
 
         zstdgpu_LitStreamInfo compressedLiteral = LitRefs[literalStreamId];
         uint32_t decodedByteCnt = 0;
@@ -3102,7 +2997,6 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
 }
 
 static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
-                                                                      ZSTDGPU_RO_BUFFER(uint32_t) LitStreamRemap,
                                                                       ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                                       ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
                                                                       ZSTDGPU_RW_BUFFER(uint32_t) DecompressedLiteralsAsDwords,
@@ -3134,7 +3028,7 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
 
     ZSTDGPU_BRANCH if (threadId < thisGroupLiteralRemain)
     {
-        const uint32_t literalStreamId = LitStreamRemap[htLiteralStart + thisGroupLiteralStart + threadId];
+        const uint32_t literalStreamId = htLiteralStart + thisGroupLiteralStart + threadId;
         zstdgpu_LitStreamInfo compressedLiteral = LitRefs[literalStreamId];
         if (compressedLiteral.dst.size != 0) // derived from block Regenerated_Size
         {
@@ -3410,6 +3304,17 @@ static uint32_t zstdgpu_SequenceOffsets_Update2(ZSTDGPU_PARAM_INOUT(uint32_t) of
     return encodedOffset;
 }
 
+static zstdgpu_SeqStreamInfo zstdgpu_LoadSeqStreamInfo(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt, uint32_t seqStreamIdx)
+{
+    zstdgpu_SeqStreamInfo info;
+    info.src     = srt.inSeqStreamToRef[seqStreamIdx];
+    info.fseLLen = srt.inSeqStreamToLLenFseId[seqStreamIdx];
+    info.fseOffs = srt.inSeqStreamToOffsFseId[seqStreamIdx];
+    info.fseMLen = srt.inSeqStreamToMLenFseId[seqStreamIdx];
+    info.blockId = srt.inSeqStreamToBlockId[seqStreamIdx];
+    return info;
+}
+
 static zstdgpu_OffsetAndSize zstdgpu_GetSequenceStartAndCount(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt, uint32_t seqStreamIdx, uint32_t seqStreamCnt)
 {
     zstdgpu_OffsetAndSize ref;
@@ -3520,7 +3425,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
-    const zstdgpu_SeqStreamInfo seqRef = srt.inSeqRefs[seqStreamIdx];
+    const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
 
     #ifdef ZSTDGPU_BACKWARD_BITBUF
     #   error `ZSTDGPU_BACKWARD_BITBUF` must not be defined.
@@ -3640,7 +3545,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
-    const zstdgpu_SeqStreamInfo seqRef = srt.inSeqRefs[seqStreamIdx];
+    const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
 
      // NOTE: the final block size will be computed as SUM(literalSize, totalMLen)
     const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId];
@@ -3799,7 +3704,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 
     const zstdgpu_OffsetAndSize seqRefDst = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
 
-    const zstdgpu_SeqStreamInfo seqRef = srt.inSeqRefs[seqStreamIdx];
+    const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
 
     uint32_t offset1, offset2, offset3;
     zstdgpu_SequenceOffsets_Init(offset1, offset2, offset3);
@@ -3964,7 +3869,7 @@ static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstd
     {
         const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
         const uint32_t seqStreamIdx = zstdgpu_BinarySearch(srt.inPerSeqStreamSeqStart, 0, seqStreamCnt, seqIdx);
-        const uint32_t blockIdx     = srt.inSeqRefs[seqStreamIdx].blockId;
+        const uint32_t blockIdx     = srt.inSeqStreamToBlockId[seqStreamIdx];
         const uint32_t frameIdx     = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, frameCnt, blockIdx);
         const uint32_t seqStreamIdxFirstInFrame = srt.inPerFrameSeqStreamMinIdx[frameIdx];
 

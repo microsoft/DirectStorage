@@ -83,16 +83,26 @@
     ZSTDGPU_BUFFER(uint8_t                                  , DecompressedHuffmanWeightCount)   \
     \
     ZSTDGPU_BUFFER(zstdgpu_LitStreamInfo                    , LitRefs                       )   \
-    ZSTDGPU_BUFFER(zstdgpu_CompressedLiteralHuffmanBucket   , LitStreamBuckets              )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , LitStreamRemap                )   \
-    ZSTDGPU_BUFFER(zstdgpu_SeqStreamInfo                    , SeqRefs                       )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , CmpLitToHufWFseId             )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , HufWIdToHufLitId              )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , HufLitIdToLitStreamId         )   \
+    ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , SeqStreamToRef                )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , SeqStreamToLLenFseId          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , SeqStreamToOffsFseId          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , SeqStreamToMLenFseId          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , SeqStreamToBlockId            )   \
     ZSTDGPU_BUFFER(uint32_t                                 , BlockSeqCountPrefixLookback   )   \
     ZSTDGPU_BUFFER(uint32_t                                 , SeqCountPrefixLookback        )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , CmpLitCompactionLookback      )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , LitStreamCountPrefixLookback  )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , HufLitCompactionLookback      )   \
     \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , HufRefs                       )   \
     ZSTDGPU_BUFFER(zstdgpu_CompressedBlockData              , CompressedBlocks              )   \
-    ZSTDGPU_BUFFER(zstdgpu_TableIndexLookback               , TableIndexLookback            )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , LitStreamEndPerHuffmanTable   )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseIndexLookbackHufW          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseIndexLookbackLLen          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseIndexLookbackOffs          )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseIndexLookbackMLen          )   \
     ZSTDGPU_BUFFER(uint32_t                                 , LitGroupEndPerHuffmanTable    )   \
     \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , BlocksRLERefs                 )   \
@@ -312,15 +322,25 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
 
     const uint32_t HufRefs_Count = cmpBlockCount;
     const uint32_t LitRefs_Count = cmpBlockCount * 4;
-    const uint32_t LitStreamBuckets_Count = cmpBlockCount * 4;
-    const uint32_t LitStreamRemap_Count = cmpBlockCount * 4;
-    const uint32_t SeqRefs_Count = cmpBlockCount;
+    const uint32_t CmpLitToHufWFseId_Count  = cmpBlockCount;
+    const uint32_t HufWIdToHufLitId_Count = cmpBlockCount;
+    const uint32_t HufLitIdToLitStreamId_Count = cmpBlockCount;
+    const uint32_t SeqStreamToRef_Count       = cmpBlockCount;
+    const uint32_t SeqStreamToLLenFseId_Count = cmpBlockCount;
+    const uint32_t SeqStreamToOffsFseId_Count = cmpBlockCount;
+    const uint32_t SeqStreamToMLenFseId_Count = cmpBlockCount;
+    const uint32_t SeqStreamToBlockId_Count   = cmpBlockCount;
     const uint32_t CompressedBlocks_Count = cmpBlockCount;
-    const uint32_t TableIndexLookback_Count = zstdgpu_GetLookbackBlockCount(cmpBlockCount);
-    const uint32_t LitStreamEndPerHuffmanTable_Count = cmpBlockCount + zstdgpu_GetLookbackBlockCount(cmpBlockCount);
-    const uint32_t LitGroupEndPerHuffmanTable_Count = LitStreamEndPerHuffmanTable_Count;
-    const uint32_t BlockSeqCountPrefixLookback_Count = TableIndexLookback_Count;
-    const uint32_t SeqCountPrefixLookback_Count = TableIndexLookback_Count;
+    const uint32_t FseIndexLookbackHufW_Count = zstdgpu_GetLookbackBlockCount(cmpBlockCount);
+    const uint32_t FseIndexLookbackLLen_Count = FseIndexLookbackHufW_Count;
+    const uint32_t FseIndexLookbackOffs_Count = FseIndexLookbackHufW_Count;
+    const uint32_t FseIndexLookbackMLen_Count = FseIndexLookbackHufW_Count;
+    const uint32_t LitGroupEndPerHuffmanTable_Count = cmpBlockCount + zstdgpu_GetLookbackBlockCount(cmpBlockCount);
+    const uint32_t BlockSeqCountPrefixLookback_Count = FseIndexLookbackHufW_Count;
+    const uint32_t SeqCountPrefixLookback_Count = FseIndexLookbackHufW_Count;
+    const uint32_t CmpLitCompactionLookback_Count = FseIndexLookbackHufW_Count;
+    const uint32_t LitStreamCountPrefixLookback_Count = FseIndexLookbackHufW_Count;
+    const uint32_t HufLitCompactionLookback_Count = FseIndexLookbackHufW_Count;
 
     const uint32_t HuffmanTableCodeAndSymbol_Count = kzstdgpu_MaxCount_HuffmanWeights * cmpBlockCount;
     const uint32_t HuffmanTableRankIndex_Count = kzstdgpu_MaxCount_HuffmanWeightRanks * cmpBlockCount;
