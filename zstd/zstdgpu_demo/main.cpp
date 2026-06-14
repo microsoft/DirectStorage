@@ -964,6 +964,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool d3dDbg = false;
     bool d3dGfx = false;
     bool outFrm = false;
+    bool ssm = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
     wchar_t *zstFilePathStorage = NULL;
@@ -1096,6 +1097,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     outFrm = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--ssm"))
+                {
+                    ssm = true;
+                }
                 else
                 {
                     debugPrint(L"Unknown argv[%d] %s\n", argi, argv[argi]);
@@ -1120,6 +1125,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
                 debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
+                debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
                 if (badArg)
                 {
                     return 1;
@@ -1343,8 +1349,23 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         defaultUploadCallbackUserData[1] = (void *)zstdInFrameRefs;
         zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
     }
+    if (ssm)
+    {
+        zstdgpu_SetupAllStageSubmission(perRequestContext);
+    }
     if (blkCnt)
     {
+        /**
+         *  NOTE(pamartis):
+         *  Depending on whether `zstdgpu_SetupAllStageSubmission` was called or not,
+         *  calling `zstdgpu_SetupFrameInfoConstants` / `zstdgpu_SetupBlockInfoConstants`
+         *  either:
+         *
+         *  - improves scratch memory estimation (`zstdgpu_SetupAllStageSubmission` was called)
+         *
+         *  - enables elimination of mandatory wait for completion on GPU of the command list
+         *    populated with commands for the previous stage (if `zstdgpu_SetupAllStageSubmission` was NOT called)
+         */
         zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
         if (seqCnt)
         {
