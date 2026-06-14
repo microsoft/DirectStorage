@@ -31,15 +31,15 @@ ConstantBuffer<Consts>                  Constants                           : re
 ZSTDGPU_MEMSET_MEMCPY_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-StructuredBuffer<uint32_t>              ZstdInBlockSizePrefixTyped          : register(t4);
+StructuredBuffer<uint32_t>              ZstdInBlockSizePrefixTyped          : register(t5);
 
-StructuredBuffer<uint32_t>              ZstdInPerFrameBlockSizePrefixTyped  : register(t5);
+StructuredBuffer<uint32_t>              ZstdInPerFrameBlockSizePrefixTyped  : register(t6);
 
-StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : register(t6);
+StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : register(t7);
 
-StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t7);
+StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t8);
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=1)), SRV(t4), SRV(t5), SRV(t6), SRV(t7), RootConstants(b0, num32BitConstants=5)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=5), UAV(u0, numDescriptors=1)), SRV(t5), SRV(t6), SRV(t7), SRV(t8), RootConstants(b0, num32BitConstants=5)")]
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -48,7 +48,8 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
     if (i >= Constants.workItemCount)
         return;
 
-    const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, Constants.blockCount, i);
+    const uint32_t blockCnt = (Constants.flags & 0x1u) ? ZstdInCounters[0].Blocks_RAW : ZstdInCounters[0].Blocks_RLE;
+    const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, blockCnt, i);
 
     const zstdgpu_OffsetAndSize blockRef = ZstdInBlocksRefsTyped[blockIdx];
 

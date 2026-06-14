@@ -1599,8 +1599,9 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
 
 #define ZSTDGPU_INIT_FSE_TABLE_SRT()                                                                    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 0)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 1)    \
     \
-    ZSTDGPU_RO_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbs                      , 1)    \
+    ZSTDGPU_RO_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbs                      , 2)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , FseElems                      , 0)
 
@@ -1626,6 +1627,8 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
 #define ZSTDGPU_INIT_HUFFMAN_TABLE_SRT()                                                                \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeights    , 0)    \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 1)    \
+    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 2)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HuffmanTableInfo              , 0)    \
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HuffmanTableCodeAndSymbol     , 1)    \
@@ -1727,10 +1730,11 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , DestSequenceOffsets           , 0)
 
 #define ZSTDGPU_MEMSET_MEMCPY_SRT()                                                                     \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , CompressedData                , 0)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , BlockSizePrefix               , 1)    \
-    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 2)    \
-    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , UnCompressedFramesRefs        , 3)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 0)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , CompressedData                , 1)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , BlockSizePrefix               , 2)    \
+    ZSTDGPU_RO_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 3)    \
+    ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , UnCompressedFramesRefs        , 4)    \
     \
     ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , UnCompressedFramesData        , 0)
 
@@ -1821,7 +1825,6 @@ typedef struct zstdgpu_DecompressHuffmanWeights_SRT
 typedef struct zstdgpu_DecodeHuffmanWeights_SRT
 {
     ZSTDGPU_DECODE_HUFFMAN_WEIGHTS_SRT()
-    uint32_t    compressedBlockCount;
     uint32_t    compressedBufferSizeInBytes;
 } zstdgpu_DecodeHuffmanWeights_SRT;
 
@@ -1833,13 +1836,11 @@ typedef struct zstdgpu_InitHuffmanTable_SRT
 typedef struct zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT
 {
     ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
-    uint32_t    huffmanTableSlotCount;
 } zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT;
 
 typedef struct zstdgpu_DecompressLiterals_SRT
 {
     ZSTDGPU_DECOMPRESS_LITERALS_SRT()
-    uint32_t    huffmanTableSlotCount;
 } zstdgpu_DecompressLiterals_SRT;
 
 typedef struct zstdgpu_DecompressSequences_SRT

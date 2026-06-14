@@ -625,11 +625,13 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
         return;
     }
 
+    const uint32_t cmpBlockCnt = srt.inoutCounters[0].Blocks_CMP;
+
     ZSTDGPU_FOR_WORK_ITEMS(i, 1, threadId, kzstdgpu_TgSizeX_InitCounters)
     {
-        srt.inoutFseInfos[kzstdgpu_FseRleTableCount + srt.cmpBlockCount * 1 + 0] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_LLen, kzstdgpu_FseDefaultProbAccuracy_LLen);
-        srt.inoutFseInfos[kzstdgpu_FseRleTableCount + srt.cmpBlockCount * 2 + 1] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_Offs, kzstdgpu_FseDefaultProbAccuracy_Offs);
-        srt.inoutFseInfos[kzstdgpu_FseRleTableCount + srt.cmpBlockCount * 3 + 2] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_MLen, kzstdgpu_FseDefaultProbAccuracy_MLen);
+        srt.inoutFseInfos[zstdgpu_ComputeFseIndexLLen(0, cmpBlockCnt)] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_LLen, kzstdgpu_FseDefaultProbAccuracy_LLen);
+        srt.inoutFseInfos[zstdgpu_ComputeFseIndexOffs(0, cmpBlockCnt)] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_Offs, kzstdgpu_FseDefaultProbAccuracy_Offs);
+        srt.inoutFseInfos[zstdgpu_ComputeFseIndexMLen(0, cmpBlockCnt)] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_MLen, kzstdgpu_FseDefaultProbAccuracy_MLen);
     }
 
     // Initialize 256 dense RLE entries at the beginning of FSE element buffers.
@@ -647,11 +649,11 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
     // NOTE(pamartis): We start from `srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs` because
     // it's the maximal size of FSE probabilities used for Huffman Weights FSE tables, but those don't have "default" probabilities,
     // and therefore not initialised.
-    uint32_t dstStart = srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs;
+    uint32_t dstStart = cmpBlockCnt * kzstdgpu_MaxCount_FseProbs;
     uint32_t srcStart = 0;
 
     // NOTE(pamartis): The reason we use extra `kzstdgpu_MaxCount_FseProbs` is to be able to store default probabilities
-    const uint32_t dstTableStride = srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs + kzstdgpu_MaxCount_FseProbs;
+    const uint32_t dstTableStride = cmpBlockCnt * kzstdgpu_MaxCount_FseProbs + kzstdgpu_MaxCount_FseProbs;
 
     ZSTDGPU_FOR_WORK_ITEMS(i, kzstdgpu_FseDefaultProbCount_LLen, threadId, kzstdgpu_TgSizeX_InitCounters)
     {
@@ -2337,7 +2339,8 @@ static void zstdgpu_ShaderEntry_DecodeHuffmanWeights(ZSTDGPU_PARAM_INOUT(zstdgpu
     if (threadId >= huffmanWeightsTableCount)
         return;
 
-    const uint32_t hufTableIndex = srt.compressedBlockCount - 1 - threadId;
+    // Uncompressed Huffman weight tables are stored at the end of inHufRefs[0..srt.inCounters[0].Blocks_CMP) buffer
+    const uint32_t hufTableIndex = srt.inCounters[0].Blocks_CMP - 1 - threadId;
 
     zstdgpu_Forward_BitBuffer bitBuffer;
     zstdgpu_Forward_BitBuffer_InitWithSegment(bitBuffer, srt.inCompressedData, srt.inHufRefs[hufTableIndex], srt.compressedBufferSizeInBytes);
@@ -2745,7 +2748,7 @@ static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_D
         srt.inHufLitIdToLitStreamId,
         srt.inCounters[0].HufLit,
         srt.inCounters[0].HUF_Streams,
-        srt.huffmanTableSlotCount,
+        srt.inCounters[0].Blocks_CMP, // The number of Huffman table slots is the same as the number of Compressed blocks
         groupId,
         htIndex,
         htGroupStart,
@@ -2834,7 +2837,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         srt.inHufLitIdToLitStreamId,
         srt.inCounters[0].HufLit,
         srt.inCounters[0].HUF_Streams,
-        srt.huffmanTableSlotCount,
+        srt.inCounters[0].Blocks_CMP, // The number of Huffman table slots is the same as the number of Compressed blocks
         groupId,
         htIndex,
         htGroupStart,

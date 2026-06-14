@@ -21,13 +21,6 @@
 #pragma dxc diagnostic ignored "-Wfor-redefinition"
 #endif
 
-struct Consts
-{
-    uint32_t huffmanTableSlotCount;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
 #include "../zstdgpu_srt_decl_bind.h"
 ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
@@ -41,7 +34,7 @@ groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTableAndDecompressLiterals_LdsSi
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=8), UAV(u0, numDescriptors=1)),RootConstants(b0, num32BitConstants=1)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=8), UAV(u0, numDescriptors=1))")]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals, 1, 1)]
 void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -50,7 +43,6 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
     #include "../zstdgpu_srt_decl_copy.h"
     ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
-    srt.huffmanTableSlotCount   = Constants.huffmanTableSlotCount;
 
     if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;

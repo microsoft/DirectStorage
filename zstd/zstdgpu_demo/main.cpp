@@ -298,7 +298,6 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
         // NOTE(pamartis): We don't need to set CPU-side Huffman Weight Counts because they're not computed within kernel
         // like in the "Decompress" case, and only read instead. And therefore we want to use GPU data
         //srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
-        srt.compressedBlockCount                = gpuReadbackRes.Counters->Blocks_CMP;
         srt.compressedBufferSizeInBytes         = zstdDataBufferSize;
         for (uint32_t i = 0; i < gpuReadbackRes.Counters->HUF_WgtStreams; ++i)
         {
@@ -366,9 +365,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, gpuReadbackRes);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
-        srt.huffmanTableSlotCount       = gpuReadbackRes.Counters->Blocks_CMP;
-
-        const uint32_t htSlotCount = srt.huffmanTableSlotCount;
+        const uint32_t htSlotCount = gpuReadbackRes.Counters->Blocks_CMP;
         const uint32_t hufLitCount = gpuReadbackRes.Counters->HufLit;
         const uint32_t hufLitStreamCountTotal = gpuReadbackRes.Counters->HUF_Streams;
 
@@ -816,7 +813,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         zstdgpu_DecodeHuffmanWeights_SRT srt;
         zstdgpu_Init_DecodeHuffmanWeights_SRT(srt, zstdCpu);
-        srt.compressedBlockCount        = zstdCmpBlockCount;
         srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
         for (uint32_t i = 0; i < CNTRS(HUF_WgtStreams); ++i)
         {
@@ -840,7 +836,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         // Run Literal Decompression
         zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
         zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, zstdCpu);
-        srt.huffmanTableSlotCount = zstdCmpBlockCount;
         for (uint32_t groupId = 0; groupId < groupPrefix; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
