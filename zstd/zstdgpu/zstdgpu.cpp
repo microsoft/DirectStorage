@@ -3370,11 +3370,6 @@ ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D1
 ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req)
 {
     zstdgpu_ResourceDataCpu_InitFromResourceDataGpu(outGpuResources, &req->resData);
-
-    // HACK (pamartis): we copy block counts for now, because validation needs it, but we never compute block count on GPU
-    outGpuResources->Counters->Blocks_RAW = req->zstdRawBlockCountMax;
-    outGpuResources->Counters->Blocks_RLE = req->zstdRleBlockCountMax;
-    outGpuResources->Counters->Blocks_CMP = req->zstdCmpBlockCountMax;
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
