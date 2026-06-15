@@ -877,7 +877,16 @@ static inline void zstdgpu_Forward_BitBuffer_Refill(ZSTDGPU_PARAM_INOUT(zstdgpu_
     {
         ZSTDGPU_ASSERT(inoutBuffer.offset <= (inoutBuffer.bytesz >> 2) - 1);
 
-        inoutBuffer.bitbuf |= (uint64_t)inoutBuffer.buffer[inoutBuffer.offset] << inoutBuffer.bitcnt;
+        // NOTE: Refill always fetches one dword ahead of the bits actually consumed; the design
+        // relies on the "invalid" tail bits never being used (see disabled block below). For
+        // valid input the fetched dword always lies within the compressed buffer, so the clamp
+        // below is a no-op. For degenerate/tiny blocks the running `offset` can advance past the
+        // last dword of the buffer; without the clamp `buffer[offset]` becomes an out-of-bounds
+        // read, which faults the device because the SRV is a (static) root descriptor. Clamping
+        // the *read index* to the last dword keeps the fetch in-bounds while only ever changing
+        // unused tail bits, so decoded output is unaffected.
+        const uint32_t readDwordIndex = zstdgpu_MinU32(inoutBuffer.offset, (inoutBuffer.bytesz >> 2) - 1u);
+        inoutBuffer.bitbuf |= (uint64_t)inoutBuffer.buffer[readDwordIndex] << inoutBuffer.bitcnt;
 #if 0
         // TODO:    We currently rely on the fact that bits outside the bounds ("invalid") are never used.
         //          so they are present in "bitbuf" because we fetch the last dword and treat all bits as they are "valid"
@@ -932,7 +941,14 @@ static inline void zstdgpu_Forward_BitBuffer_Skip(ZSTDGPU_PARAM_INOUT(zstdgpu_Fo
 
         inoutBuffer.offset += bytecnt >> 2;
         inoutBuffer.bitcnt = (bytecnt & 3) << 3;
-        inoutBuffer.bitbuf = (uint64_t)inoutBuffer.buffer[inoutBuffer.offset] >> inoutBuffer.bitcnt;
+        // NOTE: Like Refill, Skip fetches one dword ahead of the bytes actually consumed. For valid
+        // input that dword lies within the compressed buffer, so the clamp below is a no-op. For
+        // degenerate/tiny segments (e.g. a 1-byte frame whose block segment ends at the buffer tail)
+        // `offset` can land past the last dword; without the clamp `buffer[offset]` is an out-of-bounds
+        // read that faults the device because the SRV is a (static) root descriptor. Clamping the
+        // *read index* keeps the fetch in-bounds while only ever touching unused tail bits.
+        const uint32_t readDwordIndex = zstdgpu_MinU32(inoutBuffer.offset, (inoutBuffer.bytesz >> 2) - 1u);
+        inoutBuffer.bitbuf = (uint64_t)inoutBuffer.buffer[readDwordIndex] >> inoutBuffer.bitcnt;
         inoutBuffer.offset += 1;
         inoutBuffer.bitcnt = 32 - inoutBuffer.bitcnt;
 
