@@ -1429,7 +1429,7 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
 {
     // NOTE(pamartis): 8 bytes per sequence is emperical estimation, not something stipulated
     // by ZSTD standard.
-    return size >> 4;
+    return size >> 3;
 }
 
 ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
@@ -1536,16 +1536,18 @@ static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefault
     uint32_t cntRaw, cntRle, cntCmp, cntLit, cntSeq;
     zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
 
-    if (0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
+    // NOTE(pamartis):
+    // If 'frame' constants were setup, we prioritize those assuming they are based on some knowledge about submitted data,
+    // otherwise rely on estimation which may be underestimation
+    if (0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
     {
-        ZSTDGPU_ASSERT(0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants));
         cntRaw = req->zstdRawBlockCountMax;
         cntRle = req->zstdRleBlockCountMax;
         cntCmp = req->zstdCmpBlockCountMax;
-
     }
     else
     {
+        ZSTDGPU_ASSERT(0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission));
         cntRaw = cntRle = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
 
         req->zstdRawBlockCountMax = cntRaw;
@@ -1554,14 +1556,15 @@ static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefault
     }
     zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
 
-    if (0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants) )
     {
-        ZSTDGPU_ASSERT(0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants));
         cntLit = req->zstdUncompressedLitByteCountMax;
         cntSeq = req->zstdUncompressedSeqElemCountMax;
     }
     else
     {
+        ZSTDGPU_ASSERT(0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission));
+
         // NOTE(pamartis): it's a huge overestimate, but it's best we can do safely,
         // a single output byte requires 1 byte for literal storage
         cntLit = req->zstdUncompressedFramesByteCount;
