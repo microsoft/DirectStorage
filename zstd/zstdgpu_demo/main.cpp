@@ -940,7 +940,7 @@ ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D1
 ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
-ZSTDGPU_API void zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
+ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
 
 // Entry point
 #ifndef _GAMING_XBOX
@@ -1239,9 +1239,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 #endif
 
     #define ZSTDGPU_TS_LIST()   \
-        ZSTDGPU_TS(Stage0)      \
-        ZSTDGPU_TS(Stage1)      \
-        ZSTDGPU_TS(Stage2)      \
         ZSTDGPU_TS(Readback0)   \
         ZSTDGPU_TS(Readback1)
 
@@ -1474,20 +1471,15 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                             descriptorCount[0] = descriptorCountReq;
                         }
 
-                        d3d12aid_Timestamp_PushScope(Stage0_Stamp, timestamps, cmdList,
-                            zstdgpu_SubmitAllStagesWithExternalMemory(perRequestContext, cmdList, defaultHeap[0], 0, uploadHeap[0], 0, readbackHeap[0], 0, descriptorHeap[0], 0);
-                        );
+                        zstdgpu_SubmitAllStagesWithExternalMemory(perRequestContext, cmdList, defaultHeap[0], 0, uploadHeap[0], 0, readbackHeap[0], 0, descriptorHeap[0], 0);
                     }
                     else
                     {
-                        d3d12aid_Timestamp_PushScope(Stage0_Stamp, timestamps, cmdList,
-                            zstdgpu_SubmitAllStagesWithInteralMemory(perRequestContext, cmdList);
-                        );
+                        zstdgpu_SubmitAllStagesWithInteralMemory(perRequestContext, cmdList);
                     }
                 }
                 else
                 {
-                    uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
                     uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
                     for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
                     {
@@ -1511,16 +1503,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                                 descriptorCount[stageIndex] = descriptorCountReq;
                             }
 
-                            d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
-                                zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
-                            );
-
+                            zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
                         }
                         else
                         {
-                            d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
-                                zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
-                            );
+                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
                         }
                         if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
                         {
@@ -1656,39 +1643,48 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     cmdQueue.queue->GetTimestampFrequency(&freqGpuClocks);
                 }
-                const wchar_t *timestampScopeNames[16];
-                uint64_t timestampScopeClocks[16];
+                const wchar_t *timestampScopeNames[22];
+                uint64_t timestampScopeClocks[22];
                 uint64_t clks = 0;
+                uint64_t clksAll = 0;
                 #define ZSTDGPU_TS(name)                                                                        \
                     if (name##_Stamp != ~0u && prfLevel > 0)                                                    \
                     {                                                                                           \
                         clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, name##_Stamp);  \
-                        const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                 \
-                        debugPrint(L"[PERF] %u frame: %7llu us - '" #name "' \n", frameIndex, usec);                  \
+                        clksAll += clks;                                                                        \
+                        if (prfLevel > 0)                                                                       \
+                        {                                                                                       \
+                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                             \
+                            debugPrint(L"[PERF] %u frame: %7llu us - '" #name "' \n", frameIndex, usec);        \
+                        }                                                                                       \
                     }
 
                 #define ZSTDGPU_DETAIL_TS(stage) \
-                    if (prfLevel > 1)            \
                     {                            \
-                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                              \
-                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);                      \
-                        for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                                          \
-                        {                                                                                                                                           \
-                            debugPrint(L"[PERF] %u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
-                        }                                                                                                                                           \
+                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                  \
+                        clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);   \
+                        clksAll += clks;                                                                                                                \
+                        if (prfLevel > 0)                                                                                                               \
+                        {                                                                                                                               \
+                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                                                     \
+                            debugPrint(L"[PERF] %u frame: %7llu us - 'Stage" #stage "' \n", frameIndex, usec);                                          \
+                            if (prfLevel > 1)                                                                                                           \
+                            {                                                                                                                           \
+                                for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                      \
+                                {                                                                                                                       \
+                                    debugPrint(L"[PERF] %u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
+                                }                                                                                                                       \
+                            }                                                                                                                           \
+                        }                                                                                                                               \
                     }
-                    ZSTDGPU_TS(Stage0)
                     ZSTDGPU_DETAIL_TS(0)
                     ZSTDGPU_TS(Readback0)
-                    ZSTDGPU_TS(Stage1)
                     ZSTDGPU_DETAIL_TS(1)
                     ZSTDGPU_TS(Readback1)
-                    ZSTDGPU_TS(Stage2)
                     ZSTDGPU_DETAIL_TS(2)
                     if (prfLevel == 0)
                     {
-                        clks = d3d12aid_Timestamps_GetDelta(&timestamps, kBackBufferIndex, Stage0_Stamp, Stage2_Stamp + 1);
-                        const uint64_t ns = (clks * 1000000000) / freqGpuClocks;
+                        const uint64_t ns = (clksAll * 1000000000) / freqGpuClocks;
                         const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
                         debugPrint(L"[PERF] %u frame: Decompression throughput %lf (GB/s)\n", frameIndex, decompressionThroughput);
                     }
