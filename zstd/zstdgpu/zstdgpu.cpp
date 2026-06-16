@@ -1382,9 +1382,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext i
 
     if (proceed)
     {
-        inPerRequestContext->zstdRawBlockCountMax = rawBlockCount;
-        inPerRequestContext->zstdRleBlockCountMax = rleBlockCount;
-        inPerRequestContext->zstdCmpBlockCountMax = cmpBlockCount;
+        inPerRequestContext->zstdRawBlockCountMax = zstdgpu_MaxU32(rawBlockCount, kzstdgpu_MinCount_Blocks);
+        inPerRequestContext->zstdRleBlockCountMax = zstdgpu_MaxU32(rleBlockCount, kzstdgpu_MinCount_Blocks);
+        inPerRequestContext->zstdCmpBlockCountMax = zstdgpu_MaxU32(cmpBlockCount, kzstdgpu_MinCount_Blocks);
         inPerRequestContext->setupFlags |= kzstdgpu_SetupFlags_HasFrameInfoConstants;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
@@ -1399,8 +1399,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestContext i
 
     if (proceed)
     {
-        inPerRequestContext->zstdUncompressedLitByteCountMax = literalsByteCount;
-        inPerRequestContext->zstdUncompressedSeqElemCountMax = sequenceCount;
+        inPerRequestContext->zstdUncompressedLitByteCountMax = zstdgpu_MaxU32(literalsByteCount, kzstdgpu_MinCount_UncompressedLitBytes);
+        inPerRequestContext->zstdUncompressedSeqElemCountMax = zstdgpu_MaxU32(sequenceCount, kzstdgpu_MinCount_UncompressedSeqElems);
         inPerRequestContext->setupFlags |= kzstdgpu_SetupFlags_HasBlockInfoConstants;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
@@ -1455,6 +1455,98 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
     return size >> 3;
 }
 
+static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, uint32_t *outCntRle, uint32_t *outCntCmp, zstdgpu_PerRequestContext req)
+{
+    uint32_t cntRaw, cntRle, cntCmp;
+    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+    {
+        ZSTDGPU_ASSERT(req->zstdRawBlockCountMax >= kzstdgpu_MinCount_Blocks);
+        ZSTDGPU_ASSERT(req->zstdRleBlockCountMax >= kzstdgpu_MinCount_Blocks);
+        ZSTDGPU_ASSERT(req->zstdCmpBlockCountMax >= kzstdgpu_MinCount_Blocks);
+
+        cntRaw = req->zstdRawBlockCountMax;
+        cntRle = req->zstdRleBlockCountMax;
+        cntCmp = req->zstdCmpBlockCountMax;
+    }
+    else
+    {
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
+        {
+            // NOTE(pamartis): The estimation is conservative and therefore can result in insufficient memory
+            cntRle = cntRaw = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
+        }
+        else
+        {
+            #define CNTRS(name) req->resData.gpu2Cpu.CountersCpu->name
+            cntRaw = CNTRS(Blocks_RAW);
+            cntRle = CNTRS(Blocks_RLE);
+            cntCmp = CNTRS(Blocks_CMP);
+            #undef CNTRS
+        }
+        // NOTE(pamartis): we clamp constants to `kzstdgpu_MinCount_Blocks` to make sure buffers are always allocated
+        // and are never `NULL` so submission code doesn't need to check for NULL.
+        // We do "Max" counts adjustment here and not on per-buffer level because doing this
+        // per-buffer would be prone to errors when adding new buffers/changing between SoA/AoS / etc.
+        cntRaw = zstdgpu_MaxU32(cntRaw, kzstdgpu_MinCount_Blocks);
+        cntRle = zstdgpu_MaxU32(cntRle, kzstdgpu_MinCount_Blocks);
+        cntCmp = zstdgpu_MaxU32(cntCmp, kzstdgpu_MinCount_Blocks);
+
+        req->zstdRawBlockCountMax = cntRaw;
+        req->zstdRleBlockCountMax = cntRle;
+        req->zstdCmpBlockCountMax = cntCmp;
+    }
+
+    ZSTDGPU_ASSERT(0 != cntRaw + cntRle + cntCmp);
+
+    *outCntRaw = cntRaw;
+    *outCntRle = cntRle;
+    *outCntCmp = cntCmp;
+}
+
+static void zstdgpu_RecomputeAndRetrieveBlockInfoConstants(uint32_t *outCntLit, uint32_t *outCntSeq, zstdgpu_PerRequestContext req)
+{
+    uint32_t cntLit, cntSeq;
+    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+    {
+        ZSTDGPU_ASSERT(req->zstdUncompressedLitByteCountMax >= kzstdgpu_MinCount_UncompressedLitBytes);
+        ZSTDGPU_ASSERT(req->zstdUncompressedSeqElemCountMax >= kzstdgpu_MinCount_UncompressedSeqElems);
+
+        cntLit = req->zstdUncompressedLitByteCountMax;
+        cntSeq = req->zstdUncompressedSeqElemCountMax;
+    }
+    else
+    {
+        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
+        {
+            // NOTE(pamartis): it's a huge overestimate, but it's best we can do safely,
+            // a single output byte requires 1 byte for literal storage
+            cntLit = req->zstdUncompressedFramesByteCount;
+            cntSeq = zstdgpu_OutputSizeToSequenceCount(req->zstdUncompressedFramesByteCount);
+        }
+        else
+        {
+            // NOTE(pamartis): this path is only triggered by multi-stage submission.
+            // Block info constants are read back from GPU from previous stage.
+            #define CNTRS(name) req->resData.gpu2Cpu.CountersCpu->name
+            cntLit = CNTRS(HUF_Streams_DecodedBytes);
+            cntSeq = CNTRS(Seq_Streams_DecodedItems);
+            #undef CNTRS
+        }
+
+        // NOTE(pamartis): we clamp constants to `kzstdgpu_MinCount_Uncompressed{LitBytes,SeqElems}`
+        // to make sure buffers are always allocated and are never `NULL` so submission code doesn't need to check for
+        // NULL. We do "Max" counts adjustment here and not on per-buffer level because doing so per-buffer would be
+        // prone to errors when adding new buffers/changing between SoA/AoS / etc.
+        cntLit = zstdgpu_MaxU32(cntLit, kzstdgpu_MinCount_UncompressedLitBytes);
+        cntSeq = zstdgpu_MaxU32(cntSeq, kzstdgpu_MinCount_UncompressedSeqElems);
+
+        req->zstdUncompressedLitByteCountMax = cntLit;
+        req->zstdUncompressedSeqElemCountMax = cntSeq;
+    }
+    *outCntSeq = cntSeq;
+    *outCntLit = cntLit;
+}
+
 ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
 {
     uint32_t proceed = 1;
@@ -1474,7 +1566,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
 
     if (proceed)
     {
-        #define CNTRS(name) req->resData.gpu2Cpu.CountersCpu->name
         if (stageIndex == 0)
         {
             zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
@@ -1482,62 +1573,14 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
         else if (stageIndex == 1)
         {
             uint32_t cntRaw, cntRle, cntCmp;
-            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
-            {
-                cntRaw = req->zstdRawBlockCountMax;
-                cntRle = req->zstdRleBlockCountMax;
-                cntCmp = req->zstdCmpBlockCountMax;
-            }
-            else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
-            {
-                cntRle = cntRaw = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
-
-                req->zstdRawBlockCountMax = cntRaw;
-                req->zstdRleBlockCountMax = cntRle;
-                req->zstdCmpBlockCountMax = cntCmp;
-            }
-            else
-            {
-                cntRaw = CNTRS(Blocks_RAW);
-                cntRle = CNTRS(Blocks_RLE);
-                cntCmp = CNTRS(Blocks_CMP);
-
-                req->zstdRawBlockCountMax = cntRaw;
-                req->zstdRleBlockCountMax = cntRle;
-                req->zstdCmpBlockCountMax = cntCmp;
-            }
-
-            ZSTDGPU_ASSERT(0 != cntRaw + cntRle + cntCmp);
-
+            zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
             zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
 
         }
         else if (stageIndex == 2)
         {
             uint32_t cntLit, cntSeq;
-            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
-            {
-                cntLit = req->zstdUncompressedLitByteCountMax;
-                cntSeq = req->zstdUncompressedSeqElemCountMax;
-            }
-            else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
-            {
-                // NOTE(pamartis): it's a huge overestimate, but it's best we can do safely,
-                // a single output byte requires 1 byte for literal storage
-                cntLit = req->zstdUncompressedFramesByteCount;
-                cntSeq = zstdgpu_OutputSizeToSequenceCount(req->zstdUncompressedFramesByteCount);
-
-                req->zstdUncompressedLitByteCountMax = cntLit;
-                req->zstdUncompressedSeqElemCountMax = cntSeq;
-            }
-            else
-            {
-                cntLit = CNTRS(HUF_Streams_DecodedBytes);
-                cntSeq = CNTRS(Seq_Streams_DecodedItems);
-                req->zstdUncompressedLitByteCountMax = cntLit;
-                req->zstdUncompressedSeqElemCountMax = cntSeq;
-            }
-
+            zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, req);
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
         *outDefaultHeapByteCount            = req->resInfo.gpuOnly_ByteCount[stageIndex];
@@ -1545,7 +1588,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
         *outReadbackHeapByteCount           = req->resInfo.gpu2Cpu_ByteCount[stageIndex];
         *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs_Stage(stageIndex);
 
-        #undef CNTRS
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
@@ -1559,44 +1601,10 @@ static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefault
     uint32_t cntRaw, cntRle, cntCmp, cntLit, cntSeq;
     zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
 
-    // NOTE(pamartis):
-    // If 'frame' constants were setup, we prioritize those assuming they are based on some knowledge about submitted data,
-    // otherwise rely on estimation which may be underestimation
-    if (0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
-    {
-        cntRaw = req->zstdRawBlockCountMax;
-        cntRle = req->zstdRleBlockCountMax;
-        cntCmp = req->zstdCmpBlockCountMax;
-    }
-    else
-    {
-        ZSTDGPU_ASSERT(0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission));
-        cntRaw = cntRle = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
-
-        req->zstdRawBlockCountMax = cntRaw;
-        req->zstdRleBlockCountMax = cntRle;
-        req->zstdCmpBlockCountMax = cntCmp;
-    }
+    zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
     zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
 
-    if (0 != zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants) )
-    {
-        cntLit = req->zstdUncompressedLitByteCountMax;
-        cntSeq = req->zstdUncompressedSeqElemCountMax;
-    }
-    else
-    {
-        ZSTDGPU_ASSERT(0 == zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission));
-
-        // NOTE(pamartis): it's a huge overestimate, but it's best we can do safely,
-        // a single output byte requires 1 byte for literal storage
-        cntLit = req->zstdUncompressedFramesByteCount;
-        cntSeq = zstdgpu_OutputSizeToSequenceCount(req->zstdUncompressedFramesByteCount);
-
-        req->zstdUncompressedLitByteCountMax = cntLit;
-        req->zstdUncompressedSeqElemCountMax = cntSeq;
-
-    }
+    zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, req);
     zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
 
     *outDefaultHeapByteCount    = req->resInfo.gpuOnly_ByteCount[0]
@@ -1889,61 +1897,13 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
         else if (stageIndex == 1)
         {
             uint32_t cntRaw, cntRle, cntCmp;
-            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
-            {
-                cntRaw = req->zstdRawBlockCountMax;
-                cntRle = req->zstdRleBlockCountMax;
-                cntCmp = req->zstdCmpBlockCountMax;
-            }
-            else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
-            {
-                cntRle = cntRaw = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
-
-                req->zstdRawBlockCountMax = cntRaw;
-                req->zstdRleBlockCountMax = cntRle;
-                req->zstdCmpBlockCountMax = cntCmp;
-            }
-            else
-            {
-                cntRaw = CNTRS(Blocks_RAW);
-                cntRle = CNTRS(Blocks_RLE);
-                cntCmp = CNTRS(Blocks_CMP);
-
-                req->zstdRawBlockCountMax = cntRaw;
-                req->zstdRleBlockCountMax = cntRle;
-                req->zstdCmpBlockCountMax = cntCmp;
-            }
-
-            ZSTDGPU_ASSERT(0 != cntRaw + cntRle + cntCmp);
-
+            zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
             zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
         }
         else if (stageIndex == 2)
         {
             uint32_t cntLit, cntSeq;
-            if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
-            {
-                cntLit = req->zstdUncompressedLitByteCountMax;
-                cntSeq = req->zstdUncompressedSeqElemCountMax;
-            }
-            else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
-            {
-                // NOTE(pamartis): it's a huge overestimate, but it's best we can do safely,
-                // a single output byte requires 1 byte for literal storage
-                cntLit = req->zstdUncompressedFramesByteCount;
-                cntSeq = zstdgpu_OutputSizeToSequenceCount(req->zstdUncompressedFramesByteCount);
-
-                req->zstdUncompressedLitByteCountMax = cntLit;
-                req->zstdUncompressedSeqElemCountMax = cntSeq;
-            }
-            else
-            {
-                cntLit = CNTRS(HUF_Streams_DecodedBytes);
-                cntSeq = CNTRS(Seq_Streams_DecodedItems);
-                req->zstdUncompressedLitByteCountMax = cntLit;
-                req->zstdUncompressedSeqElemCountMax = cntSeq;
-            }
-
+            zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, req);
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
 
