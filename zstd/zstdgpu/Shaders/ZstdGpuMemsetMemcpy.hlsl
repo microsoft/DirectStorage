@@ -39,20 +39,19 @@ StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : re
 
 StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t7);
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=1)), SRV(t4), SRV(t5), SRV(t6), SRV(t7), RootConstants(b0, num32BitConstants=5)")]
-[numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
-void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
+groupshared uint32_t GS_GroupLeaderBlockIdx;
+
+inline void GetDestinationInfo(uint32_t blockIdx,
+                               uint32_t i,
+                               // These are really just `out`:
+                               ZSTDGPU_PARAM_INOUT(zstdgpu_OffsetAndSize) blockRef,
+                               ZSTDGPU_PARAM_INOUT(uint32_t) byteIdx,
+                               ZSTDGPU_PARAM_INOUT(zstdgpu_OffsetAndSize) dstFrameOffsetAndSize,
+                               ZSTDGPU_PARAM_INOUT(uint32_t) dstBlockOffset)
 {
-    i += zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
+    blockRef = ZstdInBlocksRefsTyped[blockIdx];
 
-    if (i >= Constants.workItemCount)
-        return;
-
-    const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, Constants.blockCount, i);
-
-    const zstdgpu_OffsetAndSize blockRef = ZstdInBlocksRefsTyped[blockIdx];
-
-    const uint32_t byteIdx = i - ZstdInBlockSizePrefixTyped[blockIdx];
+    byteIdx = i - ZstdInBlockSizePrefixTyped[blockIdx];
 
     const uint32_t globalBlockIdx = ZstdInGlobalBlockIndexTyped[blockIdx];
 
@@ -74,10 +73,77 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 
     const uint32_t frameRelativeBlockOffset = globalBlockGlobalOffset - frameFirstBlockGlobalOffset;
 
-    const zstdgpu_OffsetAndSize dstFrameOffsetAndSize = ZstdInUnCompressedFramesRefs[frameIdx];
+    dstFrameOffsetAndSize = ZstdInUnCompressedFramesRefs[frameIdx];
 
-    const uint32_t dstBlockOffset = dstFrameOffsetAndSize.offs + frameRelativeBlockOffset;
+    dstBlockOffset = dstFrameOffsetAndSize.offs + frameRelativeBlockOffset;
+}
 
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=1)), SRV(t4), SRV(t5), SRV(t6), SRV(t7), RootConstants(b0, num32BitConstants=5)")]
+[numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
+void main(uint2 groupId : SV_GroupId, uint threadIdInGroup : SV_GroupThreadId)
+{
+    const uint32_t scaledGroupId = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
+    const uint32_t i = scaledGroupId + threadIdInGroup;
+    const uint32_t numActiveThreads = zstdgpu_MinU32(Constants.workItemCount - scaledGroupId, kzstdgpu_TgSizeX_MemsetMemcpy);
+
+    // There are likely much fewer blocks this threadgroup will write than kzstdgpu_TgSizeX_MemsetMemcpy, and commonly a single block.
+    // Do most of the work via scalar instructions.
+    if (threadIdInGroup == 0)
+    {
+        const uint32_t groupLeaderBlockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, Constants.blockCount, scaledGroupId + 0);
+        GS_GroupLeaderBlockIdx = groupLeaderBlockIdx;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (i >= Constants.workItemCount)
+        return;
+
+    const uint32_t groupLeaderBlockIdx = WaveReadLaneFirst(GS_GroupLeaderBlockIdx);
+
+    // We do a linear search within the tail, instead of a binary search.
+    // If we did the latter and we ensured we don't track zero-decompress-size Raw/RLE blocks,
+    // this could be min()'d with numActiveThreads:
+    const uint32_t tailBlockCount = Constants.blockCount - groupLeaderBlockIdx; // includes leader
+
+    uint32_t iEndForGroupLeaderBlock = uint32_t(-1); // "infinity"
+    [branch] if (tailBlockCount >= 2)
+    {
+        iEndForGroupLeaderBlock = ZstdInBlockSizePrefixTyped[groupLeaderBlockIdx + 1];
+    }
+
+    zstdgpu_OffsetAndSize blockRef;
+    uint32_t byteIdx;
+    zstdgpu_OffsetAndSize dstFrameOffsetAndSize;
+    uint32_t dstBlockOffset;
+
+    // The else path can handle any case, but try to pass a uniform blockIdx to GetDestinationInfo.
+    if (iEndForGroupLeaderBlock >= scaledGroupId + numActiveThreads)
+    {
+        GetDestinationInfo(groupLeaderBlockIdx, i, blockRef, byteIdx, dstFrameOffsetAndSize, dstBlockOffset);
+    }
+    else
+    {
+        // Instead of a binary search, do a linear search under the assumption it should usually have few iterations
+        // from the start of the tail.
+        uint32_t intervalEnd = iEndForGroupLeaderBlock;
+        uint32_t r = 1; // index of interval _end_ relative to group leader index
+        for (;;)
+        {
+            if (i < intervalEnd)
+            {
+                break;
+            }
+            ++r;
+            if (r >= tailBlockCount)
+            {
+                break;
+            }
+            intervalEnd = ZstdInBlockSizePrefixTyped[groupLeaderBlockIdx + r];
+        }
+        const uint32_t blockIdx = groupLeaderBlockIdx + (r - 1);
+        GetDestinationInfo(blockIdx, i, blockRef, byteIdx, dstFrameOffsetAndSize, dstBlockOffset);
+    }
+
+    // Shouldn't be needed for valid data since already checked Constants.workItemCount?
     if (byteIdx >= dstFrameOffsetAndSize.size)
         return;
 

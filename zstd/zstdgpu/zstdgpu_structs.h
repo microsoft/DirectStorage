@@ -450,11 +450,7 @@ static const uint32_t kzstdgpu_TgSizeX_FinaliseSequenceOffsets = 64;
 static const uint32_t kzstdgpu_TgSizeX_FinaliseSequenceOffsets = 256;
 #endif
 
-#if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_TgSizeX_MemsetMemcpy = 64;
-#else
-static const uint32_t kzstdgpu_TgSizeX_MemsetMemcpy = 32;
-#endif
 
 #define ZSTDGPU_TG_COUNT(elemCount, tgSize) (((elemCount) + (tgSize) - 1) / (tgSize))
 

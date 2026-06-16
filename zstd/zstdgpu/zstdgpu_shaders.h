@@ -200,7 +200,9 @@ static inline uint32_t zstdgpu_OrderedAppendIndex(ZSTDGPU_RW_BUFFER_GLC(uint32_t
     return zstdgpu_GlobalExclusivePrefixSum(lookback, WavePrefixSum(threadAppendCnt), threadAppendCnt, globalThreadIdx, tgroupThreadCnt);
 }
 
-static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSequence, uint32_t start, uint32_t count, uint32_t threadId)
+// Given sorted ascending array A where A[i] is the beginning of an interval that ends (exclusive) at A[i+1] (or at "infinity" for i+1 == N),
+// finds assumed to exist index of interval that contains target.
+static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSequence, uint32_t start, uint32_t count, uint32_t target)
 {
     uint32_t rangeBase = start;
     uint32_t rangeSize = count;
@@ -211,7 +213,7 @@ static inline uint32_t zstdgpu_BinarySearch(ZSTDGPU_RO_BUFFER(uint32_t) sortedSe
         const uint32_t rangeNext = rangeBase + rangeTest;
 
         const uint32_t value = sortedSequence[rangeNext];
-        rangeBase = threadId < value ? rangeBase : rangeNext;
+        rangeBase = target < value ? rangeBase : rangeNext;
         rangeSize -= rangeTest;
     }
 
