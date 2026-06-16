@@ -1230,6 +1230,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         debugPrint(L"[FAIL] Couldn't load create D3D12 device with venId=%u, devId=%u. Early Out.\n", gpuVenId, gpuDevId);
         return ERROR_SYSTEM_DEVICE_NOT_FOUND;
     }
+    device->SetStablePowerState(TRUE);
 
     d3d12aid_CmdQueue cmdQueue;
 #ifdef _GAMING_XBOX
@@ -1761,6 +1762,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     if (NULL != zstFilePathStorage)
         free(zstFilePathStorage);
 
+    device->SetStablePowerState(FALSE);
     zstdgpu_Demo_PlatformTerm(device);
     debugPrint(L"Finished.\n");
     return 0;
