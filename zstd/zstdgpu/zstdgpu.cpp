@@ -2765,11 +2765,18 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         // last written/updated by [Decompress Sequences]
         // next written/updated by [Finalise Sequence Offsets]
         setResourceUavSync(barriers, bc + 4, req->resData.gpuOnly.DecompressedSequenceOffs);
+        bc += 5;
         // last written/updated by [Decompress Sequences]
         // next read by [Execute Sequences]
-        setResourceUavToSrvSync(barriers, bc + 5, req->resData.gpuOnly.DecompressedSequenceLLen);
-        setResourceUavToSrvSync(barriers, bc + 6, req->resData.gpuOnly.DecompressedSequenceMLen);
-        bc += 7;
+        // NOTE: DecompressedSequenceLLen/MLen are only allocated when the frame(s) contain sequences
+        // (zstdUncompressedSeqElemCountMax > 0). For degenerate sequence-less blocks these resources are
+        // NULL, and a transition (non-UAV) barrier on a NULL resource removes the device, so guard it.
+        if (req->zstdUncompressedSeqElemCountMax > 0)
+        {
+            setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.DecompressedSequenceLLen);
+            setResourceUavToSrvSync(barriers, bc + 1, req->resData.gpuOnly.DecompressedSequenceMLen);
+            bc += 2;
+        }
         // last written/updated by [Init Huffman Table and Decompress Literals]
         // next read by [Execute Sequences]
         if (req->zstdUncompressedLitByteCountMax > 0)
@@ -2856,12 +2863,14 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
+    if (req->zstdCmpBlockCountMax > 0 && req->zstdUncompressedSeqElemCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Memcpy RAW blocks, Memset RLE blocks] and [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[1];
         // last written/updated by [Finalise Sequence Offsets]
         // next read by [Execute Sequences]
+        // NOTE: DecompressedSequenceOffs is only allocated when sequences are present; a transition
+        // barrier on the otherwise-NULL resource would remove the device on degenerate sequence-less frames.
         setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedSequenceOffs);
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
