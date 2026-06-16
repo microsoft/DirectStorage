@@ -259,6 +259,10 @@ static const uint32_t kzstdgpu_MaxCount_FseElems = 512;
 static const uint32_t kzstdgpu_MaxCount_FseElemsOneDigitBits = kzstdgpu_MaxCount_FseElems / 32;
 static const uint32_t kzstdgpu_MaxCount_FseElemsAllDigitBits = kzstdgpu_MaxCount_FseElemsOneDigitBits * 8;
 
+static const uint32_t kzstdgpu_MinCount_Blocks = 1;
+static const uint32_t kzstdgpu_MinCount_UncompressedLitBytes = 16;
+static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
+
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 7;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_LLen = 9;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_Offs = 8;
