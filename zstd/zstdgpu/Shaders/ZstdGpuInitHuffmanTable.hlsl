@@ -21,7 +21,8 @@ struct Consts
 {
     uint32_t tgOffset;
     uint32_t workItemCount;
-    uint32_t HuffmanTableBase;
+    uint32_t fseCompressed; // 1 - means FSE-compressed weights (at the start of the buffer),
+                            // 0 - means uncompressed weight (at the end of buffer)
 };
 
 ConstantBuffer<Consts> Constants : register(b0);
@@ -39,7 +40,7 @@ groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTable_LdsSize];
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=3)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=3), UAV(u0, numDescriptors=3)), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -51,7 +52,7 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 
     uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
 
-    groupId = (Constants.HuffmanTableBase != 0) ? (Constants.HuffmanTableBase - 1 - groupId) : groupId;
+    groupId = (Constants.fseCompressed == 0u) ? (srt.inCounters[0].Blocks_CMP - 1u - groupId) : groupId;
 
     zstdgpu_ShaderEntry_InitHuffmanTable(srt, groupId, i, kzstdgpu_TgSizeX_DecompressLiterals);
 }

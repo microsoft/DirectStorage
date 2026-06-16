@@ -188,6 +188,8 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outS
 
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *framesMemory, uint32_t framesMemorySizeInBytes, struct ID3D12Resource *frames, uint32_t frameCount);
 
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
+
 /**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.
  *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 1 uses these counts instead of
@@ -213,8 +215,34 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockInfoConstants(zstdgpu_PerRequestCon
  */
 ZSTDGPU_API uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
+/**
+ *  @brief      Returns 1 if a CPU readback/fence is required after any stages, 0 otherwise. This API
+ *              mainly exist to ensure `zstdgpu_PerRequestContext` has sufficient information to not
+ *              require any readbacks, so calling code could check: `assert(0 == zstdgpu_IsAnyStageReadbackRequired(ctx))`
+ */
+ZSTDGPU_API uint32_t zstdgpu_IsAnyStageReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext);
+
+/**
+ *  @brief      Returns memory requirement for each heap type per submission stage for a given `zstdgpu_PerRequestContext`
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
+/**
+ *  @brief      Returns memory requirement for each heap type for all submission stages for a given `zstdgpu_PerRequestContext`
+ *
+ *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_GetAllStageGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext);
+
+/**
+ *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with externally
+ *              supplied memory.
+ *
+ *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
+ *              for `stageIndex` supplied into this function.
+ *
+ *  @note       The caller must compute required memory for a given `stageIndex` via `zstdgpu_GetGpuMemoryRequirement`
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
                                                             uint32_t stageIndex,
                                                             struct ID3D12GraphicsCommandList *cmdList,
@@ -227,4 +255,39 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
                                                             struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                             uint32_t shaderVisibileHeapOffsetInDescriptors);
 
+/**
+ *  @brief      Submits all required decompression commands into a command list for all stages (single-submission mode)
+ *              with externally supplied memory.
+ *
+ *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
+ *
+ *  @note       The caller must compute required memory via `zstdgpu_GetAllStageGpuMemoryRequirement`
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
+                                                                     struct ID3D12GraphicsCommandList *cmdList,
+                                                                     struct ID3D12Heap *defaultHeap,
+                                                                     uint32_t defaultHeapOffsetInBytes,
+                                                                     struct ID3D12Heap *uploadHeap,
+                                                                     uint32_t uploadHeapOffsetInBytes,
+                                                                     struct ID3D12Heap *readbackHeap,
+                                                                     uint32_t readbackHeap_OffsetInBytes,
+                                                                     struct ID3D12DescriptorHeap *shaderVisibleHeap,
+                                                                     uint32_t shaderVisibileHeapOffsetInDescriptors);
+
+/**
+ *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with internally
+ *              allocated memory.
+ *
+ *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
+ *              for `stageIndex` supplied into this function.
+ */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList);
+
+/**
+ *  @brief      Submits all required decompression commands into a command list for all stages (single-submission mode)
+ *              with internally allocated memory.
+ *
+ *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
+ *
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12GraphicsCommandList *cmdList);

@@ -46,9 +46,7 @@ struct Consts
 {
     uint32_t tgOffset;
     uint32_t workItemCount;
-    uint32_t tableStartIndex;
-    uint32_t tableDataStart;
-    uint32_t tableDataCount;
+    uint32_t tableType; // 0=HufW, 1=LLen, 2=Offs, 3=MLen
 };
 
 ConstantBuffer<Consts> Constants : register(b0);
@@ -66,7 +64,7 @@ groupshared uint32_t Lds[kzstdgpu_InitFseTable_Experimental_LdsSize];
 #define ZSTDGPU_LDS Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors = 2), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=5)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors = 3), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_InitFseTable, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint32_t i : SV_GroupThreadId)
 {
@@ -77,8 +75,31 @@ void main(uint2 groupId2 : SV_GroupId, uint32_t i : SV_GroupThreadId)
     #include "../zstdgpu_srt_decl_copy.h"
     ZSTDGPU_INIT_FSE_TABLE_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
-    srt.tableStartIndex = Constants.tableStartIndex;
-    srt.tableDataStart  = Constants.tableDataStart;
-    srt.tableDataCount  = Constants.tableDataCount;
+
+    const uint32_t cmpBlockCount = srt.inCounters[0].Blocks_CMP;
+    if (Constants.tableType == 1u) // LLen
+    {
+        srt.tableStartIndex = cmpBlockCount;
+        srt.tableDataStart  = zstdgpu_ComputeFseDataStartLLen(0, cmpBlockCount);
+        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_LLen;
+    }
+    else if (Constants.tableType == 2u) // Offs
+    {
+        srt.tableStartIndex = 2u * cmpBlockCount + 1u;
+        srt.tableDataStart  = zstdgpu_ComputeFseDataStartOffs(0, cmpBlockCount);
+        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_Offs;
+    }
+    else if (Constants.tableType == 3u) // MLen
+    {
+        srt.tableStartIndex = 3u * cmpBlockCount + 2u;
+        srt.tableDataStart  = zstdgpu_ComputeFseDataStartMLen(0, cmpBlockCount);
+        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_MLen;
+    }
+    else // 0 == HufW
+    {
+        srt.tableStartIndex = 0u;
+        srt.tableDataStart  = zstdgpu_ComputeFseDataStartHufW(0, cmpBlockCount);
+        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_HufW;
+    }
     zstdgpu_ShaderEntry_InitFseTable(srt, groupId, i);
 }

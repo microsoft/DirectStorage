@@ -298,7 +298,6 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
         // NOTE(pamartis): We don't need to set CPU-side Huffman Weight Counts because they're not computed within kernel
         // like in the "Decompress" case, and only read instead. And therefore we want to use GPU data
         //srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
-        srt.compressedBlockCount                = gpuReadbackRes.Counters->Blocks_CMP;
         srt.compressedBufferSizeInBytes         = zstdDataBufferSize;
         for (uint32_t i = 0; i < gpuReadbackRes.Counters->HUF_WgtStreams; ++i)
         {
@@ -366,9 +365,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, gpuReadbackRes);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
-        srt.huffmanTableSlotCount       = gpuReadbackRes.Counters->Blocks_CMP;
-
-        const uint32_t htSlotCount = srt.huffmanTableSlotCount;
+        const uint32_t htSlotCount = gpuReadbackRes.Counters->Blocks_CMP;
         const uint32_t hufLitCount = gpuReadbackRes.Counters->HufLit;
         const uint32_t hufLitStreamCountTotal = gpuReadbackRes.Counters->HUF_Streams;
 
@@ -816,7 +813,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         zstdgpu_DecodeHuffmanWeights_SRT srt;
         zstdgpu_Init_DecodeHuffmanWeights_SRT(srt, zstdCpu);
-        srt.compressedBlockCount        = zstdCmpBlockCount;
         srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
         for (uint32_t i = 0; i < CNTRS(HUF_WgtStreams); ++i)
         {
@@ -840,7 +836,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         // Run Literal Decompression
         zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
         zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, zstdCpu);
-        srt.huffmanTableSlotCount = zstdCmpBlockCount;
         for (uint32_t groupId = 0; groupId < groupPrefix; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
@@ -945,7 +940,7 @@ ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D1
 ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
-ZSTDGPU_API void zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
+ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
 
 // Entry point
 #ifndef _GAMING_XBOX
@@ -968,6 +963,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool simGpu = false;
     bool d3dDbg = false;
     bool d3dGfx = false;
+    bool outFrm = false;
+    bool ssm = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
     wchar_t *zstFilePathStorage = NULL;
@@ -1096,6 +1093,14 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     nextMaxFrame = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--out-frm"))
+                {
+                    outFrm = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--ssm"))
+                {
+                    ssm = true;
+                }
                 else
                 {
                     debugPrint(L"Unknown argv[%d] %s\n", argi, argv[argi]);
@@ -1119,6 +1124,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
+                debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
+                debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
                 if (badArg)
                 {
                     return 1;
@@ -1223,6 +1230,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         debugPrint(L"[FAIL] Couldn't load create D3D12 device with venId=%u, devId=%u. Early Out.\n", gpuVenId, gpuDevId);
         return ERROR_SYSTEM_DEVICE_NOT_FOUND;
     }
+    device->SetStablePowerState(TRUE);
 
     d3d12aid_CmdQueue cmdQueue;
 #ifdef _GAMING_XBOX
@@ -1232,9 +1240,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 #endif
 
     #define ZSTDGPU_TS_LIST()   \
-        ZSTDGPU_TS(Stage0)      \
-        ZSTDGPU_TS(Stage1)      \
-        ZSTDGPU_TS(Stage2)      \
         ZSTDGPU_TS(Readback0)   \
         ZSTDGPU_TS(Readback1)
 
@@ -1270,26 +1275,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth  data
         ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
     }
-
-#if 0
-    {
-        for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
-        {
-            zstdgpu_CollectBlocks(
-                zstdCpu.BlocksRAWRefs,
-                zstdCpu.BlocksRLERefs,
-                zstdCpu.BlocksCMPRefs,
-                zstdCpu.FramesRefs,
-                zstdCpu.Frames,
-                i,
-                fbInfo.frameCount,
-                zstdData,
-                zstdBufferSize,
-                zstdDataSize
-            );
-        }
-    }
-#endif
 
     zstdgpu_ResourceDataCpu zstdCpu;
     if (chkCpu)
@@ -1362,8 +1347,23 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         defaultUploadCallbackUserData[1] = (void *)zstdInFrameRefs;
         zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
     }
+    if (ssm)
+    {
+        zstdgpu_SetupAllStageSubmission(perRequestContext);
+    }
     if (blkCnt)
     {
+        /**
+         *  NOTE(pamartis):
+         *  Depending on whether `zstdgpu_SetupAllStageSubmission` was called or not,
+         *  calling `zstdgpu_SetupFrameInfoConstants` / `zstdgpu_SetupBlockInfoConstants`
+         *  either:
+         *
+         *  - improves scratch memory estimation (`zstdgpu_SetupAllStageSubmission` was called)
+         *
+         *  - enables elimination of mandatory wait for completion on GPU of the command list
+         *    populated with commands for the previous stage (if `zstdgpu_SetupAllStageSubmission` was NOT called)
+         */
         zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
         if (seqCnt)
         {
@@ -1440,54 +1440,76 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             //      [Stage1 - Req J]                  [Stage2 - Req J  ]                  [Stage0 - Req J+1]                  [Stage1 - Req J+1]
             //
             {
-                if (extMem)
+                #define RECREATE_HEAP(name, i)                      \
+                    if (name##HeapSizeReq > name##HeapSize[i])      \
+                    {                                               \
+                        D3D12AID_SAFE_RELEASE(name##Heap[i]);       \
+                        name##Heap[i] = d3d12aid_Heap_Create(device, name##HeapSizeReq, 0, name##Type);\
+                        name##HeapSize[i] = name##HeapSizeReq;      \
+                    }
+                D3D12_HEAP_TYPE defaultType = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_HEAP_TYPE uploadType = D3D12_HEAP_TYPE_UPLOAD;
+                D3D12_HEAP_TYPE readbackType = D3D12_HEAP_TYPE_READBACK;
+                if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext))
                 {
-                    uint32_t *const StageTimestamp [3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
-                    uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
-                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    if (extMem)
                     {
                         uint32_t defaultHeapSizeReq = 0;
                         uint32_t uploadHeapSizeReq = 0;
                         uint32_t readbackHeapSizeReq = 0;
                         uint32_t descriptorCountReq = 0;
 
-                        zstdgpu_GetGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext, stageIndex);
+                        zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext);
 
-                        if (defaultHeapSizeReq > defaultHeapSize[stageIndex])
+                        RECREATE_HEAP(default, 0)
+                        RECREATE_HEAP(upload, 0)
+                        RECREATE_HEAP(readback, 0)
+
+                        if (descriptorCountReq > descriptorCount[0])
                         {
-                            D3D12AID_SAFE_RELEASE(defaultHeap[stageIndex]);
-
-                            defaultHeap[stageIndex] = d3d12aid_Heap_Create(device, defaultHeapSizeReq, 0, D3D12_HEAP_TYPE_DEFAULT);
-                            defaultHeapSize[stageIndex] = defaultHeapSizeReq;
+                            D3D12AID_SAFE_RELEASE(descriptorHeap[0]);
+                            descriptorHeap[0] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+                            descriptorCount[0] = descriptorCountReq;
                         }
 
-                        if (uploadHeapSizeReq > uploadHeapSize[stageIndex])
+                        zstdgpu_SubmitAllStagesWithExternalMemory(perRequestContext, cmdList, defaultHeap[0], 0, uploadHeap[0], 0, readbackHeap[0], 0, descriptorHeap[0], 0);
+                    }
+                    else
+                    {
+                        zstdgpu_SubmitAllStagesWithInteralMemory(perRequestContext, cmdList);
+                    }
+                }
+                else
+                {
+                    uint32_t *const ReadbackTimestamp[2] = { &Readback0_Stamp, &Readback1_Stamp };
+                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
+                    {
+                        if (extMem /** a scenario with supplying external memory */)
                         {
-                            D3D12AID_SAFE_RELEASE(uploadHeap[stageIndex]);
+                            uint32_t defaultHeapSizeReq = 0;
+                            uint32_t uploadHeapSizeReq = 0;
+                            uint32_t readbackHeapSizeReq = 0;
+                            uint32_t descriptorCountReq = 0;
 
-                            uploadHeap[stageIndex] = d3d12aid_Heap_Create(device, uploadHeapSizeReq, 0, D3D12_HEAP_TYPE_UPLOAD);
-                            uploadHeapSize[stageIndex] = uploadHeapSizeReq;
-                        }
+                            zstdgpu_GetGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext, stageIndex);
 
-                        if (readbackHeapSizeReq > readbackHeapSize[stageIndex])
-                        {
-                            D3D12AID_SAFE_RELEASE(readbackHeap[stageIndex]);
+                            RECREATE_HEAP(default, stageIndex)
+                            RECREATE_HEAP(upload, stageIndex)
+                            RECREATE_HEAP(readback, stageIndex)
 
-                            readbackHeap[stageIndex] = d3d12aid_Heap_Create(device, readbackHeapSizeReq, 0, D3D12_HEAP_TYPE_READBACK);
-                            readbackHeapSize[stageIndex] = readbackHeapSizeReq;
-                        }
+                            if (descriptorCountReq > descriptorCount[stageIndex])
+                            {
+                                D3D12AID_SAFE_RELEASE(descriptorHeap[stageIndex]);
+                                descriptorHeap[stageIndex] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+                                descriptorCount[stageIndex] = descriptorCountReq;
+                            }
 
-                        if (descriptorCountReq > descriptorCount[stageIndex])
-                        {
-                            D3D12AID_SAFE_RELEASE(descriptorHeap[stageIndex]);
-                            descriptorHeap[stageIndex] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-                            descriptorCount[stageIndex] = descriptorCountReq;
-                        }
-
-                        d3d12aid_Timestamp_PushScope(*StageTimestamp[stageIndex], timestamps, cmdList,
                             zstdgpu_SubmitWithExternalMemory(perRequestContext, stageIndex, cmdList, defaultHeap[stageIndex], 0, uploadHeap[stageIndex], 0, readbackHeap[stageIndex], 0, descriptorHeap[stageIndex], 0);
-                        );
-
+                        }
+                        else
+                        {
+                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
+                        }
                         if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
                         {
                             d3d12aid_Timestamp_PushScope(*ReadbackTimestamp[stageIndex], timestamps, cmdList,
@@ -1498,26 +1520,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                         }
                     }
                 }
-                else
-                {
-                    uint32_t *const StageTimestampInt[3] = { &Stage0_Stamp, &Stage1_Stamp, &Stage2_Stamp };
-                    uint32_t *const ReadbackTimestampInt[2] = { &Readback0_Stamp, &Readback1_Stamp };
-                    for (uint32_t stageIndex = 0; stageIndex < 3; ++stageIndex)
-                    {
-                        d3d12aid_Timestamp_PushScope(*StageTimestampInt[stageIndex], timestamps, cmdList,
-                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
-                        );
+                #undef RECREATE_HEAP
 
-                        if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
-                        {
-                            d3d12aid_Timestamp_PushScope(*ReadbackTimestampInt[stageIndex], timestamps, cmdList,
-                                d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
-                                d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-                                cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0/** cmdListId */);
-                            );
-                        }
-                    }
-                }
                 {
                     D3D12_RESOURCE_BARRIER barrier;
                     d3d12aid_MappedBuffer_BeginTransfer(&barrier, &zstdUnCompressedFramesMemory, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1616,7 +1620,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     }
                 }
 
-                if (frameIndex == 0)
+                if (frameIndex == 0 && outFrm /** output decompressed frame data to files if requested via command line */)
                 {
 #ifdef _MSC_VER
                     __pragma(warning(push))
@@ -1640,39 +1644,48 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 {
                     cmdQueue.queue->GetTimestampFrequency(&freqGpuClocks);
                 }
-                const wchar_t *timestampScopeNames[16];
-                uint64_t timestampScopeClocks[16];
+                const wchar_t *timestampScopeNames[22];
+                uint64_t timestampScopeClocks[22];
                 uint64_t clks = 0;
+                uint64_t clksAll = 0;
                 #define ZSTDGPU_TS(name)                                                                        \
                     if (name##_Stamp != ~0u && prfLevel > 0)                                                    \
                     {                                                                                           \
                         clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, name##_Stamp);  \
-                        const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                 \
-                        debugPrint(L"[PERF] %u frame: %7llu us - '" #name "' \n", frameIndex, usec);                  \
+                        clksAll += clks;                                                                        \
+                        if (prfLevel > 0)                                                                       \
+                        {                                                                                       \
+                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                             \
+                            debugPrint(L"[PERF] %u frame: %7llu us - '" #name "' \n", frameIndex, usec);        \
+                        }                                                                                       \
                     }
 
                 #define ZSTDGPU_DETAIL_TS(stage) \
-                    if (prfLevel > 1)            \
                     {                            \
-                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                              \
-                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);                      \
-                        for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                                          \
-                        {                                                                                                                                           \
-                            debugPrint(L"[PERF] %u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
-                        }                                                                                                                                           \
+                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                  \
+                        clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);   \
+                        clksAll += clks;                                                                                                                \
+                        if (prfLevel > 0)                                                                                                               \
+                        {                                                                                                                               \
+                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                                                     \
+                            debugPrint(L"[PERF] %u frame: %7llu us - 'Stage" #stage "' \n", frameIndex, usec);                                          \
+                            if (prfLevel > 1)                                                                                                           \
+                            {                                                                                                                           \
+                                for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                      \
+                                {                                                                                                                       \
+                                    debugPrint(L"[PERF] %u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
+                                }                                                                                                                       \
+                            }                                                                                                                           \
+                        }                                                                                                                               \
                     }
-                    ZSTDGPU_TS(Stage0)
                     ZSTDGPU_DETAIL_TS(0)
                     ZSTDGPU_TS(Readback0)
-                    ZSTDGPU_TS(Stage1)
                     ZSTDGPU_DETAIL_TS(1)
                     ZSTDGPU_TS(Readback1)
-                    ZSTDGPU_TS(Stage2)
                     ZSTDGPU_DETAIL_TS(2)
                     if (prfLevel == 0)
                     {
-                        clks = d3d12aid_Timestamps_GetDelta(&timestamps, kBackBufferIndex, Stage0_Stamp, Stage2_Stamp + 1);
-                        const uint64_t ns = (clks * 1000000000) / freqGpuClocks;
+                        const uint64_t ns = (clksAll * 1000000000) / freqGpuClocks;
                         const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
                         debugPrint(L"[PERF] %u frame: Decompression throughput %lf (GB/s)\n", frameIndex, decompressionThroughput);
                     }
@@ -1749,6 +1762,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     if (NULL != zstFilePathStorage)
         free(zstFilePathStorage);
 
+    device->SetStablePowerState(FALSE);
     zstdgpu_Demo_PlatformTerm(device);
     debugPrint(L"Finished.\n");
     return 0;

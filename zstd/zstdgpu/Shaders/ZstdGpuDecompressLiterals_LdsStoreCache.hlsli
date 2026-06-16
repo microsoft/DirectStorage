@@ -58,7 +58,6 @@ struct Consts
 {
     uint32_t tgOffset;
     uint32_t workItemCount;
-    uint32_t huffmanTableSlotCount;
 };
 
 ConstantBuffer<Consts> Constants : register(b0);
@@ -71,7 +70,7 @@ groupshared uint32_t GS_Lds[kzstdgpu_DecompressLiterals_LdsStoreCache_LdsSize];
 #define ZSTDGPU_LDS GS_Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=9), UAV(u0, numDescriptors=2)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=9), UAV(u0, numDescriptors=2)), RootConstants(b0, num32BitConstants=2)")]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals_LdsStoreCache, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -82,7 +81,6 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
     #include "../zstdgpu_srt_decl_copy.h"
     ZSTDGPU_DECOMPRESS_LITERALS_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
-    srt.huffmanTableSlotCount   = Constants.huffmanTableSlotCount;
 
     if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;
@@ -98,7 +96,7 @@ void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
         srt.inHufLitIdToLitStreamId,
         srt.inCounters[0].HufLit,
         srt.inCounters[0].HUF_Streams,
-        srt.huffmanTableSlotCount,
+        srt.inCounters[0].Blocks_CMP, // The number of Huffman table slots is the same as the number of Compressed blocks
         groupId,
         htIndex,
         htGroupStart,
