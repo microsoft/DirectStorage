@@ -24,6 +24,7 @@
 #define NOMCX
 #define NOSERVICE
 #define NOHELP
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
 #include <d3d12.h>
@@ -37,6 +38,29 @@
 #include "platform/zstdgpu_demo_platform.h"
 
 static bool Gd3dDbg = false;
+static DWORD Gd3d12MsgCookie = 0;
+
+static const wchar_t *zstdgpu_Demo_D3D12SeverityToWide(D3D12_MESSAGE_SEVERITY severity)
+{
+    switch (severity)
+    {
+        case D3D12_MESSAGE_SEVERITY_CORRUPTION: return L"FAIL";
+        case D3D12_MESSAGE_SEVERITY_ERROR:      return L"FAIL";
+        case D3D12_MESSAGE_SEVERITY_WARNING:    return L"FAIL";
+        case D3D12_MESSAGE_SEVERITY_INFO:       return L"INFO";
+        case D3D12_MESSAGE_SEVERITY_MESSAGE:    return L"INFO";
+        default:                                return L"INFO";
+    }
+}
+
+static void CALLBACK zstdgpu_Demo_D3D12MessageCallback(D3D12_MESSAGE_CATEGORY category, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id, LPCSTR pDescription, void *pContext)
+{
+    (void)category;
+    (void)id;
+    (void)pContext;
+
+    wprintf(L"[%ls] %hs\n", zstdgpu_Demo_D3D12SeverityToWide(severity), pDescription);
+}
 
 ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bool d3dDbg)
 {
@@ -73,6 +97,8 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
 
         if (NULL != fnDXGIGetDebugInterface)
         {
+            BOOL isDbg = IsDebuggerPresent();
+
             IDXGIDebug1 *dxgiDebug1 = NULL;
             D3D12AID_CHECK(fnDXGIGetDebugInterface(D3D12AID_IID_PPV_ARGS(&dxgiDebug1)));
             dxgiDebug1->EnableLeakTrackingForThread();
@@ -80,10 +106,10 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
 
             IDXGIInfoQueue *dxgiInfoQueue = NULL;
             D3D12AID_CHECK(fnDXGIGetDebugInterface(D3D12AID_IID_PPV_ARGS(&dxgiInfoQueue)));
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, TRUE);
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, TRUE);
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_MESSAGE, TRUE);
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, isDbg);
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, isDbg);
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, isDbg);
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_MESSAGE, isDbg);
             dxgiInfoQueue->ClearStorageFilter(DXGI_DEBUG_ALL);
             dxgiInfoQueue->ClearRetrievalFilter(DXGI_DEBUG_ALL);
             D3D12AID_SAFE_RELEASE(dxgiInfoQueue);
@@ -112,11 +138,12 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
             if (Gd3dDbg)
             {
                 ID3D12InfoQueue1 *d3d12InfoQueue1 = NULL;
+                BOOL isDbg = IsDebuggerPresent();
                 device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1));
 
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
+                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, isDbg);
+                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, isDbg);
+                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, isDbg);
                 d3d12InfoQueue1->ClearRetrievalFilter();
                 d3d12InfoQueue1->ClearStorageFilter();
                 d3d12InfoQueue1->SetMuteDebugOutput(FALSE);
@@ -128,6 +155,8 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
                 filter.DenyList.NumCategories = _countof(disableCategoryList);
                 d3d12InfoQueue1->PushStorageFilter(&filter);
                 d3d12InfoQueue1->PushRetrievalFilter(&filter);
+                d3d12InfoQueue1->RegisterMessageCallback(zstdgpu_Demo_D3D12MessageCallback, D3D12_MESSAGE_CALLBACK_FLAG_NONE, NULL, &Gd3d12MsgCookie);
+
                 D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
             }
             return device;
@@ -146,31 +175,36 @@ void zstdgpu_Demo_PlatformTerm(struct ID3D12Device *device)
         ID3D12InfoQueue1 *d3d12InfoQueue1 = NULL;
         device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12DebugDevice1));
         device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1));
+        D3D12AID_SAFE_RELEASE(device);
 
-        // NOTE: Because the below ReportLiveDeviceObjects always reports refcount==1 for device object due to self-reference, we temporally disable "breaks on warning"
-        //       the fact that it's (likely) a self-reference can be verified by reporting live objects right after device and debug device creation.
-        d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
-
-        // NOTE: Pop previously set filters to make sure State Creation messages are visible after ReportLiveDeviceObjects, and report that all live objects gets destroyed upon
-        //       d3d12DebugDevice1 release
-        d3d12InfoQueue1->PopStorageFilter();
-        d3d12InfoQueue1->PopRetrievalFilter();
-        D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
-
-        d3d12DebugDevice1->ReportLiveDeviceObjects(D3D12_RLDO_DETAIL);
+        d3d12DebugDevice1->ReportLiveDeviceObjects(D3D12_RLDO_SUMMARY | D3D12_RLDO_DETAIL | D3D12_RLDO_IGNORE_INTERNAL);
         D3D12AID_SAFE_RELEASE(d3d12DebugDevice1);
 
+        // NOTE(pamartis): Intentionally don't pop the filters so various instrumentation resources aren't reported
+        //d3d12InfoQueue1->PopStorageFilter();
+        //d3d12InfoQueue1->PopRetrievalFilter();
+
+#if 0   // NOTE(pamartis): Intentionally don't remove the callback as it keeps getting messages even after the release of the queue
+        if (0 != Gd3d12MsgCookie)
+        {
+            d3d12InfoQueue1->UnregisterMessageCallback(Gd3d12MsgCookie);
+            Gd3d12MsgCookie = 0;
+        }
+#endif
+        D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
+
         IDXGIDebug *dxgiDebug = NULL;
+        IDXGIInfoQueue *dxgiInfoQueue = NULL;
         LOAD_F(DXGIGetDebugInterface, L"dxgidebug.dll");
         if (NULL != fnDXGIGetDebugInterface)
         {
             D3D12AID_CHECK(fnDXGIGetDebugInterface(D3D12AID_IID_PPV_ARGS(&dxgiDebug)));
+            D3D12AID_CHECK(fnDXGIGetDebugInterface(D3D12AID_IID_PPV_ARGS(&dxgiInfoQueue)));
+            D3D12AID_CHECK(dxgiInfoQueue->PushEmptyRetrievalFilter(DXGI_DEBUG_ALL));
+            D3D12AID_CHECK(dxgiInfoQueue->PushEmptyStorageFilter(DXGI_DEBUG_ALL));
             dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
         }
-
-        D3D12AID_SAFE_RELEASE(device);
-
-        dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+        D3D12AID_SAFE_RELEASE(dxgiInfoQueue);
         D3D12AID_SAFE_RELEASE(dxgiDebug);
     }
     else
