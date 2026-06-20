@@ -2543,18 +2543,20 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     req->timestampSlot[kzstdgpu_KernelScope_Stage1_Start] = d3d12aid_Timestamps_Push(&req->timestamps, cmdList);
 #endif
     /**
-     *  NOTE(pamartis): We enable predication only when Frame Info constants if setup
-     *  because in this case the submission can be done in a single command list because
+     *  NOTE(pamartis): We enable predication only when either Frame Info constants are setup
+     *  or single submission mode is requested without providing any up-front information about frame
+     *  because in this case the submission happens into a single command list because
      *  `zstdgpu_IsReadbackRequired` returns `0`, so the calling code is free to submit every
      *  stage in a single command list, therefore there's a risk that not sufficiently large
      *  memory was allocated. We use predication on GPU to guard against it.
      *
-     *  When Frame Info constants are not set, `zstdgpu_IsReadbackRequired` returns `1`,
+     *  When Frame Info constants are not set and single submission mode is not requested,
+     * `zstdgpu_IsReadbackRequired` returns `1`,
      *  so the calling code must wait for the fence after every stage, so readbacks
      *  get completed, and correct Frame Info constants are read back from GPU to CPU,
      *  so the memory allocation is always correct (unless calling forgets to call `zstdgpu_GetGpuMemoryRequirement`)
      */
-    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, 0 /* Stage 1 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
@@ -2904,7 +2906,8 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+    // Unset predication
+    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
@@ -2925,7 +2928,9 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #if ZSTDGPU_ENABLE_TIMESTAMPS
     req->timestampSlot[kzstdgpu_KernelScope_Stage2_Start] = d3d12aid_Timestamps_Push(&req->timestamps, cmdList);
 #endif
-    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+    // NOTE(pamartis): enable predication for stage2 in case when either single submission mode is requested or
+    // block information is specified
+    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, sizeof(uint64_t) /* Stage 2 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
@@ -3413,7 +3418,9 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         zstdgpu_PushReadback(Counters);
         PIXEndEvent(cmdList);
     }
-    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+
+    // Unset predication
+    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
