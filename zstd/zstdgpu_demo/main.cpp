@@ -606,9 +606,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         zstdgpu_InitResources_SRT srt = {};
         zstdgpu_Init_InitResources_SRT(srt, zstdCpu);
-        srt.allBlockCount       = 0;    // 0 means "unknown" when "initResourcesStage < 1"
-        srt.cmpBlockCount       = 0;    // 0 means "unknown" when "initResourcesStage < 1"
-        srt.frameCount          = zstdFrameCount;
         srt.initResourcesStage  = 0;    // 0 means -- right before 1st "parse frames" (for counting)
         zstdgpu_ShaderEntry_InitResources(srt, 0);
     }
@@ -691,9 +688,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         zstdgpu_InitResources_SRT srt = {};
         zstdgpu_Init_InitResources_SRT(srt, zstdCpu);
-        srt.allBlockCount       = zstdRawBlockCount + zstdRleBlockCount + zstdCmpBlockCount;
-        srt.cmpBlockCount       = zstdCmpBlockCount;
-        srt.frameCount          = zstdFrameCount;
         srt.initResourcesStage  = 1; // 1 means -- right before "parse compressed blocks"
         zstdgpu_ShaderEntry_InitResources(srt, 0);
 

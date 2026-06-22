@@ -2327,15 +2327,10 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #endif
     {
         const uint32_t initResourcesStage = 0;
-        const uint32_t allBlockCount = 0;
-        const uint32_t cmpBlockCount = 0;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 0]");
         BIND_RS_PS_SRT_EX(InitResources, InitResources_S0);
-        cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
-        cmdList->SetComputeRoot32BitConstant(1, cmpBlockCount, 1);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
-        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 3);
+        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 0);
         ZSTDGPU_KERNEL_SCOPE(InitResources_CountBlocks, cmdList,
             cmdList->Dispatch(zstdgpu_InitResources_GetDispatchSizeX(initResourcesStage), 1, 1);
         );
@@ -2562,16 +2557,10 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         const uint32_t initResourcesStage = 1;
-        const uint32_t allBlockCount = req->zstdRawBlockCountMax
-                                     + req->zstdRleBlockCountMax
-                                     + req->zstdCmpBlockCountMax;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 1]");
         BIND_RS_PS_SRT_EX(InitResources, InitResources_S1);
-        cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdCmpBlockCountMax, 1);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
-        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 3);
+        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 0);
         ZSTDGPU_KERNEL_SCOPE(InitResources, cmdList,
             cmdList->Dispatch(zstdgpu_InitResources_GetDispatchSizeX(initResourcesStage), 1, 1);
         );

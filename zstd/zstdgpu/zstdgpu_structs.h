@@ -1799,9 +1799,6 @@ typedef struct zstdgpu_ParseFrames_SRT
 typedef struct zstdgpu_InitResources_SRT
 {
     ZSTDGPU_INIT_RESOURCES_SRT()
-    uint32_t    allBlockCount;
-    uint32_t    cmpBlockCount;
-    uint32_t    frameCount;
     uint32_t    initResourcesStage;
 } zstdgpu_InitResources_SRT;
 
