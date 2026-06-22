@@ -23,9 +23,6 @@
 
 struct Consts
 {
-    uint32_t allBlockCount;
-    uint32_t cmpBlockCount;
-    uint32_t frameCount;
     uint32_t initResourcesStage;
 };
 
@@ -35,7 +32,7 @@ ConstantBuffer<Consts> Constants : register(b0);
 ZSTDGPU_INIT_RESOURCES_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=1), UAV(u0, numDescriptors=4)), RootConstants(b0, num32BitConstants=4)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=1), UAV(u0, numDescriptors=4)), RootConstants(b0, num32BitConstants=1)")]
 [numthreads(kzstdgpu_TgSizeX_InitCounters, 1, 1)]
 void main(uint i : SV_DispatchThreadId)
 {
@@ -45,9 +42,6 @@ void main(uint i : SV_DispatchThreadId)
     ZSTDGPU_INIT_RESOURCES_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
 
-    srt.allBlockCount           = Constants.allBlockCount;
-    srt.cmpBlockCount           = Constants.cmpBlockCount;
-    srt.frameCount              = Constants.frameCount;
-    srt.initResourcesStage      = Constants.initResourcesStage;
+    srt.initResourcesStage = Constants.initResourcesStage;
     zstdgpu_ShaderEntry_InitResources(srt, i);
 }

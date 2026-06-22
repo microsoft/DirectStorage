@@ -2130,8 +2130,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
                                     + zstdgpu_Count_SRTs_Stage(2);
 
             req->srts.heap = d3d12aid_DescriptorHeap_Create(req->device, srtCount, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-            req->srts.heapOffset = 0;
         }
+        req->srts.heapOffset = 0;
 
         // TODO(pamartis): descriptors should be re-created only when buffers were re-created
         //                 but currently we always re-create buffers
@@ -2327,15 +2327,10 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #endif
     {
         const uint32_t initResourcesStage = 0;
-        const uint32_t allBlockCount = 0;
-        const uint32_t cmpBlockCount = 0;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 0]");
         BIND_RS_PS_SRT_EX(InitResources, InitResources_S0);
-        cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
-        cmdList->SetComputeRoot32BitConstant(1, cmpBlockCount, 1);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
-        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 3);
+        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 0);
         ZSTDGPU_KERNEL_SCOPE(InitResources_CountBlocks, cmdList,
             cmdList->Dispatch(zstdgpu_InitResources_GetDispatchSizeX(initResourcesStage), 1, 1);
         );
@@ -2556,29 +2551,22 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
      *  get completed, and correct Frame Info constants are read back from GPU to CPU,
      *  so the memory allocation is always correct (unless calling forgets to call `zstdgpu_GetGpuMemoryRequirement`)
      */
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 0))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, 0 /* Stage 1 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
     {
         const uint32_t initResourcesStage = 1;
-        const uint32_t allBlockCount = req->zstdRawBlockCountMax
-                                     + req->zstdRleBlockCountMax
-                                     + req->zstdCmpBlockCountMax;
 
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Init Resources :: Stage 1]");
         BIND_RS_PS_SRT_EX(InitResources, InitResources_S1);
-        cmdList->SetComputeRoot32BitConstant(1, allBlockCount, 0);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdCmpBlockCountMax, 1);
-        cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
-        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 3);
+        cmdList->SetComputeRoot32BitConstant(1, initResourcesStage, 0);
         ZSTDGPU_KERNEL_SCOPE(InitResources, cmdList,
             cmdList->Dispatch(zstdgpu_InitResources_GetDispatchSizeX(initResourcesStage), 1, 1);
         );
 
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[InitResources :: Memset :: Stage 1]");
         d3d12aid_ComputeRsPs_Set(&req->Memset, cmdList);
@@ -2668,7 +2656,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         D3D12_RESOURCE_BARRIER barriers[21];
 
         uint32_t bc = 0;
-        if (req->zstdCmpBlockCountMax > 0)
         {
             // last written by [Parse Frames :: Collect Blocks]
             // next written/updated by [Parse Compressed Blocks] with non-intersecting memory ranges with [Parse Frames :: Collect Blocks]
@@ -2713,28 +2700,9 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // last written by [Parse Frames :: Collect Blocks]
             // next written/updated by [Parse Compressed Blocks] - sets literal size to be uncompressed block size
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
-        }
-        else
-        {
             // last written by [Parse Frames :: Collect Blocks]
-            // next read by [Readback Counters :: After Block Parse] and updated by [Update Dispatch Args]
-            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.Counters);
-
-            // the actual buffer last written by [Parse Frames :: Collect Blocks]
-            // the lookback buffer last written by [InitResources :: Memset :: Stage 1 :: BlockSize Lookback]
-            // next updated by [Prefix Block Sizes]
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
-        }
-
-        // last written by [Parse Frames :: Collect Blocks]
-        // next read by [Memcpy RAW blocks, Memset RLE blocks]
-        if (req->zstdRawBlockCountMax > 0)
-        {
+            // next read by [Memcpy RAW blocks, Memset RLE blocks]
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksRAWRefs);
-        }
-
-        if (req->zstdRleBlockCountMax > 0)
-        {
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksRLERefs);
         }
 
@@ -2742,7 +2710,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Compressed Blocks]");
         BIND_RS_PS_SRT(ParseCompressedBlocks);
@@ -2760,7 +2727,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
         D3D12_RESOURCE_BARRIER barriers[16];
         uint32_t bc = 0;
-        if (req->zstdCmpBlockCountMax > 0)
         {
             // last written by [Parse Compressed Blocks]
             // next read by [Readback Counters :: After Block Parse] or [Update Dispatch Args]
@@ -2803,7 +2769,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
 
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+        if (0 == zstdgpu_IsReadbackRequired(req, 0))
         {
             // last read by SetPredication as PREDICATION
             // next written by [Update Dispatch Args :: Stage 1]
@@ -2848,7 +2814,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         // next read/written by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
 
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+        if (0 == zstdgpu_IsReadbackRequired(req, 1))
         {
             // last written by [Update Dispatch Args :: Stage 1]
             // next read by SetPredication as PREDICATION
@@ -2860,7 +2826,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Propagate FSE Index]");
         d3d12aid_ComputeRsPs_Set(&req->PropagateFseIndex, cmdList);
@@ -2892,7 +2857,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Compute `Per-Huffman Table` Literal Stream Group Count Prefix]");
         D3D12_RESOURCE_BARRIER barriers[2];
@@ -2907,7 +2871,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Unset predication
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 0))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
@@ -2930,12 +2894,11 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #endif
     // NOTE(pamartis): enable predication for stage2 in case when either single submission mode is requested or
     // block information is specified
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 1))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, sizeof(uint64_t) /* Stage 2 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute `Per-Huffman Table` Literal Stream Count Prefix]");
 
@@ -2963,7 +2926,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     // NOTE(pamartis): `ComputePrefixSum` writes `DecompressLiteralsGroups` to `Counters`.
     // A separate `UpdateDispatchArgs` pass populates `DecompressLiterals` dispatch slot
     // because `ComputePrefixSum` can't write DispatchArgs (it's in INDIRECT_ARGUMENT state).
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Update Dispatch Args :: DecompressLiterals]");
         D3D12_RESOURCE_BARRIER barriers[3];
@@ -2977,7 +2939,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
+
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: DecompressLiterals]");
         d3d12aid_ComputeRsPs_Set(&req->UpdateDispatchArgs, cmdList);
@@ -2999,7 +2961,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Init FSE Table] and [Group Lilteral Streams]");
         D3D12_RESOURCE_BARRIER barriers[19];
@@ -3053,7 +3014,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         // Run FSE Table Initialisation
         ZSTDGPU_KERNEL_SCOPE(InitFseTable, cmdList,
@@ -3090,7 +3050,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Needed by readback
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Huffman Weights Decompression] and [Decompress Literals]");
         D3D12_RESOURCE_BARRIER barriers[1];
@@ -3102,7 +3061,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Run Decompression of FSE-compressed Huffman Weights
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decompress Huffman Weights]");
         BIND_RS_PS_SRT(DecompressHuffmanWeights);
@@ -3114,7 +3072,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
     // Run Decoding of Uncompressed Huffman Weights (can merge with FSE decompression before barrier)
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decode Uncompressed Huffman Weights]");
         BIND_RS_PS_SRT(DecodeHuffmanWeights);
@@ -3128,7 +3085,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Needed by Initialisation of Huffman Tables
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Init Huffman Table]");
         D3D12_RESOURCE_BARRIER barriers[2];
@@ -3142,7 +3098,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Pre-Init Huffman Table]");
         BIND_RS_PS_SRT(InitHuffmanTable);
@@ -3168,7 +3123,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Decompress Literals]");
         D3D12_RESOURCE_BARRIER barriers[3];
@@ -3181,7 +3135,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXEndEvent(cmdList);
     }
 
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decompress Literals]");
         BIND_RS_PS_SRT(DecompressLiterals);
@@ -3203,7 +3156,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #endif
 
     // NOTE(pamartis): (can run in parallel with FSE-compressed Huffman Weight Decompression, right after FSE table initialisation)
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decompress Sequences]");
         BIND_RS_PS_SRT(DecompressSequences);
@@ -3214,7 +3166,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         );
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Prefix Block Sizes] and [Prefix Sequence Offsets] and [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[8];
@@ -3237,7 +3188,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         bc += 7;
         // last written/updated by [Init Huffman Table and Decompress Literals]
         // next read by [Execute Sequences]
-        if (req->zstdUncompressedLitByteCountMax > 0)
         {
             setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.DecompressedLiterals);
             bc += 1;
@@ -3264,7 +3214,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Prefix Sequence Offsets]");
         d3d12aid_ComputeRsPs_Set(&req->PrefixSequenceOffsets, cmdList);
@@ -3292,7 +3241,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Finalise Sequence Offsets]");
         D3D12_RESOURCE_BARRIER barriers[4];
         uint32_t bc = 0;
-        if (req->zstdCmpBlockCountMax > 0)
         {
             // last written by [Prefix Sequence Offsets]
             // next read by [Finalise Sequence Offsets]
@@ -3309,7 +3257,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
+
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Finalise Sequence Offsets]");
         BIND_RS_PS_SRT(FinaliseSequenceOffsets);
@@ -3321,7 +3269,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
+
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Memcpy RAW blocks, Memset RLE blocks] and [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[1];
@@ -3331,7 +3279,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
-    if (req->zstdRawBlockCountMax > 0 || req->zstdRleBlockCountMax > 0)
+
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Memcpy RAW blocks, Memset RLE blocks]");
         d3d12aid_ComputeRsPs_Set(&req->MemsetMemcpy, cmdList);
@@ -3339,7 +3287,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->SetComputeRootDescriptorTable(0, req->srts.MemsetMemcpyGpuHandle);
         ZSTDGPU_KERNEL_SCOPE(MemcpyRAW_MemsetRLE, cmdList,
         {
-            if (req->zstdRawBlockCountMax > 0)
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RawBlockSizePrefix->GetGPUVirtualAddress());
                 cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRAW->GetGPUVirtualAddress());
@@ -3351,7 +3298,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
                 cmdList->SetComputeRoot32BitConstant(5, 1 /* flags */, 4);
                 zstdgpu_DispatchIndirect(cmdList, MemsetMemcpy, MemcpyRAW);
             }
-            if (req->zstdRleBlockCountMax > 0)
+
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RleBlockSizePrefix->GetGPUVirtualAddress());
                 cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRLE->GetGPUVirtualAddress());
@@ -3366,12 +3313,10 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         });
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[2];
         uint32_t bc = 0;
-        if (req->zstdRawBlockCountMax > 0 || req->zstdRleBlockCountMax > 0)
         {
             // in case if the number of RAW+RLE blocks > 0, [Memcpy RAW blocks, Memset RLE blocks] has written to 'UnCompressedFramesData'
             // next read by [Execute Sequences]
@@ -3385,7 +3330,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
+
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Execute Sequences]");
         BIND_RS_PS_SRT(ExecuteSequences);
@@ -3395,7 +3340,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         );
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Readback Counters :: After Block Decompression]");
         D3D12_RESOURCE_BARRIER barriers[1];
@@ -3412,7 +3356,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
-    if (req->zstdCmpBlockCountMax > 0) /* Readback for Counters is only needed if the number of compressed blocks > 0 because Counters are updated during Seqeunce Execution */
+    /* It's needed because Counters are updated during Seqeunce Execution */
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Readback Counters :: After Block Decompression]");
         zstdgpu_PushReadback(Counters);
@@ -3420,7 +3364,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Unset predication
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 1))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
@@ -3445,20 +3389,17 @@ ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D1
         setResourceState(barriers, 3, req->resData.gpuOnly.PerFrameBlockSizesRLE, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
         setResourceState(barriers, 4, req->resData.gpuOnly.PerFrameSeqStreamMinIdx, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
         bc += 5;
-        if (req->zstdCmpBlockCountMax > 0)
         {
             setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerCmpBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             setResourceState(barriers, bc + 1, req->resData.gpuOnly.PerSeqStreamSeqStart, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             bc += 2;
         }
-        if (req->zstdRawBlockCountMax > 0)
         {
             setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRawBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             setResourceState(barriers, bc + 1, req->resData.gpuOnly.RawBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             setResourceState(barriers, bc + 2, req->resData.gpuOnly.BlocksRAWRefs, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             bc += 3;
         }
-        if (req->zstdRleBlockCountMax > 0)
         {
             setResourceState(barriers, bc + 0, req->resData.gpuOnly.GlobalBlockIndexPerRleBlock, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
             setResourceState(barriers, bc + 1, req->resData.gpuOnly.RleBlockSizePrefix, NON_PIXEL_SHADER_RESOURCE, COPY_SOURCE);
