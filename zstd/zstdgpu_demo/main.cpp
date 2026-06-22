@@ -1446,7 +1446,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 D3D12_HEAP_TYPE readbackType = D3D12_HEAP_TYPE_READBACK;
                 if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext))
                 {
-                    if (extMem)
+                    if (extMem /** a scenario with supplying external memory */)
                     {
                         uint32_t defaultHeapSizeReq = 0;
                         uint32_t uploadHeapSizeReq = 0;
