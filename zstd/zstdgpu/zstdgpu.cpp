@@ -2130,8 +2130,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
                                     + zstdgpu_Count_SRTs_Stage(2);
 
             req->srts.heap = d3d12aid_DescriptorHeap_Create(req->device, srtCount, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-            req->srts.heapOffset = 0;
         }
+        req->srts.heapOffset = 0;
 
         // TODO(pamartis): descriptors should be re-created only when buffers were re-created
         //                 but currently we always re-create buffers
