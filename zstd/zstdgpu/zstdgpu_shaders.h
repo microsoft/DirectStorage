@@ -287,26 +287,20 @@ static inline void zstdgpu_GroupBallotLdsStore(uint32_t laneCnt, uint32_t VGPR, 
     }
 }
 
-static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_FrameInfo) outFrameInfo,
-                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRAWRefs,
-                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRLERefs,
-                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksCMPRefs,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outPerBlockUncompressedSize,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerRawBlock,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerRleBlock,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerCmpBlock,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outRawBlockSizes,
-                                                  ZSTDGPU_RW_BUFFER(uint32_t) outRleBlockSizes,
-                                                  ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer) bits,
-                                                  uint32_t outputBlockInfo)
+static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) windowSize,
+                                            ZSTDGPU_PARAM_INOUT(uint64_t) uncompSize,
+                                            ZSTDGPU_PARAM_INOUT(uint32_t) dictionary,
+                                            ZSTDGPU_PARAM_INOUT(uint32_t) statusFlag,
+                                            ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer) bits)
 {
     // "A content compressed by Zstandard is transformed into a Zstandard frame.
     // Multiple frames can be appended into a single file or stream. A frame is
     // totally independent, has a defined beginning and end, and a set of
     // parameters which tells the decoder how to decompress it."
-    outFrameInfo.windowSize = 0;
-    outFrameInfo.uncompSize = 0;
-    outFrameInfo.dictionary = 0;
+    windowSize = 0;
+    uncompSize = 0;
+    dictionary = 0;
+    statusFlag = 0;
 
     const uint32_t descriptor = zstdgpu_Forward_BitBuffer_Get(bits, 8);
 
@@ -316,12 +310,18 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
     // This bit may be used in a future revision, to signal a feature that must be interpreted to decode the frame correctly.
     if (0 != zstdgpu_BitFieldExtractU32(descriptor, 3, 1))
     {
-        ZSTDGPU_BREAK();
+        statusFlag |= kzstdgpu_FrameStatusFlag_ReservedBitSet;
+    }
+
+    const uint32_t contentCheckSumFlag = zstdgpu_BitFieldExtractU32(descriptor, 2, 1);
+    if (0 != contentCheckSumFlag)
+    {
+        statusFlag |= kzstdgpu_FrameStatusFlag_ChecksumBitSet;
     }
 
     const uint32_t singleSegmentFlag = zstdgpu_BitFieldExtractU32(descriptor, 5, 1);
     //
-    if (0 == singleSegmentFlag)
+    ZSTDGPU_BRANCH if (0 == singleSegmentFlag)
     {
         const uint32_t windowDescriptor = zstdgpu_Forward_BitBuffer_Get(bits, 8);
 
@@ -338,11 +338,11 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         // https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor
         const uint64_t windowBase = 1ull << (10 + exponent);
         const uint64_t windowAdd = (windowBase / 8) * mantissa;
-        outFrameInfo.windowSize = windowBase + windowAdd;
+        windowSize = windowBase + windowAdd;
     }
 
     const uint32_t dictionaryIdFlag = zstdgpu_BitFieldExtractU32(descriptor, 0, 2);
-    if (0 != dictionaryIdFlag)
+    ZSTDGPU_BRANCH if (0 != dictionaryIdFlag)
     {
         // "This is a variable size field, which contains the ID of the
         // dictionary required to properly decode the frame. Note that this
@@ -351,12 +351,14 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         const uint32_t byteCount[] = { 0u, 1u, 2u, 4u };
         const uint32_t bitCount = byteCount[dictionaryIdFlag] * 8u;
 
-        outFrameInfo.dictionary = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
+        dictionary = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
+
+        statusFlag |= kzstdgpu_FrameStatusFlag_DictionaryUsed;
     }
 
     const uint32_t frameContentSizeFlag = zstdgpu_BitFieldExtractU32(descriptor, 6, 2);
 
-    if (0 != singleSegmentFlag || 0 != frameContentSizeFlag)
+    ZSTDGPU_BRANCH if (0 != singleSegmentFlag || 0 != frameContentSizeFlag)
     {
         // "This is the original (uncompressed) size. This information is
         // optional. The Field_Size is provided according to value of
@@ -370,29 +372,46 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
 
         if (bitCount == 64)
         {
-            outFrameInfo.uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
-            outFrameInfo.uncompSize |= (uint64_t)zstdgpu_Forward_BitBuffer_Get(bits, 32) << 32;
+            uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, 32);
+            uncompSize |= (uint64_t)zstdgpu_Forward_BitBuffer_Get(bits, 32) << 32;
         }
         else
         {
-            outFrameInfo.uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
+            uncompSize = zstdgpu_Forward_BitBuffer_Get(bits, bitCount);
         }
 
         if (16u == bitCount)
         {
             // "When Field_Size is 2, the offset of 256 is added."
-            outFrameInfo.uncompSize += 256;
+            uncompSize += 256;
         }
     }
 
-    if (0 != singleSegmentFlag)
+    ZSTDGPU_BRANCH if (0 != singleSegmentFlag)
     {
         // "The Window_Descriptor byte is optional. It is absent when
         // Single_Segment_flag is set. In this case, the maximum back-reference
         // distance is the content size itself, which can be any value from 1 to
         // 2^64-1 bytes (16 EB)."
-        outFrameInfo.windowSize = outFrameInfo.uncompSize;
+        windowSize = uncompSize;
     }
+}
+
+static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_FrameInfo) outFrameInfo,
+                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRAWRefs,
+                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRLERefs,
+                                                  ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksCMPRefs,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outPerBlockUncompressedSize,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerRawBlock,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerRleBlock,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outGlobalBlockIndexPerCmpBlock,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outRawBlockSizes,
+                                                  ZSTDGPU_RW_BUFFER(uint32_t) outRleBlockSizes,
+                                                  ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer) bits,
+                                                  uint32_t outputBlockInfo)
+{
+    uint32_t statusFlag;
+    zstdgpu_ParseFrameHeader(outFrameInfo.windowSize, outFrameInfo.uncompSize, outFrameInfo.dictionary, statusFlag, bits);
 
     //
     // "A frame encapsulates one or multiple blocks. Each block can be
@@ -487,8 +506,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
     }
     while (0 == lastBlock);
 
-    const uint32_t contentCheckSumFlag = zstdgpu_BitFieldExtractU32(descriptor, 2, 1);
-    if (0 != contentCheckSumFlag)
+    if (statusFlag & kzstdgpu_FrameStatusFlag_ChecksumBitSet)
     {
         zstdgpu_Forward_BitBuffer_Refill(bits, 32);
         zstdgpu_Forward_BitBuffer_Pop(bits, 32);

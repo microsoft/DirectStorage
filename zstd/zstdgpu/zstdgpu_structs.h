@@ -285,6 +285,10 @@ static const uint32_t kzstdgpu_FseDefaultProbAccuracy_MLen = 6;
 // RLE table with symbol S uses fseTableIndex = S. Real tables start at index 256.
 static const uint32_t kzstdgpu_FseRleTableCount = 256;
 
+static const uint32_t kzstdgpu_FrameStatusFlag_ReservedBitSet = 1u << 0u;
+static const uint32_t kzstdgpu_FrameStatusFlag_ChecksumBitSet = 1u << 1u;
+static const uint32_t kzstdgpu_FrameStatusFlag_DictionaryUsed = 1u << 2u;
+
 // FSE element packing: symbol(8) | bitcnt(8) | nstate(16) -> uint32_t
 static inline uint32_t zstdgpu_PackFseElem(uint32_t symbol, uint32_t bitcnt, uint32_t nstate)
 {
