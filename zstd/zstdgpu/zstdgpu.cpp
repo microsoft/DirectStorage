@@ -2551,7 +2551,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
      *  get completed, and correct Frame Info constants are read back from GPU to CPU,
      *  so the memory allocation is always correct (unless calling forgets to call `zstdgpu_GetGpuMemoryRequirement`)
      */
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 0))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, 0 /* Stage 1 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
@@ -2792,7 +2792,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
 
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+        if (0 == zstdgpu_IsReadbackRequired(req, 0))
         {
             // last read by SetPredication as PREDICATION
             // next written by [Update Dispatch Args :: Stage 1]
@@ -2837,7 +2837,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         // next read/written by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
 
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
+        if (0 == zstdgpu_IsReadbackRequired(req, 1))
         {
             // last written by [Update Dispatch Args :: Stage 1]
             // next read by SetPredication as PREDICATION
@@ -2896,7 +2896,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Unset predication
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasFrameInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 0))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
@@ -2919,7 +2919,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 #endif
     // NOTE(pamartis): enable predication for stage2 in case when either single submission mode is requested or
     // block information is specified
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 1))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, sizeof(uint64_t) /* Stage 2 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     }
@@ -3409,7 +3409,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
 
     // Unset predication
-    if (req->setupFlags & (kzstdgpu_SetupFlags_HasBlockInfoConstants | kzstdgpu_SetupFlags_HasSingleSubmission))
+    if (0 == zstdgpu_IsReadbackRequired(req, 1))
     {
         cmdList->SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
