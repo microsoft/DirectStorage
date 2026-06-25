@@ -12,7 +12,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
-#define ZSTDGPU_ENABLE_TIMESTAMPS 0
+#define ZSTDGPU_ENABLE_TIMESTAMPS 1
 
 #include <stdint.h>
 #include <assert.h>

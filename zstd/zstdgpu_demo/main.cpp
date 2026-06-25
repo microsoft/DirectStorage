@@ -958,10 +958,13 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool d3dDbg = false;
     bool d3dGfx = false;
     bool outFrm = false;
+    bool outCsv = false;
     bool ssm = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
+    const wchar_t *csvFilePath = L"perf.csv";
     wchar_t *zstFilePathStorage = NULL;
+    wchar_t *csvFilePathStorage = NULL;
     uint32_t gpuVenId = 0x1414; // means -- find any vendor id, but not 0x1414
     uint32_t gpuDevId = ~0u;    // means -- find any device id
     uint32_t repCount = 10;
@@ -974,6 +977,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         int argi = 0;
         {
             bool nextZst = false;
+            bool nextCsv = false;
             bool nextGpuVenId = false;
             bool nextGpuDevId = false;
             bool nextRepCount = false;
@@ -988,6 +992,12 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     nextZst = false;
                     zstFilePathStorage = _wcsdup(argv[argi]);
                     zstFilePath = zstFilePathStorage;
+                }
+                else if (nextCsv)
+                {
+                    nextCsv = false;
+                    csvFilePathStorage = _wcsdup(argv[argi]);
+                    csvFilePath = csvFilePathStorage;
                 }
                 else if (nextGpuVenId || nextGpuDevId)
                 {
@@ -1041,6 +1051,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 else if (0 == wcscmp(argv[argi], L"--zst"))
                 {
                     nextZst = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--out-csv"))
+                {
+                    outCsv = true;
+                    nextCsv = true;
                 }
                 else if (0 == wcscmp(argv[argi], L"--gpu-ven-id"))
                 {
@@ -1119,6 +1134,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
                 debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
+                debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
                 if (badArg)
                 {
@@ -1206,6 +1222,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             free(zstdDataFree);
             if (NULL != zstFilePathStorage)
                 free(zstFilePathStorage);
+
+            if (NULL != csvFilePathStorage)
+                free(csvFilePathStorage);
 
             return 1;
         }
@@ -1640,51 +1659,113 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 }
                 const wchar_t *timestampScopeNames[22];
                 uint64_t timestampScopeClocks[22];
+                uint32_t timestampScopeCount = 0;
                 uint64_t clks = 0;
                 uint64_t clksAll = 0;
-                #define ZSTDGPU_TS(name)                                                                        \
-                    if (name##_Stamp != ~0u && prfLevel > 0)                                                    \
-                    {                                                                                           \
-                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, name##_Stamp);  \
-                        clksAll += clks;                                                                        \
-                        if (prfLevel > 0)                                                                       \
-                        {                                                                                       \
-                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                             \
-                            debugPrint(L"[PERF] %u frame: %7llu us - '" #name "' \n", frameIndex, usec);        \
-                        }                                                                                       \
+
+                static FILE *csvFile = NULL;
+                if (NULL == csvFile)
+                {
+                    _wfopen_s(&csvFile, csvFilePath, L"w");
+                }
+
+                if (NULL != csvFile)
+                {
+                    if (0 == frameIndex)
+                    {
+                        #define WRITE_CSV_HEADER(file, scopeName, subScopeCount, subScopeNames) \
+                            if (prfLevel > 0)                                                   \
+                            {                                                                   \
+                                fwprintf_s(file, L"%s (us),", scopeName);                       \
+                                if (prfLevel > 1)                                               \
+                                {                                                               \
+                                    for (uint32_t i = 0; i < subScopeCount; ++i)                \
+                                    {                                                           \
+                                        fwprintf_s(file, L"%s :: %s (us),", scopeName, subScopeNames[i]);\
+                                    }                                                           \
+                                }                                                               \
+                            }
+                        // write the header together with the first frame
+                        fwprintf_s(csvFile, L"RunIdx,");
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 0", timestampScopeCount, timestampScopeNames);
+                        if (Readback0_Stamp != ~0u)
+                        {
+                            WRITE_CSV_HEADER(csvFile, L"Readback 0", 0, timestampScopeNames);
+                        }
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 1", timestampScopeCount, timestampScopeNames);
+                        if (Readback1_Stamp != ~0u)
+                        {
+                            WRITE_CSV_HEADER(csvFile, L"Readback 1", 0, timestampScopeNames);
+                        }
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 2", timestampScopeCount, timestampScopeNames);
+                        fwprintf_s(csvFile, L"Bandwidth (GB/s)\n");
+                        #undef WRITE_CSV_HEADER
+
+                        #define WRITE_CSV_DATA(file, scopeClks, subScopeCount, subScopeClks)    \
+                            if (prfLevel > 0)                                                   \
+                            {                                                                   \
+                                uint64_t usec = (scopeClks * 1000000) / freqGpuClocks;          \
+                                fwprintf_s(file, L"%llu,", usec);                               \
+                                if (prfLevel > 1)                                               \
+                                {                                                               \
+                                    for (uint32_t i = 0; i < subScopeCount; ++i)                \
+                                    {                                                           \
+                                        usec = (subScopeClks[i] * 1000000) / freqGpuClocks;     \
+                                        fwprintf_s(file, L"%llu,", usec);                       \
+                                    }                                                           \
+                                }                                                               \
+                            }
                     }
 
-                #define ZSTDGPU_DETAIL_TS(stage) \
-                    {                            \
-                        uint32_t timestampScopeCount = _countof(timestampScopeClocks);                                                                  \
-                        clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, stage);   \
-                        clksAll += clks;                                                                                                                \
-                        if (prfLevel > 0)                                                                                                               \
-                        {                                                                                                                               \
-                            const uint64_t usec = (clks * 1000000) / freqGpuClocks;                                                                     \
-                            debugPrint(L"[PERF] %u frame: %7llu us - 'Stage" #stage "' \n", frameIndex, usec);                                          \
-                            if (prfLevel > 1)                                                                                                           \
-                            {                                                                                                                           \
-                                for (uint32_t i = 0; i < timestampScopeCount; ++i)                                                                      \
-                                {                                                                                                                       \
-                                    debugPrint(L"[PERF] %u frame: \t%7llu us - 'Stage"#stage" :: %s'\n", frameIndex,  (timestampScopeClocks[i] * 1000000) / freqGpuClocks, timestampScopeNames[i]);  \
-                                }                                                                                                                       \
-                            }                                                                                                                           \
-                        }                                                                                                                               \
-                    }
-                    ZSTDGPU_DETAIL_TS(0)
-                    ZSTDGPU_TS(Readback0)
-                    ZSTDGPU_DETAIL_TS(1)
-                    ZSTDGPU_TS(Readback1)
-                    ZSTDGPU_DETAIL_TS(2)
-                    if (prfLevel == 0)
+                    fwprintf_s(csvFile, L"%u,", frameIndex);
+
+                    timestampScopeCount = _countof(timestampScopeClocks);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
+                    clksAll = clks;
+                    WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                    if (Readback0_Stamp != ~0u)
                     {
-                        const uint64_t ns = (clksAll * 1000000000) / freqGpuClocks;
-                        const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
-                        debugPrint(L"[PERF] %u frame: Decompression throughput %lf (GB/s)\n", frameIndex, decompressionThroughput);
+                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback0_Stamp);
+                        clksAll += clks;
+                        WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
                     }
-                #undef ZSTDGPU_DETAIL_TS
-                #undef ZSTDGPU_TS
+
+                    timestampScopeCount = _countof(timestampScopeClocks);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
+                    clksAll += clks;
+                    WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                    if (Readback1_Stamp != ~0u)
+                    {
+                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback1_Stamp);
+                        clksAll += clks;
+                        WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
+                    }
+
+                    timestampScopeCount = _countof(timestampScopeClocks);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
+                    clksAll += clks;
+                    WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                    #undef WRITE_CSV_DATA
+
+                    const uint64_t ns = (clksAll * 1000000000) / freqGpuClocks;
+                    const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
+                    fwprintf_s(csvFile, L"%lf\n", decompressionThroughput);
+
+                    if (frameIndex == repCount - 1)
+                    {
+                        fflush(csvFile);
+                        fclose(csvFile);
+                    }
+                }
             }
 
             // Show the new frame.
