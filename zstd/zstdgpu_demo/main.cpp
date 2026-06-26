@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 #include <winsdkver.h>
 #define _WIN32_WINNT 0x0A00
@@ -958,7 +959,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     bool d3dDbg = false;
     bool d3dGfx = false;
     bool outFrm = false;
-    bool outCsv = false;
     bool ssm = false;
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
@@ -1054,7 +1054,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 }
                 else if (0 == wcscmp(argv[argi], L"--out-csv"))
                 {
-                    outCsv = true;
                     nextCsv = true;
                 }
                 else if (0 == wcscmp(argv[argi], L"--gpu-ven-id"))
@@ -1635,20 +1634,13 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 
                 if (frameIndex == 0 && outFrm /** output decompressed frame data to files if requested via command line */)
                 {
-#ifdef _MSC_VER
-                    __pragma(warning(push))
-                    __pragma(warning(disable : 4996))
-#endif
-                    const int bufferSize = _snwprintf(NULL, 0, L"%s.frame_%u", zstFilePath, fbInfo.frameCount) + 1;
+                    const int bufferSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%s.frame_%u", zstFilePath, fbInfo.frameCount) + 1);
                     wchar_t *buffer = (wchar_t *)malloc(bufferSize * sizeof(wchar_t));
                     for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
                     {
-                        _snwprintf(buffer, bufferSize, L"%s.frame_%u", zstFilePath, i);
+                        ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(buffer, bufferSize, L"%s.frame_%u", zstFilePath, i));
                         saveFile(buffer, (char*)zstdUnCompressedFramesMemory.bufMem[0] + zstdOutFrameRefs[i].offs, zstdOutFrameRefs[i].size);
                     }
-#ifdef _MSC_VER
-                    __pragma(warning(pop))
-#endif
                     free(buffer);
                 }
 
@@ -1666,7 +1658,41 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 static FILE *csvFile = NULL;
                 if (NULL == csvFile)
                 {
-                    _wfopen_s(&csvFile, csvFilePath, L"w");
+                    // find the start of .zst file name (to further add into .csv name)
+                    const wchar_t *zstNameStart = wcsrchr(zstFilePath, L'\\');
+                    if (NULL == zstNameStart)
+                    {
+                        zstNameStart = zstFilePath;
+                    }
+                    else
+                    {
+                        zstNameStart += 1;
+                    }
+
+                    // find the start of .zst extension (to remove it from the name when adding into .csv name)
+                    const wchar_t *zstExtStart = wcsrchr(zstNameStart, L'.');
+
+                    // calculate the length of .zst name without extension
+                    size_t zstNameLen = NULL != zstExtStart ? (zstExtStart - zstNameStart) : wcslen(zstNameStart);
+
+                    const wchar_t *csvExtStart = wcsrchr(csvFilePath, L'.');
+                    size_t csvFilePathLenNoExt = NULL != csvExtStart ? (csvExtStart - csvFilePath) : wcslen(csvFilePath);
+                    csvExtStart = L".csv";
+
+                    time_t timeData = time(NULL);
+                    tm timeDataLocal;
+                    localtime_s(&timeDataLocal, &timeData);
+
+                    const int printBufSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart) + 1);
+                    wchar_t *printBuf = (wchar_t *)malloc(printBufSize * sizeof(wchar_t));
+
+                    if (NULL != printBuf)
+                    {
+                        ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(printBuf, printBufSize, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart));
+                        _wfopen_s(&csvFile, printBuf, L"w");
+                    }
+
+                    free(printBuf);
                 }
 
                 if (NULL != csvFile)
@@ -1836,6 +1862,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     free(zstdDataFree);
     if (NULL != zstFilePathStorage)
         free(zstFilePathStorage);
+
+    if (NULL != csvFilePathStorage)
+        free(csvFilePathStorage);
 
     device->SetStablePowerState(FALSE);
     zstdgpu_Demo_PlatformTerm(device);
