@@ -20,18 +20,23 @@
 
 struct TestConfig
 {
-    std::string contentPath;  // Directory containing .zst test files
-    std::string demoPath;     // Full path to zstdgpu_demo.exe
-    std::string logDir;       // Directory for logs, CSVs, and GTest XML output
-    std::string logFile;      // Consolidated text log file path (--log-file)
-    int runCount = 40;        // Number of iterations for performance tests
-    int timeoutSeconds = 0;   // Max seconds before killing a demo process (0 = no timeout)
+    std::string contentPath;                    // Directory containing .zst test files
+    std::string demoPath;                       // Full path to zstdgpu_demo.exe
+    std::string logDir;                         // Directory for logs, CSVs, and GTest XML output
+    std::string logFile;                        // Consolidated text log file path (--log-file)
+    int runCount = 40;                          // Number of iterations for performance tests
+    int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
+
+    // Cached list of .zst files discovered under contentPath. Populated once
+    // in main() after validation; consumed by GetTestFiles() at fixture
+    // instantiation. Avoids walking the tree twice.
+    std::vector<std::string> discoveredFiles;
 };
 
-// Singleton access — SetTestConfig called once from main(), GetTestConfig
+// Singleton access. SetTestConfig called once from main(), GetTestConfig
 // called from test helpers.
-// Spec implies a global but doesn't show accessor pattern. 
-// Needed for GTest's TEST_P bodies to access config without passing it through parameters.
+// Needed for GTest's TEST_P bodies to access config without passing it through
+// parameters.
 const TestConfig& GetTestConfig();
 void SetTestConfig(TestConfig config);
 
@@ -55,7 +60,6 @@ DemoResult RunDemo(
     int timeoutSeconds = 0);
 
 // Convenience: builds the full argument list for a correctness scenario.
-// Spec inlines the args in each test. Extracting them avoids repeating --zst, --run-cnt 1, etc
 std::vector<std::string> BuildCorrectnessArgs(
     const std::string& zstFile,
     const std::vector<std::string>& scenarioFlags);
@@ -68,6 +72,5 @@ std::vector<std::string> BuildPerformanceArgs(
     const std::string& csvOutputPath);
 
 // File discovery — scans directories for .zst test content.
-
 // Recursively scans a directory for *.zst files. Returns sorted full paths.
 std::vector<std::string> DiscoverZstFiles(const std::string& contentPath);

@@ -25,9 +25,14 @@
 //   Performance tests use EXPECT (not ASSERT) — they fail on infrastructure
 //   errors but do not check performance values against thresholds.
 //
-// If no .zst files are found, GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST
-// prevents GTest from reporting an error — zero tests run, exit code 0.
+// Correctness tests use ASSERT, performance tests use EXPECT. See per-test docs.
 //
+// main() validates that at least one .zst file is present before we reach
+// this point, so INSTANTIATE_TEST_SUITE_P always has at least one parameter.
+// A previous version used GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST to
+// allow zero .zst files to pass green — that's now a hard failure at startup
+// (see main.cpp) so this macro is no longer needed.
+
 // The demo runner at the bottom of this file spawns zstdgpu_demo.exe as a child
 // process using Win32 CreateProcess with anonymous pipes. A background thread
 // drains stdout to avoid pipe-buffer deadlocks. If the process exceeds the
@@ -51,11 +56,13 @@
 // Helpers
 
 // Returns the list of .zst files to parameterize over.
-// GTest evaluates this lazily when the test suite is instantiated (after main has parsed CLI args and set TestConfig), so contentPath is available here.
+// GTest evaluates this lazily when the test suite is instantiated (after main
+// has parsed CLI args, validated inputs, and cached the discovered file list
+// in TestConfig). We just return the cached list here — the actual filesystem
+// walk happened once, up front, in main().
 static std::vector<std::string> GetTestFiles()
 {
-    const auto& config = GetTestConfig();
-    return DiscoverZstFiles(config.contentPath);
+    return GetTestConfig().discoveredFiles;
 }
 
 // Converts a full file path to a valid GTest parameter name.
@@ -124,15 +131,13 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 // Test runners
 
 // Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
-// Failures include the full command line and demo stdout for diagnostic output.
+// main() has already validated the demo path exists, so we don't re-check here.
+// stdout is printed via the unconditional [DEMO OUT] block below and does NOT
+// appear a second time in the ASSERT_EQ failure message — that would duplicate
+// the same text in the log.
 static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std::string>& scenarioFlags)
 {
     const auto& config = GetTestConfig();
-
-    if (config.demoPath.empty())
-    {
-        GTEST_SKIP() << "zstdgpu_demo.exe not found. Set --demo-path.";
-    }
 
     auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
     auto result = RunDemo(config.demoPath, args, config.timeoutSeconds);
@@ -140,7 +145,8 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
     // Write to log file before assertions so logs are captured even if an ASSERT aborts early.
     WriteToLogFile(zstFile, result);
 
-    // Log the output regardless of pass/fail.
+    // Log the output regardless of pass/fail. This IS the demo stdout capture —
+    // the assertion messages below intentionally do NOT reprint result.stdOut.
     std::cout << "[DEMO CMD] " << result.commandLine << "\n";
     if (!result.stdOut.empty())
     {
@@ -157,20 +163,15 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 
     ASSERT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
-        << "Command: " << result.commandLine << "\n"
-        << "Output:\n"
-        << result.stdOut;
+        << "Command: " << result.commandLine
+        << "  (stdout already printed above as [DEMO OUT])";
 }
 
 // Run a performance scenario. Spawns zstdgpu_demo.exe with profiling flags and requests CSV output. Uses EXPECT (not ASSERT) to verify the demo executed successfully and produced CSV output.
+// main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 {
     const auto& config = GetTestConfig();
-
-    if (config.demoPath.empty())
-    {
-        GTEST_SKIP() << "zstdgpu_demo.exe not found. Set --demo-path.";
-    }
 
     // Build CSV output path matching spec convention:
     //   prf-lvl 0 → results/throughput_<stem>.csv
@@ -190,6 +191,8 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
     // Write to log file before assertions so logs are captured even if a check fails.
     WriteToLogFile(zstFile, result);
 
+    // Log the output regardless of pass/fail. This IS the demo stdout capture —
+    // the assertion messages below intentionally do NOT reprint result.stdOut.
     std::cout << "[DEMO CMD] " << result.commandLine << "\n";
     if (!result.stdOut.empty())
     {
@@ -206,9 +209,8 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 
     EXPECT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
-        << "Command: " << result.commandLine << "\n"
-        << "Output:\n"
-        << result.stdOut;
+        << "Command: " << result.commandLine
+        << "  (stdout already printed above as [DEMO OUT])";
 
     EXPECT_TRUE(std::filesystem::exists(csvPath)) << "CSV not created: " << csvPath;
 
@@ -226,8 +228,6 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
 {
 };
-
-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(ZstdGpuDemoTests);
 
 // --- Correctness tests ---
 
@@ -366,6 +366,16 @@ DemoResult RunDemo(
         result.timedOut = true;
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 5000);
+
+        // Cancel any pending ReadFile on hReadPipe so the reader thread exits
+        // and readerThread.join() below returns. Without this, TerminateProcess
+        // on a wedged child can leave the child's inherited write-end of the
+        // pipe orphaned in kernel state briefly, and the reader thread's
+        // blocking ReadFile never returns — hanging the entire test runner
+        // indefinitely. CancelIoEx targets outstanding I/O on the handle from
+        // any thread. Safe to call even if no I/O is pending (returns FALSE
+        // with ERROR_NOT_FOUND, harmless).
+        CancelIoEx(hReadPipe, nullptr);
     }
 
     DWORD exitCode = 0;

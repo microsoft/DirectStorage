@@ -10,12 +10,15 @@
 // Entry point for the Zstd GPU CI tests. This is a thin GTest wrapper
 // that shells out to zstdgpu_demo.exe to validate Zstd GPU decompression shaders.
 //
-//   - parses custom CLI flags (--content-path, --demo-path, etc.), resolves the
-// demo executable, then hands off to GTest which runs parameterized tests defined
-// in zstdgpu_ci_tests.cpp. Each test spawns the demo as a child process.
+//   - parses custom CLI flags (--content-path, --demo-path, etc.), validates
+// them (hard failure with a non-zero exit on any misconfiguration — never
+// silently skip), discovers .zst files under the content path exactly once,
+// then hands off to GTest which runs parameterized tests defined in
+// zstdgpu_ci_tests.cpp. Each test spawns the demo as a child process.
 //
-// If no .zst content files are found, zero tests are instantiated and the test
-// binary exits 0 (success). If the demo exe is missing, tests are skipped (not failed).
+// If the content path is missing, unreadable, or contains no .zst files, or if
+// the demo executable is missing, the process exits non-zero before any test
+// runs. This intentionally prevents a "green" run with zero coverage.
 //
 // This file also implements the TestConfig singleton and file discovery helpers
 // declared in zstdgpu_ci_tests.h.
@@ -27,6 +30,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 
 // TestConfig singleton
 // Implementation of the singleton declared in zstdgpu_ci_tests.h.
@@ -44,6 +48,12 @@ void SetTestConfig(TestConfig config)
 }
 
 // File discovery
+//
+// Uses the non-throwing overloads of recursive_directory_iterator so a single
+// unreadable subdirectory anywhere in the tree does not abort the entire walk
+// (which would take down the process before any test runs — see review
+// feedback on the throwing overload). Per-entry errors are logged as warnings
+// and the walk continues.
 
 std::vector<std::string> DiscoverZstFiles(const std::string& contentPath)
 {
@@ -54,11 +64,40 @@ std::vector<std::string> DiscoverZstFiles(const std::string& contentPath)
         return files;
     }
 
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(contentPath))
+    std::error_code ec;
+    auto iter = std::filesystem::recursive_directory_iterator(
+        contentPath,
+        std::filesystem::directory_options::skip_permission_denied,
+        ec);
+    if (ec)
     {
-        if (entry.is_regular_file() && entry.path().extension() == ".zst")
+        std::cerr << "Warning: could not open '" << contentPath << "' for scanning: "
+                  << ec.message() << "\n";
+        return files;
+    }
+
+    auto endIter = std::filesystem::recursive_directory_iterator();
+    while (iter != endIter)
+    {
+        std::error_code entryEc;
+        if (iter->is_regular_file(entryEc) && !entryEc)
         {
-            files.push_back(entry.path().string());
+            if (iter->path().extension() == ".zst")
+            {
+                files.push_back(iter->path().string());
+            }
+        }
+        else if (entryEc)
+        {
+            std::cerr << "Warning: skipping '" << iter->path().string() << "': "
+                      << entryEc.message() << "\n";
+        }
+        iter.increment(ec);
+        if (ec)
+        {
+            std::cerr << "Warning: recursive walk aborted early after '"
+                      << iter->path().string() << "': " << ec.message() << "\n";
+            break;
         }
     }
 
@@ -75,13 +114,22 @@ static void PrintUsage(const char* exe)
     std::cout << "Usage: " << exe << " [gtest_options] [options]\n"
               << "\n"
               << "Options:\n"
-              << "  --content-path <dir>    Directory containing .zst test files\n"
-              << "  --demo-path <path>      Path to zstdgpu_demo.exe\n"
+              << "  --content-path <dir>    Directory containing .zst test files (required)\n"
+              << "  --demo-path <path>      Path to zstdgpu_demo.exe (required)\n"
               << "  --log-dir <dir>         Directory for logs and CSV output\n"
               << "  --log-file <path>       Consolidated text log file\n"
               << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
               << std::endl;
+}
+
+// Prints an error prefixed with "Error:" to stderr and returns the exit code so
+// main() can 'return Fail(...)' in a single expression. Keeps validation blocks
+// short and consistent.
+static int Fail(const std::string& msg)
+{
+    std::cerr << "Error: " << msg << std::endl;
+    return 1;
 }
 
 int main(int argc, char** argv)
@@ -127,40 +175,33 @@ int main(int argc, char** argv)
         }
     }
 
+    // Fail-loud validation. Any of these misconfigurations means the run cannot
+    // produce meaningful test coverage, so we exit non-zero before any test
+    // instantiates. Silent skipping (previously done via warnings + GTEST_SKIP)
+    // would let broken pipelines pass green with zero coverage.
     if (config.demoPath.empty())
-    {
-        std::cerr << "Warning: --demo-path not set. Tests will skip.\n";
-    }
+        return Fail("--demo-path is required.");
+    if (!std::filesystem::exists(config.demoPath))
+        return Fail("--demo-path '" + config.demoPath + "' does not exist.");
+    if (!std::filesystem::is_regular_file(config.demoPath))
+        return Fail("--demo-path '" + config.demoPath + "' is not a regular file.");
 
     if (config.contentPath.empty())
-    {
-        std::cerr << "Warning: --content-path not set. Zero tests will be discovered "
-                     "(gtest will print 'This test program does NOT link in any test case').\n";
-    }
-    else if (!std::filesystem::exists(config.contentPath))
-    {
-        std::cerr << "Warning: --content-path '" << config.contentPath
-                  << "' does not exist. Zero tests will be discovered.\n";
-    }
-    else if (!std::filesystem::is_directory(config.contentPath))
-    {
-        std::cerr << "Warning: --content-path '" << config.contentPath
-                  << "' is not a directory. Zero tests will be discovered.\n";
-    }
-    else
-    {
-        const size_t fileCount = DiscoverZstFiles(config.contentPath).size();
-        if (fileCount == 0)
-        {
-            std::cerr << "Warning: --content-path '" << config.contentPath
-                      << "' contains no .zst files. Zero tests will be discovered.\n";
-        }
-        else
-        {
-            std::cout << "Discovered " << fileCount << " .zst file(s) at '"
-                      << config.contentPath << "'.\n";
-        }
-    }
+        return Fail("--content-path is required.");
+    if (!std::filesystem::exists(config.contentPath))
+        return Fail("--content-path '" + config.contentPath + "' does not exist.");
+    if (!std::filesystem::is_directory(config.contentPath))
+        return Fail("--content-path '" + config.contentPath + "' is not a directory.");
+
+    // Discover exactly once. Cached on TestConfig for GetTestFiles() to reuse
+    // when instantiating the parameterized fixture — avoids walking the tree
+    // twice.
+    config.discoveredFiles = DiscoverZstFiles(config.contentPath);
+    if (config.discoveredFiles.empty())
+        return Fail("--content-path '" + config.contentPath + "' contains no .zst files.");
+
+    std::cout << "Discovered " << config.discoveredFiles.size() << " .zst file(s) at '"
+              << config.contentPath << "'.\n";
 
     // Default log dir to current directory.
     if (config.logDir.empty())
