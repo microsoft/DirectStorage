@@ -7,21 +7,21 @@
  * PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
  */
 
-// Entry point for the Zstd GPU CI tests. This is a thin GTest wrapper
-// that shells out to zstdgpu_demo.exe to validate Zstd GPU decompression shaders.
+// Entry point for the Zstd GPU CI tests. Thin GTest wrapper that shells out
+// to zstdgpu_demo.exe to validate Zstd GPU decompression shaders.
 //
-//   - parses custom CLI flags (--content-path, --demo-path, etc.), validates
-// them (hard failure with a non-zero exit on any misconfiguration — never
-// silently skip), discovers .zst files under the content path exactly once,
-// then hands off to GTest which runs parameterized tests defined in
-// zstdgpu_ci_tests.cpp. Each test spawns the demo as a child process.
+// main() parses custom CLI flags (--content-path, --demo-path, etc.),
+// validates them (hard failure with non-zero exit on any misconfiguration —
+// never silently skip), discovers .zst files under the content path exactly
+// once, then hands off to GTest which runs the parameterized suite defined
+// in zstdgpu_ci_tests.cpp. Each test spawns the demo as a child process.
 //
-// If the content path is missing, unreadable, or contains no .zst files, or if
-// the demo executable is missing, the process exits non-zero before any test
-// runs. This intentionally prevents a "green" run with zero coverage.
+// If the content path is missing, unreadable, or contains no .zst files, or
+// if the demo executable is missing, the process exits non-zero before any
+// test runs. This intentionally prevents a "green" run with zero coverage.
 //
-// This file also implements the TestConfig singleton and file discovery helpers
-// declared in zstdgpu_ci_tests.h.
+// This file also owns the g_testConfig storage and the file discovery
+// implementation declared in zstdgpu_ci_tests.h.
 
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
@@ -32,20 +32,9 @@
 #include <string>
 #include <system_error>
 
-// TestConfig singleton
-// Implementation of the singleton declared in zstdgpu_ci_tests.h.
-
-static TestConfig g_testConfig;
-
-const TestConfig& GetTestConfig()
-{
-    return g_testConfig;
-}
-
-void SetTestConfig(TestConfig config)
-{
-    g_testConfig = std::move(config);
-}
+// Global config, declared extern in zstdgpu_ci_tests.h. Set once in main(),
+// read from test bodies.
+TestConfig g_testConfig;
 
 // File discovery
 //
@@ -132,12 +121,13 @@ static int Fail(const std::string& msg)
     return 1;
 }
 
-int main(int argc, char** argv)
+// Parse custom flags out of argv before we hand argv to GTest. GTest's own
+// InitGoogleTest() runs later and will consume its own flags (e.g.
+// --gtest_filter). Returns true on success; on --help-ci, prints usage and
+// sets shouldExit=true so main() can return 0 cleanly.
+static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExit)
 {
-    // Parse custom flags before handing off to GTest. GTest's InitGoogleTest()
-    // is called later and will consume its own flags (e.g. --gtest_filter).
-    TestConfig config;
-
+    shouldExit = false;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--content-path") == 0 && i + 1 < argc)
@@ -171,14 +161,22 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
             PrintUsage(argv[0]);
-            return 0;
+            shouldExit = true;
+            return true;
         }
     }
+    return true;
+}
 
-    // Fail-loud validation. Any of these misconfigurations means the run cannot
-    // produce meaningful test coverage, so we exit non-zero before any test
-    // instantiates. Silent skipping (previously done via warnings + GTEST_SKIP)
-    // would let broken pipelines pass green with zero coverage.
+// Fail-loud validation + one-shot filesystem discovery. Any misconfiguration
+// means the run cannot produce meaningful test coverage, so we return a
+// non-zero exit code before any test instantiates. Silent skipping would let
+// broken pipelines pass green with zero coverage.
+//
+// On success also creates the log directory (defaulting to cwd) so downstream
+// writes don't have to check.
+static int ValidateAndDiscover(TestConfig& config)
+{
     if (config.demoPath.empty())
         return Fail("--demo-path is required.");
     if (!std::filesystem::exists(config.demoPath))
@@ -203,19 +201,32 @@ int main(int argc, char** argv)
     std::cout << "Discovered " << config.discoveredFiles.size() << " .zst file(s) at '"
               << config.contentPath << "'.\n";
 
-    // Default log dir to current directory.
     if (config.logDir.empty())
     {
         config.logDir = std::filesystem::current_path().string();
     }
-
-    // Ensure log directory exists.
     if (!std::filesystem::exists(config.logDir))
     {
         std::filesystem::create_directories(config.logDir);
     }
 
-    SetTestConfig(std::move(config));
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    TestConfig config;
+
+    bool shouldExit = false;
+    if (!ParseArgs(argc, argv, config, shouldExit))
+        return 1;
+    if (shouldExit)
+        return 0;   // --help-ci printed usage and asked to exit cleanly
+
+    if (int rc = ValidateAndDiscover(config); rc != 0)
+        return rc;
+
+    g_testConfig = std::move(config);
 
     testing::InitGoogleTest(&argc, argv);
     testing::GTEST_FLAG(catch_exceptions) = false;

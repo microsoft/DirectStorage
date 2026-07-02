@@ -7,9 +7,11 @@
  * PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
  */
 
-// Shared header for the Zstd GPU CI tests. Defines the runtime configuration,
-// demo process result type, and declarations for the demo runner and file
-// discovery helpers. Both main.cpp and zstdgpu_ci_tests.cpp include this.
+// Shared header for the Zstd GPU CI tests.
+// Exposes only what genuinely crosses translation-unit boundaries:
+// the TestConfig struct, a global instance, and file discovery.
+// The demo runner, DemoResult, and argument builders are internal
+// to zstdgpu_ci_tests.cpp and stay hidden as static functions there.
 
 #pragma once
 
@@ -33,44 +35,12 @@ struct TestConfig
     std::vector<std::string> discoveredFiles;
 };
 
-// Singleton access. SetTestConfig called once from main(), GetTestConfig
-// called from test helpers.
-// Needed for GTest's TEST_P bodies to access config without passing it through
-// parameters.
-const TestConfig& GetTestConfig();
-void SetTestConfig(TestConfig config);
+// Global config, set once in main() before RUN_ALL_TESTS(), then read-only
+// from test bodies. A plain extern global instead of a getter/setter is enough
+// here — the "set once, then read" contract is enforced by the main() call
+// sequence and there is no benefit to hiding the storage.
+extern TestConfig g_testConfig;
 
-// Demo runner — spawns zstdgpu_demo.exe and captures output.
-
-// Captures the outcome of a single demo process invocation.
-struct DemoResult
-{
-    int exitCode = -1;        // Process exit code (0 = success)
-    std::string stdOut;       // Captured stdout + stderr
-    std::string launchError;  // Error message if the process failed to launch
-    std::string commandLine;  // The exact command line that was executed
-    bool timedOut = false;    // True if the process was killed due to timeout
-};
-
-// Spawns zstdgpu_demo.exe with the given arguments, captures output, and
-// returns the result. timeoutSeconds=0 means no timeout.
-DemoResult RunDemo(
-    const std::string& demoPath,
-    const std::vector<std::string>& args,
-    int timeoutSeconds = 0);
-
-// Convenience: builds the full argument list for a correctness scenario.
-std::vector<std::string> BuildCorrectnessArgs(
-    const std::string& zstFile,
-    const std::vector<std::string>& scenarioFlags);
-
-// Convenience: builds the full argument list for a performance scenario.
-std::vector<std::string> BuildPerformanceArgs(
-    const std::string& zstFile,
-    int profilingLevel,
-    int runCount,
-    const std::string& csvOutputPath);
-
-// File discovery — scans directories for .zst test content.
-// Recursively scans a directory for *.zst files. Returns sorted full paths.
+// File discovery — scans a directory for *.zst files. Returns sorted full paths.
+// Called by main() during startup.
 std::vector<std::string> DiscoverZstFiles(const std::string& contentPath);

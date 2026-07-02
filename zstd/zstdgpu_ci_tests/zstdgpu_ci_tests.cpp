@@ -9,49 +9,62 @@
 
 // Test definitions and demo runner for the Zstd GPU CI tests.
 //
-// Contains a single parameterized test suite (ZstdGpuDemoTests) instantiated
-// once per .zst file found in the content directory. Each file gets 6 test
-// scenarios:
+// Parameterized test suite (ZstdGpuDemoTests) instantiated once per .zst file
+// under the content path. Each file produces 6 scenarios:
 //
-// Correctness tests (4 scenarios per file):
-//   - SimulationCheck:  Software GPU simulation (--sim-gpu) with CPU+GPU validation
-//   - D3D12DebugLayer:  Hardware GPU with D3D12 debug layer (--d3d-dbg)
-//   - ExternalMemory:   External memory mode (--ext-mem)
-//   - GraphicsQueue:    Graphics queue instead of compute (--d3d-gfx)
+//   Correctness (ASSERT — hard fail):
+//     - SimulationCheck  : --sim-gpu with CPU+GPU validation
+//     - D3D12DebugLayer  : --d3d-dbg
+//     - ExternalMemory   : --ext-mem
+//     - GraphicsQueue    : --d3d-gfx
 //
-// Performance tests (2 scenarios per file):
-//   - OverallThroughput: Profiling level 0 — CSV: results/throughput_<stem>.csv
-//   - PerStageTiming:    Profiling level 2 — CSV: results/stages_<stem>.csv
-//   Performance tests use EXPECT (not ASSERT) — they fail on infrastructure
-//   errors but do not check performance values against thresholds.
-//
-// Correctness tests use ASSERT, performance tests use EXPECT. See per-test docs.
-//
-// main() validates that at least one .zst file is present before we reach
-// this point, so INSTANTIATE_TEST_SUITE_P always has at least one parameter.
-// A previous version used GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST to
-// allow zero .zst files to pass green — that's now a hard failure at startup
-// (see main.cpp) so this macro is no longer needed.
-
-// The demo runner at the bottom of this file spawns zstdgpu_demo.exe as a child
-// process using Win32 CreateProcess with anonymous pipes. A background thread
-// drains stdout to avoid pipe-buffer deadlocks. If the process exceeds the
-// configured timeout, it is terminated. This avoids any D3D12/GPU dependency
-// in the test binary itself — all GPU work happens inside the demo process.
-
-// NOTES: IF THE PATH IS EMPTY, FAIL THE TEST 
+//   Performance (EXPECT — soft fail, also verify CSV output was written):
+//     - OverallThroughput: --prf-lvl 0 → results/throughput_<stem>.csv
+//     - PerStageTiming   : --prf-lvl 2 → results/stages_<stem>.csv
 
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
 #include <array>
-#include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <Windows.h>
+
+// Internal types + forward declarations
+//
+// These are used only inside this translation unit; keeping them out of the
+// header limits the wrapper's public surface to the two things main.cpp
+// actually needs (TestConfig, DiscoverZstFiles).
+
+namespace
+{
+    // Captures the outcome of a single demo process invocation.
+    struct DemoResult
+    {
+        int exitCode = -1;        // Process exit code (0 = success)
+        std::string stdOut;       // Captured stdout + stderr
+        std::string launchError;  // Error message if the process failed to launch
+        std::string commandLine;  // The exact command line that was executed
+        bool timedOut = false;    // True if the process was killed due to timeout
+    };
+
+    DemoResult RunDemo(
+        const std::string& demoPath,
+        const std::vector<std::string>& args,
+        int timeoutSeconds);
+
+    std::vector<std::string> BuildCorrectnessArgs(
+        const std::string& zstFile,
+        const std::vector<std::string>& scenarioFlags);
+
+    std::vector<std::string> BuildPerformanceArgs(
+        const std::string& zstFile,
+        int profilingLevel,
+        int runCount,
+        const std::string& csvOutputPath);
+}
 
 // Helpers
 
@@ -62,7 +75,7 @@
 // walk happened once, up front, in main().
 static std::vector<std::string> GetTestFiles()
 {
-    return GetTestConfig().discoveredFiles;
+    return g_testConfig.discoveredFiles;
 }
 
 // Converts a full file path to a valid GTest parameter name.
@@ -74,13 +87,12 @@ static std::vector<std::string> GetTestFiles()
 // --content-path so different folders produce different names.
 static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& info)
 {
-    const auto& config = GetTestConfig();
     std::filesystem::path full(info.param);
     std::filesystem::path rel;
-    if (!config.contentPath.empty())
+    if (!g_testConfig.contentPath.empty())
     {
         std::error_code ec;
-        rel = std::filesystem::relative(full, config.contentPath, ec);
+        rel = std::filesystem::relative(full, g_testConfig.contentPath, ec);
         if (ec || rel.empty() || rel.string().rfind("..", 0) == 0)
         {
             rel = full.filename();  // fallback: out-of-tree, just use leaf
@@ -116,11 +128,16 @@ static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& i
 // Appends per-test output to the consolidated log file (--log-file).
 static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 {
-    const auto& config = GetTestConfig();
-    if (config.logFile.empty())
+    if (g_testConfig.logFile.empty())
         return;
 
-    std::ofstream log(config.logFile, std::ios::app);
+    std::ofstream log(g_testConfig.logFile, std::ios::app);
+    if (!log)
+    {
+        std::cerr << "Warning: could not open --log-file '"
+                  << g_testConfig.logFile << "' for append.\n";
+        return;
+    }
     auto* testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
     log << "=== " << testInfo->test_suite_name() << "." << testInfo->name() << " ===\n";
     log << "File: " << zstFile << "\n";
@@ -137,10 +154,8 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 // the same text in the log.
 static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std::string>& scenarioFlags)
 {
-    const auto& config = GetTestConfig();
-
     auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
-    auto result = RunDemo(config.demoPath, args, config.timeoutSeconds);
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
     // Write to log file before assertions so logs are captured even if an ASSERT aborts early.
     WriteToLogFile(zstFile, result);
@@ -154,7 +169,7 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
     }
 
     ASSERT_FALSE(result.timedOut)
-        << "Demo process timed out after " << config.timeoutSeconds << " seconds.\n"
+        << "Demo process timed out after " << g_testConfig.timeoutSeconds << " seconds.\n"
         << "Command: " << result.commandLine;
 
     ASSERT_TRUE(result.launchError.empty())
@@ -171,22 +186,20 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 // main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 {
-    const auto& config = GetTestConfig();
-
     // Build CSV output path matching spec convention:
     //   prf-lvl 0 → results/throughput_<stem>.csv
     //   prf-lvl 2 → results/stages_<stem>.csv
     std::string stem = std::filesystem::path(zstFile).stem().string();
     std::string prefix = (profilingLevel == 0) ? "throughput" : "stages";
-    std::filesystem::path resultsDir = std::filesystem::path(config.logDir) / "results";
+    std::filesystem::path resultsDir = std::filesystem::path(g_testConfig.logDir) / "results";
     if (!std::filesystem::exists(resultsDir))
     {
         std::filesystem::create_directories(resultsDir);
     }
     std::string csvPath = (resultsDir / (prefix + "_" + stem + ".csv")).string();
 
-    auto args = BuildPerformanceArgs(zstFile, profilingLevel, config.runCount, csvPath);
-    auto result = RunDemo(config.demoPath, args, config.timeoutSeconds);
+    auto args = BuildPerformanceArgs(zstFile, profilingLevel, g_testConfig.runCount, csvPath);
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
     // Write to log file before assertions so logs are captured even if a check fails.
     WriteToLogFile(zstFile, result);
@@ -200,7 +213,7 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
     }
 
     EXPECT_FALSE(result.timedOut)
-        << "Demo process timed out after " << config.timeoutSeconds << " seconds.\n"
+        << "Demo process timed out after " << g_testConfig.timeoutSeconds << " seconds.\n"
         << "Command: " << result.commandLine;
 
     EXPECT_TRUE(result.launchError.empty())
@@ -270,6 +283,17 @@ INSTANTIATE_TEST_SUITE_P(
     SanitizeTestName);
 
 // Demo runner implementation
+//
+// Spawns zstdgpu_demo.exe as a child process via CreateProcess with anonymous
+// pipes. A background thread drains stdout to avoid pipe-buffer deadlocks. If
+// the child exceeds the configured timeout, it is terminated and CancelIoEx
+// releases the reader thread so the wrapper does not itself hang.
+//
+// All GPU / D3D12 dependencies live in the demo process; the test binary
+// itself has no GPU dependency.
+
+namespace
+{
 
 // Builds a command line string with proper quoting for arguments containing spaces.
 static std::string BuildCommandLine(const std::string& exe, const std::vector<std::string>& args)
@@ -433,3 +457,5 @@ std::vector<std::string> BuildPerformanceArgs(
     }
     return args;
 }
+
+} // namespace
