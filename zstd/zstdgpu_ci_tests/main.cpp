@@ -132,6 +132,36 @@ int main(int argc, char** argv)
         std::cerr << "Warning: --demo-path not set. Tests will skip.\n";
     }
 
+    if (config.contentPath.empty())
+    {
+        std::cerr << "Warning: --content-path not set. Zero tests will be discovered "
+                     "(gtest will print 'This test program does NOT link in any test case').\n";
+    }
+    else if (!std::filesystem::exists(config.contentPath))
+    {
+        std::cerr << "Warning: --content-path '" << config.contentPath
+                  << "' does not exist. Zero tests will be discovered.\n";
+    }
+    else if (!std::filesystem::is_directory(config.contentPath))
+    {
+        std::cerr << "Warning: --content-path '" << config.contentPath
+                  << "' is not a directory. Zero tests will be discovered.\n";
+    }
+    else
+    {
+        const size_t fileCount = DiscoverZstFiles(config.contentPath).size();
+        if (fileCount == 0)
+        {
+            std::cerr << "Warning: --content-path '" << config.contentPath
+                      << "' contains no .zst files. Zero tests will be discovered.\n";
+        }
+        else
+        {
+            std::cout << "Discovered " << fileCount << " .zst file(s) at '"
+                      << config.contentPath << "'.\n";
+        }
+    }
+
     // Default log dir to current directory.
     if (config.logDir.empty())
     {

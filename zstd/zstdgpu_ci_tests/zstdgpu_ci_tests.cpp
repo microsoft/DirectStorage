@@ -34,6 +34,8 @@
 // configured timeout, it is terminated. This avoids any D3D12/GPU dependency
 // in the test binary itself — all GPU work happens inside the demo process.
 
+// NOTES: IF THE PATH IS EMPTY, FAIL THE TEST 
+
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
 #include <array>
@@ -57,10 +59,40 @@ static std::vector<std::string> GetTestFiles()
 }
 
 // Converts a full file path to a valid GTest parameter name.
-// GTest names must be alphanumeric + underscore, no leading digits.
+// GTest names must be alphanumeric + underscore, no leading digits, AND UNIQUE
+// across the full INSTANTIATE_TEST_SUITE_P set. Using just the filename stem
+// collides when the same leaf name appears across different subdirectories
+// (e.g. firefly_albedo.DDS.zst exists under BC1/, BC1mip0/, block4K_*, etc.),
+// causing a fatal gtest assertion at startup. Use the path relative to
+// --content-path so different folders produce different names.
 static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& info)
 {
-    std::string name = std::filesystem::path(info.param).stem().string();
+    const auto& config = GetTestConfig();
+    std::filesystem::path full(info.param);
+    std::filesystem::path rel;
+    if (!config.contentPath.empty())
+    {
+        std::error_code ec;
+        rel = std::filesystem::relative(full, config.contentPath, ec);
+        if (ec || rel.empty() || rel.string().rfind("..", 0) == 0)
+        {
+            rel = full.filename();  // fallback: out-of-tree, just use leaf
+        }
+    }
+    else
+    {
+        rel = full.filename();
+    }
+
+    // Drop the trailing .zst extension for readability; everything else stays.
+    std::string name = rel.string();
+    const std::string ext = ".zst";
+    if (name.size() >= ext.size() &&
+        name.compare(name.size() - ext.size(), ext.size(), ext) == 0)
+    {
+        name.resize(name.size() - ext.size());
+    }
+
     std::string result;
     result.reserve(name.size());
     for (char c : name)
