@@ -2587,16 +2587,12 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.BlockSeqCountPrefixLookback->GetGPUVirtualAddress());
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
-        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.CmpLitCompactionLookback->GetGPUVirtualAddress());
-        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.LitStreamCountPrefixLookback->GetGPUVirtualAddress());
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.HufLitCompactionLookback->GetGPUVirtualAddress());
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
 
         // Group 2: FseIndexLookback{HufW,LLen,Offs,MLen} -- same shape as CmpBlockLookback (lookbackBlockCount uint32 each)
-        cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackHufW->GetGPUVirtualAddress());
-        zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackLLen->GetGPUVirtualAddress());
         zstdgpu_DispatchIndirect(cmdList, Memset, Memset_CmpBlockLookback);
         cmdList->SetComputeRootUnorderedAccessView(0, req->resData.gpuOnly.FseIndexLookbackOffs->GetGPUVirtualAddress());
@@ -2653,7 +2649,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Parse Compressed Blocks] and [Memcpy RAW blocks, Memset RLE blocks]");
-        D3D12_RESOURCE_BARRIER barriers[21];
+        D3D12_RESOURCE_BARRIER barriers[20];
 
         uint32_t bc = 0;
         {
@@ -2668,7 +2664,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseProbs);
             // last written by [InitResources :: Memset :: Stage 1]
             // next written/updated by [Propagate FSE Index]
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackHufW);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackLLen);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackOffs);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackMLen);
@@ -2725,7 +2720,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
-        D3D12_RESOURCE_BARRIER barriers[16];
+        D3D12_RESOURCE_BARRIER barriers[15];
         uint32_t bc = 0;
         {
             // last written by [Parse Compressed Blocks]
@@ -2760,8 +2755,8 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.SeqStreamToOffsFseId);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.SeqStreamToMLenFseId);
             // last written by [Parse Compressed Blocks] with un-propagated values
-            // next read+written by [Propagate FSE Index] HufW dispatch (in-place propagation, indexed by cmp block)
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.CmpLitToHufWFseId);
+            // next read by [Propagate FSE Index] HufW dispatch (in-place propagation, indexed by cmp block)
+            //setResourceUavToSrvCopyIndirectSync(barriers, bc ++, req->resData.gpuOnly.HufLitIdToHufWId_DBG);
         }
 
         // last read by ExecuteIndirect as INDIRECT_ARGUMENT
@@ -2848,11 +2843,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             cmdList->SetComputeRootUnorderedAccessView(1, req->resData.gpuOnly.SeqStreamToMLenFseId->GetGPUVirtualAddress());
             cmdList->SetComputeRootUnorderedAccessView(2, req->resData.gpuOnly.FseIndexLookbackMLen->GetGPUVirtualAddress());
             zstdgpu_DispatchIndirect(cmdList, PropagateFseIndex, PropagateFseIndex);
-
-            // Propagate HufW FSE indices across all cmp blocks
-            cmdList->SetComputeRootUnorderedAccessView(1, req->resData.gpuOnly.CmpLitToHufWFseId->GetGPUVirtualAddress());
-            cmdList->SetComputeRootUnorderedAccessView(2, req->resData.gpuOnly.FseIndexLookbackHufW->GetGPUVirtualAddress());
-            zstdgpu_DispatchIndirect(cmdList, PropagateFseIndex, PropagateFseIndex_HufW);
         });
         PIXEndEvent(cmdList);
     }
@@ -2963,7 +2953,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Init FSE Table] and [Group Lilteral Streams]");
-        D3D12_RESOURCE_BARRIER barriers[19];
+        D3D12_RESOURCE_BARRIER barriers[18];
         uint32_t bc = 0;
         // last written by [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         // next read by [Group Lilteral Streams] and [Init FSE Table] and [Decompress Literals]
@@ -2988,9 +2978,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         // last written by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         // next read by [Init Huffman Table and Decompress Literals]
         setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.LitGroupEndPerHuffmanTable);
-        // last written by [Parse Compressed Blocks] (HufW propagation)
-        // next: not read downstream, but transitioned for resource-state hygiene
-        setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.FseIndexLookbackHufW);
         // last written by [Parse Compressed Blocks]
         // next read by [Init Huffman Table and Decompress Literals]
         setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.LitRefs);

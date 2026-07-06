@@ -627,7 +627,6 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
             srt.inoutCounters[0].HUF_Streams_DecodedBytes                    = 0;
             srt.inoutCounters[0].Seq_Streams                                 = 0;
             srt.inoutCounters[0].HUF_Streams                                 = 0;
-            srt.inoutCounters[0].Cmp_Lit                                     = 0;
             srt.inoutCounters[0].HufLit                                      = 0;
             srt.inoutCounters[0].RAW_Streams                                 = 0;
             srt.inoutCounters[0].RLE_Streams                                 = 0;
@@ -1317,33 +1316,23 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     srt.inoutBlockSizePrefix[blockIndexInFrame] = outBlockData.literal.size;
 
-    const bool isCmpLit = (literalBlockType >= 2);
     // A "HufLit" is a literal block that carries a Huffman Table (literalBlockType == 2, i.e. FullTree).
     // Its hufLitId (compacted, in cmpLit-encounter order) keys the per-HT literal stream range.
     const bool isHufLit = (literalBlockType == 2);
 
     #ifndef __hlsl_dx_compiler
-        const uint32_t cmpLitId = srt.inoutCounters[0].Cmp_Lit;
         const uint32_t hufLitId = srt.inoutCounters[0].HufLit;
     #endif
 
-    const uint32_t cmpLitCountPerWave = WaveActiveCountBits(isCmpLit);
     const uint32_t hufLitCountPerWave = WaveActiveCountBits(isHufLit);
     if (WaveIsFirstLane())
     {
-        InterlockedAdd(srt.inoutCounters[0].Cmp_Lit, cmpLitCountPerWave);
         InterlockedAdd(srt.inoutCounters[0].HufLit, hufLitCountPerWave);
     }
 
     #ifdef __hlsl_dx_compiler
-        const uint32_t cmpLitId = zstdgpu_OrderedAppendIndex(srt.inoutCmpLitCompactionLookback, isCmpLit, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
         const uint32_t hufLitId = zstdgpu_OrderedAppendIndex(srt.inoutHufLitCompactionLookback, isHufLit, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
     #endif
-
-    ZSTDGPU_BRANCH if (isCmpLit)
-    {
-        srt.inoutCmpLitToHufWFseId[cmpLitId] = fseTableIndexHufW;
-    }
 
     //
     // NOTE(pamartis): every thread with a literal block storing Huffman table writes:
@@ -1359,6 +1348,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     {
         srt.inoutHufWIdToHufLitId[fseTableIndexHufW]  = hufLitId;
         srt.inoutHufLitIdToLitStreamId[hufLitId]      = outBlockData.litStreamIndex;
+        srt.inoutHufLitIdToHufWId_DBG[hufLitId]       = fseTableIndexHufW;
     }
 
     // `Sequences_Section_Header`

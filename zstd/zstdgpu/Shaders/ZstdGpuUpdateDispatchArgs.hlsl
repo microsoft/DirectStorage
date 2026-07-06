@@ -95,7 +95,6 @@ void main()
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_FinaliseSequenceOffsets,  ZstdCounters[0].Seq_Streams_DecodedItems, kzstdgpu_TgSizeX_FinaliseSequenceOffsets);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PrefixSequenceOffsets,    ZstdCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PrefixSequenceOffsets);
         zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex,        ZstdCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PropagateFseIndex);
-        zstdgpu_EmitDispatch(ZstdDispatchArgs, ZstdDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex_HufW,   ZstdCounters[0].Cmp_Lit,                  kzstdgpu_TgSizeX_PropagateFseIndex);
 
         // Update derived counter field in Counters (kept for shader bounds checks)
         ZstdCounters[0].DecompressSequencesGroups = ZSTDGPU_TG_COUNT(ZstdCounters[0].Seq_Streams, Consts.decompressSequences_StreamsPerTG);

@@ -739,17 +739,6 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             }
         }
 
-        // CPU equivalent of the [Propagate FSE Index] dispatch that propagates FSE/Huffman table indices
-        // across all Huffman-compressed literals
-        {
-            uint32_t cpuLastHufWIndex = kzstdgpu_FseProbTableIndex_Unused;
-            const uint32_t cmpLitCount = CNTRS(Cmp_Lit);
-            for (uint32_t i = 0; i < cmpLitCount; ++i)
-            {
-                zstdgpu_PropagateFseIndexCpu(zstdCpu.CmpLitToHufWFseId[i], cpuLastHufWIndex);
-            }
-        }
-
         VALIDATE(CompressedBlocksData(&zstdCpu));
     }
     const uint32_t literalCount = CNTRS(HUF_Streams_DecodedBytes);

@@ -319,7 +319,6 @@ typedef struct zstdgpu_Counters
     uint32_t HUF_Streams_DecodedBytes;
     uint32_t Seq_Streams;
     uint32_t HUF_Streams;
-    uint32_t Cmp_Lit;
     uint32_t HufLit;
     uint32_t RAW_Streams;
     uint32_t RLE_Streams;
@@ -352,9 +351,8 @@ static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 15;
 static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 16;
 static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 17;
 static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex            = 18;
-static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex_HufW       = 19;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockCount         = 20;
-static const uint32_t kzstdgpu_DispatchSlot_Count                        = 21;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockCount         = 19;
+static const uint32_t kzstdgpu_DispatchSlot_Count                        = 20;
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_DispatchSlot_CmdsPerSlot                  = 1;
@@ -1598,12 +1596,11 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RW_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbs                      , 18)   \
     ZSTDGPU_RW_TYPED_BUFFER_DECL(uint32_t, uint8_t              , DecompressedHuffmanWeightCount, 19)   \
     \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , CmpLitCompactionLookback      , 20)   \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , CmpLitToHufWFseId             , 21)   \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , LitStreamCountPrefixLookback  , 22)   \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufWIdToHufLitId              , 23)   \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufLitIdToLitStreamId         , 24)   \
-    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , HufLitCompactionLookback      , 25)
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , LitStreamCountPrefixLookback  , 20)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufWIdToHufLitId              , 21)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufLitIdToLitStreamId         , 22)   \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , HufLitIdToHufWId_DBG          , 23)   \
+    ZSTDGPU_RW_BUFFER_DECL_GLC(uint32_t                         , HufLitCompactionLookback      , 24)
 
 #define ZSTDGPU_INIT_FSE_TABLE_SRT()                                                                    \
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_FseInfo                      , FseInfos                      , 0)    \
