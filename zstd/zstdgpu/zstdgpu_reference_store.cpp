@@ -14,7 +14,6 @@
 
 #include <memory.h>
 #include <stdlib.h>
-#include <assert.h>
 #include "zstdgpu_structs.h"
 
 #define ZSTDGPU_DISABLE_RESOURCE_DATA_GPU 1
@@ -364,7 +363,7 @@ void zstdgpu_ReferenceStore_Report_FseTable(const int16_t *probs, uint32_t symCo
     STORE(MLen, fseIndex)
     else
     {
-        __debugbreak();
+        ZSTDGPU_BREAK();
     }
 #undef STORE
 }
@@ -398,7 +397,7 @@ void zstdgpu_ReferenceStore_Report_FseDefaultTable(const int16_t *probs, uint32_
     STORE(MLen)
     else
     {
-        __debugbreak();
+        ZSTDGPU_BREAK();
     }
 #undef STORE
 }
@@ -420,7 +419,7 @@ void zstdgpu_ReferenceStore_Report_FseProbSymbol(uint32_t symbol)
     STORE(MLen)
     else
     {
-        __debugbreak();
+        ZSTDGPU_BREAK();
     }
 #undef STORE
 }
@@ -441,7 +440,7 @@ void zstdgpu_ReferenceStore_Report_FseProbRepeatTable()
     STORE(MLen)
     else
     {
-        __debugbreak();
+        ZSTDGPU_BREAK();
     }
 #undef STORE
 }
@@ -589,10 +588,8 @@ static uint32_t zstdgpu_SequenceOffsets_Update(ZSTDGPU_PARAM_INOUT(uint32_t) off
                 }
                 else
                 {
-#ifndef __hlsl_dx_compiler
-                    // offset must no be zero
-                    __debugbreak();
-#endif
+                    // offset must not be zero
+                    ZSTDGPU_BREAK();
                 }
                 offset3 = offset2;
                 offset2 = offset1;

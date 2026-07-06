@@ -27,25 +27,7 @@
 #   endif
 #endif
 
-#ifndef ZSTDGPU_ASSERT
-#   ifdef __hlsl_dx_compiler
-#       define ZSTDGPU_ASSERT(cond) ZSTDGPU_UNUSED(cond)
-#   else
-#       ifdef NDEBUG
-#           define ZSTDGPU_ASSERT(cond) ZSTDGPU_UNUSED(cond)
-#       else
-#           define ZSTDGPU_ASSERT(cond) assert(cond)
-#       endif
-#   endif
-#endif
-
-#ifndef ZSTDGPU_BREAK
-#   ifdef __hlsl_dx_compiler
-#       define ZSTDGPU_BREAK()
-#   else
-#       define ZSTDGPU_BREAK() __debugbreak()
-#   endif
-#endif
+#include "zstdgpu_assert.h"
 
 #ifndef ZSTDGPU_PRAGMA_GNUC
 #   if defined(__clang__) || defined(__GNUC__)  || defined(__hlsl_dx_compiler)

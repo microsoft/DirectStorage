@@ -33,6 +33,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="zstdgpu.h" />
+    <ClInclude Include="zstdgpu_assert.h" />
     <ClInclude Include="zstdgpu_lds.h" />
     <ClInclude Include="zstdgpu_lds_hlsl.h" />
     <ClInclude Include="zstdgpu_reference_store.h" />

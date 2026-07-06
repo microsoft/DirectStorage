@@ -3268,10 +3268,8 @@ static uint32_t zstdgpu_SequenceOffsets_Update(ZSTDGPU_PARAM_INOUT(uint32_t) off
                 }
                 else
                 {
-#ifndef __hlsl_dx_compiler
-                    // offset must no be zero
-                    __debugbreak();
-#endif
+                    // offset must not be zero
+                    ZSTDGPU_BREAK();
                 }
                 offset3 = offset2;
                 offset2 = offset1;

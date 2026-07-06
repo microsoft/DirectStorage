@@ -218,7 +218,7 @@ ZSTDGPU_API uint32_t zstdgpu_IsReadbackRequired(zstdgpu_PerRequestContext inPerR
 /**
  *  @brief      Returns 1 if a CPU readback/fence is required after any stages, 0 otherwise. This API
  *              mainly exist to ensure `zstdgpu_PerRequestContext` has sufficient information to not
- *              require any readbacks, so calling code could check: `assert(0 == zstdgpu_IsAnyStageReadbackRequired(ctx))`
+ *              require any readbacks, so calling code could check: `ZSTDGPU_ASSERT(0 == zstdgpu_IsAnyStageReadbackRequired(ctx))`
  */
 ZSTDGPU_API uint32_t zstdgpu_IsAnyStageReadbackRequired(zstdgpu_PerRequestContext inPerRequestContext);
 
