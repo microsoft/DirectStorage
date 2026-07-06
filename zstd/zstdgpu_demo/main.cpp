@@ -41,17 +41,28 @@
 #include <xmem.h>
 #endif
 
+#include "zstdgpu_assert.h"
+
+#define D3D12AID_CHECK(call)                            \
+    do                                                  \
+    {                                                   \
+        HRESULT hr = call;                              \
+        ZSTDGPU_ASSERT_MSG(S_OK == hr, "S_OK != 0x%08lx " #call "\n", hr); \
+    }                                                   \
+    while(0)
+
+#define D3D12AID_ASSERT(cond) ZSTDGPU_ASSERT(cond)
+
 #define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 3
 #define D3D12AID_MAPPED_BUFFER_LATENCY_FRAME_MAX_COUNT 1
-#include <d3d12aid.h>
 
+#include <d3d12aid.h>
 #include <pix3.h>
 
-extern "C" {
-#include "zstd_decompress.h"
+extern "C"
+{
+    #include "zstd_decompress.h"
 }
-
-#include <assert.h>
 
 #include "zstdgpu_reference_store.h"
 #include "zstdgpu_shaders.h"
@@ -75,6 +86,7 @@ static void debugPrint(const wchar_t *format, ...)
     va_start(args, format);
     _vsnwprintf_s(buffer, bufferSize + 1, bufferSize, format, args);
     wprintf(buffer);
+    fflush(stdout);
     OutputDebugStringW(buffer);
     va_end(args);
 }
@@ -225,23 +237,26 @@ static void zstdgpu_Init_FinaliseSequenceOffsets_SRT(zstdgpu_FinaliseSequenceOff
 
 #include "zstdgpu_srt_decl_undef.h"
 
-#define STRINGIZE(x) STRINGIZE2(x)
-#define STRINGIZE2(x) #x
-#define VALIDATE(name)  \
-    do                  \
-    {                   \
-        if (ZSTDGPU_ENUM_CONST(Validate_Success) != zstdgpu_ReferenceStore_Validate_##name) \
-            debugPrint(L"[FAIL] Validation of '"#name"' failed in function: " __FUNCTION__ ", file: " __FILE__ ", line: " STRINGIZE(__LINE__) "\n");\
-    }                   \
-    while(0)
+#define VALIDATE(name, data) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(data))
 
-#define VALIDATE_CND(cnd)   \
-    do                      \
-    {                       \
-        if (!(cnd))         \
-            debugPrint(L"[FAIL] Validation of '"#cnd"' failed in function: " __FUNCTION__ ", file: " __FILE__ ", line: " STRINGIZE(__LINE__) "\n");\
-    }                       \
-    while(0)
+template <class T> struct zstdgpu_RemoveRef      { using TResult = T; };
+template <class T> struct zstdgpu_RemoveRef<T&>  { using TResult = T; };
+template <class T> struct zstdgpu_RemoveRef<T&&> { using TResult = T; };
+template <class T>  using zstdgpu_NoRefType = typename zstdgpu_RemoveRef<T>::TResult;
+
+template<typename TLambda>
+static uint32_t zstdgpu_ValidateUntilFirstAssert(TLambda && lambda)
+{
+    tta_AssertReportLevel lvl = tta_AssertGetReportLevel();
+    tta_AssertSetReportLevel(ktta_AssertReportLevel_PrintAndThrow);
+    uint32_t hasError = tta_AssertCallAndCatch([](void* u) -> int
+    {
+        (*static_cast<zstdgpu_NoRefType<TLambda> *>(u))();
+        return 0;
+    }, (void *)&lambda);
+    tta_AssertSetReportLevel(lvl);
+    return hasError;
+}
 
 static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, bool chkGpu, bool simGpu)
 {
@@ -254,8 +269,8 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
     {
         uint32_t* tmp = gpuReadbackRes.CompressedData;
         gpuReadbackRes.CompressedData = cpuRes.CompressedData;
-        VALIDATE(DecompressedHuffmanWeights(&gpuReadbackRes));
-        VALIDATE(DecodedHuffmanWeights(&gpuReadbackRes));
+        VALIDATE(DecompressedHuffmanWeights, &gpuReadbackRes);
+        VALIDATE(DecodedHuffmanWeights, &gpuReadbackRes);
         gpuReadbackRes.CompressedData = tmp;
     }
 
@@ -283,7 +298,7 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
             gpuReadbackRes.CompressedData                   = cpuRes.CompressedData;
             gpuReadbackRes.DecompressedHuffmanWeights       = cpuRes.DecompressedHuffmanWeights;
             gpuReadbackRes.DecompressedHuffmanWeightCount   = cpuRes.DecompressedHuffmanWeightCount;
-            VALIDATE(DecompressedHuffmanWeights(&gpuReadbackRes));
+            VALIDATE(DecompressedHuffmanWeights, &gpuReadbackRes);
             gpuReadbackRes.CompressedData                   = CompressedData;
             gpuReadbackRes.DecompressedHuffmanWeights       = DecompressedHuffmanWeights;
             gpuReadbackRes.DecompressedHuffmanWeightCount   = DecompressedHuffmanWeightCount;
@@ -314,7 +329,7 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
 
             gpuReadbackRes.CompressedData                   = cpuRes.CompressedData;
             gpuReadbackRes.DecompressedHuffmanWeights       = cpuRes.DecompressedHuffmanWeights;
-            VALIDATE(DecodedHuffmanWeights(&gpuReadbackRes));
+            VALIDATE(DecodedHuffmanWeights, &gpuReadbackRes);
             gpuReadbackRes.CompressedData                   = CompressedData;
             gpuReadbackRes.DecompressedHuffmanWeights       = DecompressedHuffmanWeights;
         }
@@ -355,7 +370,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
     {
         uint32_t* tmp = gpuReadbackRes.CompressedData;
         gpuReadbackRes.CompressedData = cpuRes.CompressedData;
-        VALIDATE(DecompressedLiterals(&gpuReadbackRes));
+        VALIDATE(DecompressedLiterals, &gpuReadbackRes);
         gpuReadbackRes.CompressedData = tmp;
     }
 
@@ -396,7 +411,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
 
             gpuReadbackRes.CompressedData       = cpuRes.CompressedData;
             gpuReadbackRes.DecompressedLiterals = cpuRes.DecompressedLiterals;
-            VALIDATE(DecompressedLiterals(&gpuReadbackRes));
+            VALIDATE(DecompressedLiterals, &gpuReadbackRes);
             gpuReadbackRes.CompressedData       = CompressedData;
             gpuReadbackRes.DecompressedLiterals = DecompressedLiterals;
         }
@@ -414,7 +429,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
     {
         uint32_t* tmp = gpuReadbackRes.CompressedData;
         gpuReadbackRes.CompressedData = cpuRes.CompressedData;
-        VALIDATE(DecompressedSequences(&gpuReadbackRes));
+        VALIDATE(DecompressedSequences, &gpuReadbackRes);
         gpuReadbackRes.CompressedData = tmp;
     }
 
@@ -498,7 +513,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             gpuReadbackRes.DecompressedSequenceMLen = cpuRes.DecompressedSequenceMLen;
             gpuReadbackRes.DecompressedSequenceOffs = cpuRes.DecompressedSequenceOffs;
 
-            VALIDATE(DecompressedSequences(&gpuReadbackRes));
+            VALIDATE(DecompressedSequences, &gpuReadbackRes);
 
             gpuReadbackRes.CompressedData           = CompressedData;
             gpuReadbackRes.DecompressedSequenceLLen = DecompressedSequenceLLen;
@@ -511,7 +526,6 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 
 static void zstdgpu_Test_BlockPrefix(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes)
 {
-    /** these buffers could be zero if some block types don't exist */
     const uint32_t refRleBlockCount = cpuRes.Counters->Blocks_RLE;
     const uint32_t refRawBlockCount = cpuRes.Counters->Blocks_RAW;
     const uint32_t refCmpBlockCount = cpuRes.Counters->Blocks_CMP;
@@ -519,26 +533,24 @@ static void zstdgpu_Test_BlockPrefix(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_R
                                     + refRawBlockCount
                                     + refCmpBlockCount;
 
-    VALIDATE_CND(refRleBlockCount == gpuReadbackRes.Counters->Blocks_RLE);
-    VALIDATE_CND(refRawBlockCount == gpuReadbackRes.Counters->Blocks_RAW);
-    VALIDATE_CND(refCmpBlockCount == gpuReadbackRes.Counters->Blocks_CMP);
+    ZSTDGPU_ASSERT_MSG(refRleBlockCount == gpuReadbackRes.Counters->Blocks_RLE, "%u != %u", refRleBlockCount, gpuReadbackRes.Counters->Blocks_RLE);
+    ZSTDGPU_ASSERT_MSG(refRawBlockCount == gpuReadbackRes.Counters->Blocks_RAW, "%u != %u", refRawBlockCount, gpuReadbackRes.Counters->Blocks_RAW);
+    ZSTDGPU_ASSERT_MSG(refCmpBlockCount == gpuReadbackRes.Counters->Blocks_CMP, "%u != %u", refCmpBlockCount, gpuReadbackRes.Counters->Blocks_CMP);
 
-    if (NULL != cpuRes.GlobalBlockIndexPerCmpBlock)
-        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerCmpBlock, gpuReadbackRes.GlobalBlockIndexPerCmpBlock, sizeof(cpuRes.GlobalBlockIndexPerCmpBlock[0]) * refCmpBlockCount));
-    else
-        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerCmpBlock);
+    #define CHK(name) 0 == memcmp(cpuRes.GlobalBlockIndexPer##name##Block, gpuReadbackRes.GlobalBlockIndexPer##name##Block, sizeof(cpuRes.GlobalBlockIndexPer##name##Block[0]) * ref##name##BlockCount)
 
-    if (NULL != cpuRes.GlobalBlockIndexPerRawBlock)
-        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerRawBlock, gpuReadbackRes.GlobalBlockIndexPerRawBlock, sizeof(cpuRes.GlobalBlockIndexPerRawBlock[0]) * refRawBlockCount));
-    else
-        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerRawBlock);
+    if (refRleBlockCount == gpuReadbackRes.Counters->Blocks_RLE)
+        ZSTDGPU_ASSERT_MSG(CHK(Rle), "Global block indices for Rle blocks don't match between CPU and GPU");
 
-    if (NULL != cpuRes.GlobalBlockIndexPerRleBlock)
-        VALIDATE_CND(0 == memcmp(cpuRes.GlobalBlockIndexPerRleBlock, gpuReadbackRes.GlobalBlockIndexPerRleBlock, sizeof(cpuRes.GlobalBlockIndexPerRleBlock[0]) * refRleBlockCount));
-    else
-        VALIDATE_CND(NULL == gpuReadbackRes.GlobalBlockIndexPerRleBlock);
+    if (refRawBlockCount == gpuReadbackRes.Counters->Blocks_RAW)
+        ZSTDGPU_ASSERT_MSG(CHK(Raw), "Global block indices for Raw blocks don't match between CPU and GPU");
 
-    VALIDATE_CND(0 == memcmp(cpuRes.BlockSizePrefix, gpuReadbackRes.BlockSizePrefix, sizeof(cpuRes.BlockSizePrefix[0]) * refAllBlockCount));
+    if (refCmpBlockCount == gpuReadbackRes.Counters->Blocks_CMP)
+        ZSTDGPU_ASSERT_MSG(CHK(Cmp), "Global block indices for Cmp blocks don't match between CPU and GPU");
+
+    #undef CHK
+
+    ZSTDGPU_ASSERT(0 == memcmp(cpuRes.BlockSizePrefix, gpuReadbackRes.BlockSizePrefix, sizeof(cpuRes.BlockSizePrefix[0]) * refAllBlockCount));
 }
 
 static uint32_t zstdgpu_Test_DecompressedDataPerBlockType(const uint32_t *gpuGlobalBlockIndex,
@@ -684,7 +696,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_ParseFrames(srt, i);
         }
     }
-    VALIDATE(Blocks(&zstdCpu));
+    VALIDATE(Blocks, &zstdCpu);
 
     {
         zstdgpu_InitResources_SRT srt = {};
@@ -739,18 +751,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             }
         }
 
-        // CPU equivalent of the [Propagate FSE Index] dispatch that propagates FSE/Huffman table indices
-        // across all Huffman-compressed literals
-        {
-            uint32_t cpuLastHufWIndex = kzstdgpu_FseProbTableIndex_Unused;
-            const uint32_t cmpLitCount = CNTRS(Cmp_Lit);
-            for (uint32_t i = 0; i < cmpLitCount; ++i)
-            {
-                zstdgpu_PropagateFseIndexCpu(zstdCpu.CmpLitToHufWFseId[i], cpuLastHufWIndex);
-            }
-        }
-
-        VALIDATE(CompressedBlocksData(&zstdCpu));
+        VALIDATE(CompressedBlocksData, &zstdCpu);
     }
     const uint32_t literalCount = CNTRS(HUF_Streams_DecodedBytes);
     const uint32_t sequenceCount = CNTRS(Seq_Streams_DecodedItems);
@@ -791,7 +792,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         {
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
         }
-        VALIDATE(FseTables(&zstdCpu));
+        VALIDATE(FseTables, &zstdCpu);
     }
 
     {
@@ -802,7 +803,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_DecompressHuffmanWeights(srt, i);
         }
 
-        VALIDATE(DecompressedHuffmanWeights(&zstdCpu));
+        VALIDATE(DecompressedHuffmanWeights, &zstdCpu);
     }
 
     {
@@ -813,7 +814,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         {
             zstdgpu_ShaderEntry_DecodeHuffmanWeights(srt, i);
         }
-        VALIDATE(DecodedHuffmanWeights(&zstdCpu));
+        VALIDATE(DecodedHuffmanWeights, &zstdCpu);
     }
 
     {
@@ -835,7 +836,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
         }
-        VALIDATE(DecompressedLiterals(&zstdCpu));
+        VALIDATE(DecompressedLiterals, &zstdCpu);
     }
 
     {
@@ -920,7 +921,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
         }
     }
-    VALIDATE(DecompressedSequences(&zstdCpu));
+    VALIDATE(DecompressedSequences, &zstdCpu);
     #undef CNTRS
 }
 
@@ -937,6 +938,21 @@ ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResou
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
 ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
 
+extern "C" void zstdgpu_AssertReportCback(const char *expr, const char *file, int line, const char *func, const char *msg, void *args)
+{
+    if (NULL != msg)
+    {
+        const size_t bufferSize = 1024;
+        char buffer[bufferSize + 1];
+        _vsnprintf_s(buffer, bufferSize + 1, bufferSize, msg, *(va_list*)args);
+        debugPrint(L"[FAIL] (%hs) : %hs at %hs:%d in %hs\n", expr, buffer, file, line, func);
+    }
+    else
+    {
+        debugPrint(L"[FAIL] (%hs) at %hs:%d in %hs\n", expr, file, line, func);
+    }
+}
+
 // Entry point
 #ifndef _GAMING_XBOX
 int wmain(int argc, wchar_t **argv)
@@ -949,6 +965,16 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
 #endif
+
+    tta_AssertSetReportCback(&zstdgpu_AssertReportCback);
+    if (IsDebuggerPresent())
+    {
+        tta_AssertSetReportLevel(ktta_AssertReportLevel_PrintAndBreak);
+    }
+    else
+    {
+        tta_AssertSetReportLevel(ktta_AssertReportLevel_Print);
+    }
 
     bool extMem = false;
     bool blkCnt = false;
@@ -1284,17 +1310,33 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         zstdgpu_ReferenceStore_Report_ChunkBase(zstdData);
         zstdgpu_ReferenceStore_AllocateMemory();
 
-        // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth  data
-        ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
+        if (0 != zstdgpu_ValidateUntilFirstAssert([&]() -> void
+        {
+            // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth  data
+            ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
+        }))
+        {
+            debugPrint(L"[FAIL] Encountered errors during Reference Decompression. Early Out.\n");
+            return 1;
+        }
     }
 
     zstdgpu_ResourceDataCpu zstdCpu;
     if (chkCpu)
     {
-        debugPrint(L"[VALIDATION] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
+        debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
+
         // NOTE(pamartis): We run GPU Decompression pipeline on CPU to catch possible errors/assert early
-        // TODO(pamartis): Because currently we don't know "frame count" and "uncompressed size" we pass that information from fbInfo.
-        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
+
+        if (0 != zstdgpu_ValidateUntilFirstAssert([&]() -> void
+        {
+            zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
+        }))
+        {
+            debugPrint(L"[FAIL] Encountered errors during validation run of GPU code on CPU. Early Out.\n");
+            return 1;
+        }
+
         if (!simGpu)
         {
             zstdgpu_ResourceDataCpu_MarkReadOnly(&zstdCpu);
@@ -1871,3 +1913,10 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     debugPrint(L"Finished.\n");
     return 0;
 }
+
+#define TTA_ASSERT_IMPL
+
+ZSTDGPU_WARN_PUSH_MSVC()
+ZSTDGPU_WARN_STOP_MSVC(4611) /* setjmp/C++ interaction in tta_assert's NOEXCEPT path; dead code under the Print report level */
+#include <tta_assert.h>
+ZSTDGPU_WARN_POP_MSVC()

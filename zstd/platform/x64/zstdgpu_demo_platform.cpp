@@ -31,6 +31,18 @@
 #include <dxgi1_6.h>
 #include <dxgidebug.h>
 
+#include "zstdgpu_assert.h"
+
+#define D3D12AID_CHECK(call)                            \
+    do                                                  \
+    {                                                   \
+        HRESULT hr = call;                              \
+        ZSTDGPU_ASSERT_MSG(S_OK == hr, "S_OK != 0x%08lx " #call "\n", hr); \
+    }                                                   \
+    while(0)
+
+#define D3D12AID_ASSERT(cond) ZSTDGPU_ASSERT(cond)
+
 #define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 2
 #define D3D12AID_API_STATIC 1
 #include <d3d12aid.h>
