@@ -239,24 +239,6 @@ static void zstdgpu_Init_FinaliseSequenceOffsets_SRT(zstdgpu_FinaliseSequenceOff
 
 #define VALIDATE(name, data) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(data))
 
-template <class T> struct zstdgpu_RemoveRef      { using TResult = T; };
-template <class T> struct zstdgpu_RemoveRef<T&>  { using TResult = T; };
-template <class T> struct zstdgpu_RemoveRef<T&&> { using TResult = T; };
-template <class T>  using zstdgpu_NoRefType = typename zstdgpu_RemoveRef<T>::TResult;
-
-template<typename TLambda>
-static uint32_t zstdgpu_ValidateUntilFirstAssert(TLambda && lambda)
-{
-    tta_AssertReportLevel lvl = tta_AssertGetReportLevel();
-    tta_AssertSetReportLevel(ktta_AssertReportLevel_PrintAndThrow);
-    uint32_t hasError = tta_AssertCallAndCatch([](void* u) -> int
-    {
-        (*static_cast<zstdgpu_NoRefType<TLambda> *>(u))();
-        return 0;
-    }, (void *)&lambda);
-    tta_AssertSetReportLevel(lvl);
-    return hasError;
-}
 
 static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, bool chkGpu, bool simGpu)
 {
@@ -953,7 +935,116 @@ extern "C" void zstdgpu_AssertReportCback(const char *expr, const char *file, in
     }
 }
 
-// Entry point
+/**
+ *  NOTE(pamartis): this structure holds all resources that could be created by `demoRun`.
+ *  This helps to return early from `demoRun` (or longjmp/throw from anywhere on the stack above it)
+ *  and release/free resources within `demoCleanup`
+ */
+struct DemoCtx
+{
+#ifndef _GAMING_XBOX
+    int                         argc;
+    wchar_t                   **argv;
+#endif
+    int                         retv;
+
+    void                       *zstdData;
+    zstdgpu_FrameInfo          *zstdFrameInfo;
+    zstdgpu_OffsetAndSize      *zstdInFrameRefs;
+    zstdgpu_OffsetAndSize      *zstdOutFrameRefs;
+    void                       *zstdReferenceUncompressedData;
+    wchar_t                    *zstFilePathStorage;
+    wchar_t                    *csvFilePathStorage;
+
+    ID3D12Device               *device;
+    d3d12aid_CmdQueue           cmdQueue;
+    d3d12aid_Timestamps         timestamps;
+    zstdgpu_PersistentContext   persistentContext;
+    zstdgpu_PerRequestContext   perRequestContext;
+    d3d12aid_MappedBuffer       zstdCompressedFramesMemory;
+    d3d12aid_MappedBuffer       zstdCompressedFramesRefs;
+    d3d12aid_MappedBuffer       zstdUnCompressedFramesMemory;
+    d3d12aid_MappedBuffer       zstdUnCompressedFramesRefs;
+    ID3D12Heap                 *readbackHeap[3];
+    ID3D12Heap                 *uploadHeap[3];
+    ID3D12Heap                 *defaultHeap[3];
+    ID3D12DescriptorHeap       *descriptorHeap[3];
+    zstdgpu_ResourceDataCpu     zstdCpu;
+    bool                        zstdCpuInit;
+
+    uint64_t                    freqGpuClocks;
+    FILE                       *csvFile;
+};
+
+/** Releases whatever `demoRun` managed to initialise (zero fields are skipped). */
+static void demoCleanup(DemoCtx *ctx)
+{
+    if (NULL != ctx->cmdQueue.queue)
+        d3d12aid_CmdQueue_CpuWaitForGpuIdle(&ctx->cmdQueue);
+
+    if (NULL != ctx->perRequestContext)
+    {
+        void *memory = NULL;
+        zstdgpu_DestroyPerRequestContext(&memory, NULL, ctx->perRequestContext);
+        free(memory);
+    }
+    if (NULL != ctx->persistentContext)
+    {
+        void *memory = NULL;
+        zstdgpu_DestroyPersistentContext(&memory, NULL, ctx->persistentContext);
+        free(memory);
+    }
+
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        D3D12AID_SAFE_RELEASE(ctx->descriptorHeap[i]);
+        D3D12AID_SAFE_RELEASE(ctx->readbackHeap[i]);
+        D3D12AID_SAFE_RELEASE(ctx->uploadHeap[i]);
+        D3D12AID_SAFE_RELEASE(ctx->defaultHeap[i]);
+    }
+
+    if (NULL != ctx->zstdCompressedFramesRefs.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdCompressedFramesRefs);
+    if (NULL != ctx->zstdCompressedFramesMemory.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdCompressedFramesMemory);
+    if (NULL != ctx->zstdUnCompressedFramesMemory.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesMemory);
+    if (NULL != ctx->zstdUnCompressedFramesRefs.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesRefs);
+
+    if (NULL != ctx->timestamps.heap)
+        d3d12aid_Timestamps_Release(&ctx->timestamps);
+    if (NULL != ctx->cmdQueue.queue)
+        d3d12aid_CmdQueue_Release(&ctx->cmdQueue);
+
+    if (ctx->zstdCpuInit)
+        zstdgpu_ResourceDataCpu_Term(&ctx->zstdCpu);
+
+    #define SAFE_FREE(ptr) do { if (NULL != ptr) { free(ptr); ptr = NULL; } } while (0)
+    SAFE_FREE(ctx->zstdReferenceUncompressedData);
+    SAFE_FREE(ctx->zstdOutFrameRefs);
+    SAFE_FREE(ctx->zstdInFrameRefs);
+    SAFE_FREE(ctx->zstdFrameInfo);
+    SAFE_FREE(ctx->zstdData);
+    SAFE_FREE(ctx->zstFilePathStorage);
+    SAFE_FREE(ctx->csvFilePathStorage);
+    #undef SAFE_FREE
+
+    if (NULL != ctx->csvFile)
+    {
+        fflush(ctx->csvFile);
+        fclose(ctx->csvFile);
+    }
+
+    if (NULL != ctx->device)
+    {
+        ctx->device->SetStablePowerState(FALSE);
+        zstdgpu_Demo_PlatformTerm(ctx->device);
+    }
+}
+
+static int demoRun(void *demoCtx);
+
 #ifndef _GAMING_XBOX
 int wmain(int argc, wchar_t **argv)
 #else
@@ -967,14 +1058,62 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 #endif
 
     tta_AssertSetReportCback(&zstdgpu_AssertReportCback);
+
+    DemoCtx ctx = {};
+#ifndef _GAMING_XBOX
+    ctx.argc = argc;
+    ctx.argv = argv;
+#endif
+
+    int asserted = 0;
     if (IsDebuggerPresent())
     {
         tta_AssertSetReportLevel(ktta_AssertReportLevel_PrintAndBreak);
+        demoRun(&ctx);
     }
     else
     {
-        tta_AssertSetReportLevel(ktta_AssertReportLevel_Print);
+        asserted = tta_AssertCallAndCatch(&demoRun, &ctx);
     }
+
+    demoCleanup(&ctx);
+
+    return asserted ? 1 : ctx.retv;
+}
+
+static int demoRun(void *demoCtx)
+{
+    DemoCtx *ctx = (DemoCtx *)demoCtx;
+
+#ifndef _GAMING_XBOX
+    int        argc = ctx->argc;
+    wchar_t  **argv = ctx->argv;
+#endif
+
+    void                  *&zstdData                       = ctx->zstdData;
+    zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
+    zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
+    zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
+    void                  *&zstdReferenceUncompressedData  = ctx->zstdReferenceUncompressedData;
+    wchar_t               *&zstFilePathStorage             = ctx->zstFilePathStorage;
+    wchar_t               *&csvFilePathStorage             = ctx->csvFilePathStorage;
+
+    ID3D12Device              *&device                       = ctx->device;
+    d3d12aid_CmdQueue          &cmdQueue                     = ctx->cmdQueue;
+    d3d12aid_Timestamps        &timestamps                   = ctx->timestamps;
+    zstdgpu_PersistentContext  &persistentContext            = ctx->persistentContext;
+    zstdgpu_PerRequestContext  &perRequestContext            = ctx->perRequestContext;
+    d3d12aid_MappedBuffer      &zstdCompressedFramesMemory   = ctx->zstdCompressedFramesMemory;
+    d3d12aid_MappedBuffer      &zstdCompressedFramesRefs     = ctx->zstdCompressedFramesRefs;
+    d3d12aid_MappedBuffer      &zstdUnCompressedFramesMemory = ctx->zstdUnCompressedFramesMemory;
+    d3d12aid_MappedBuffer      &zstdUnCompressedFramesRefs   = ctx->zstdUnCompressedFramesRefs;
+    ID3D12Heap                *(&readbackHeap)[3]            = ctx->readbackHeap;
+    ID3D12Heap                *(&uploadHeap)[3]              = ctx->uploadHeap;
+    ID3D12Heap                *(&defaultHeap)[3]             = ctx->defaultHeap;
+    ID3D12DescriptorHeap      *(&descriptorHeap)[3]          = ctx->descriptorHeap;
+    zstdgpu_ResourceDataCpu    &zstdCpu                      = ctx->zstdCpu;
+    uint64_t                   &freqGpuClocks                = ctx->freqGpuClocks;
+    FILE                      *&csvFile                      = ctx->csvFile;
 
     bool extMem = false;
     bool blkCnt = false;
@@ -989,8 +1128,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
 
     const wchar_t *zstFilePath = L"data\\group_0_cmp17_block8192.zst";
     const wchar_t *csvFilePath = L"perf.csv";
-    wchar_t *zstFilePathStorage = NULL;
-    wchar_t *csvFilePathStorage = NULL;
     uint32_t gpuVenId = 0x1414; // means -- find any vendor id, but not 0x1414
     uint32_t gpuDevId = ~0u;    // means -- find any device id
     uint32_t repCount = 10;
@@ -1163,7 +1300,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
                 if (badArg)
                 {
-                    return 1;
+                    ctx->retv = 1;
+                    return 0;
                 }
             }
             if (NULL == zstFilePathStorage)
@@ -1173,7 +1311,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         }
     }
 #endif
-    void *zstdData = NULL;
     uint32_t zstdDataSize = 0;
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
@@ -1182,7 +1319,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
-        return ERROR_FILE_NOT_FOUND;
+        ctx->retv = ERROR_FILE_NOT_FOUND;
+        return 0;
     }
     else
     {
@@ -1192,14 +1330,12 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
     zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
-    zstdgpu_FrameInfo *zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
-    zstdgpu_OffsetAndSize *zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
-    zstdgpu_OffsetAndSize *zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
+    zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
+    zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
+    zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
-    void *zstdDataFree = zstdData;
     const uint32_t endFrame = fbInfo.frameCount - 1;
-
 
     // NOTE(pamartis): Support the option to choose a range of frame in the input package/data
     if (minFrame > 0 || maxFrame < endFrame)
@@ -1240,18 +1376,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         if (fbInfo.frameCount != vcnt)
         {
             debugPrint(L"[FAIL] Some frames don't carry uncompressed size. Early Out.\n");
-
-            free(zstdOutFrameRefs);
-            free(zstdInFrameRefs);
-            free(zstdFrameInfo);
-            free(zstdDataFree);
-            if (NULL != zstFilePathStorage)
-                free(zstFilePathStorage);
-
-            if (NULL != csvFilePathStorage)
-                free(csvFilePathStorage);
-
-            return 1;
+            ctx->retv = 1;
+            return 0;
         }
     }
 
@@ -1262,15 +1388,15 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     static const uint32_t kFrameInterval = 1;
 #endif
 
-    ID3D12Device *device = zstdgpu_Demo_PlatformInit(gpuVenId, gpuDevId, d3dDbg);
+    device = zstdgpu_Demo_PlatformInit(gpuVenId, gpuDevId, d3dDbg);
     if (NULL == device)
     {
         debugPrint(L"[FAIL] Couldn't load create D3D12 device with venId=%u, devId=%u. Early Out.\n", gpuVenId, gpuDevId);
-        return ERROR_SYSTEM_DEVICE_NOT_FOUND;
+        ctx->retv = ERROR_SYSTEM_DEVICE_NOT_FOUND;
+        return 0;
     }
     device->SetStablePowerState(TRUE);
 
-    d3d12aid_CmdQueue cmdQueue;
 #ifdef _GAMING_XBOX
     d3d12aid_CmdQueue_Create(&cmdQueue, device, kBackBufferCount, 1u, D3D12_COMMAND_LIST_TYPE_DIRECT);
 #else
@@ -1281,7 +1407,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         ZSTDGPU_TS(Readback0)   \
         ZSTDGPU_TS(Readback1)
 
-    d3d12aid_Timestamps timestamps;
     d3d12aid_Timestamps_Create(&timestamps, device, 0
         /** NOTE(pamartis): generate timestamp counting using macro list */
         #define ZSTDGPU_TS(name) + 2
@@ -1291,7 +1416,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     );
 
     uint32_t zstdReferenceUncompressedDataSize = 0;
-    void *zstdReferenceUncompressedData = NULL;
 
     if (simGpu)
     {
@@ -1310,32 +1434,17 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         zstdgpu_ReferenceStore_Report_ChunkBase(zstdData);
         zstdgpu_ReferenceStore_AllocateMemory();
 
-        if (0 != zstdgpu_ValidateUntilFirstAssert([&]() -> void
-        {
-            // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth  data
-            ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
-        }))
-        {
-            debugPrint(L"[FAIL] Encountered errors during Reference Decompression. Early Out.\n");
-            return 1;
-        }
+        // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth data.
+        ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
     }
 
-    zstdgpu_ResourceDataCpu zstdCpu;
     if (chkCpu)
     {
         debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
 
         // NOTE(pamartis): We run GPU Decompression pipeline on CPU to catch possible errors/assert early
-
-        if (0 != zstdgpu_ValidateUntilFirstAssert([&]() -> void
-        {
-            zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
-        }))
-        {
-            debugPrint(L"[FAIL] Encountered errors during validation run of GPU code on CPU. Early Out.\n");
-            return 1;
-        }
+        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
+        ctx->zstdCpuInit = true;
 
         if (!simGpu)
         {
@@ -1344,7 +1453,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     }
 
     debugPrint(L"[INFO] Initializing 'zstdgpu' Persistent Context.\n");
-    zstdgpu_PersistentContext persistentContext = NULL;
     {
         const uint32_t persistentMemorySize = zstdgpu_GetPersistentContextRequiredMemorySizeInBytes();
         ZSTDGPU_ENUM(Status) status = zstdgpu_CreatePersistentContext(&persistentContext, device, malloc(persistentMemorySize), persistentMemorySize);
@@ -1352,7 +1460,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     }
 
     debugPrint(L"[INFO] Initializing 'zstdgpu' PerRequest Context.\n");
-    zstdgpu_PerRequestContext perRequestContext = NULL;
     {
         const uint32_t perRequestMemorySize = zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes();
         ZSTDGPU_ENUM(Status) status = zstdgpu_CreatePerRequestContext(&perRequestContext, persistentContext, malloc(perRequestMemorySize), perRequestMemorySize);
@@ -1365,12 +1472,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     // 'compressed' data and 'meta' (references) to zstd frames -- as pre-loaded into VMEM buffers
     // TODO(pamartis): Expose this option as command line option
     const volatile uint32_t testSourceInGpuMemory = 0u;
-
-    d3d12aid_MappedBuffer zstdCompressedFramesMemory;
-    d3d12aid_MappedBuffer zstdCompressedFramesRefs;
-
-    d3d12aid_MappedBuffer zstdUnCompressedFramesMemory;
-    d3d12aid_MappedBuffer zstdUnCompressedFramesRefs;
 
     const uint32_t zstdFramesRefsSizeInBytes = sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount;
 
@@ -1427,11 +1528,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
         }
     }
     zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
-
-    ID3D12Heap *readbackHeap[3] = { NULL, NULL, NULL };
-    ID3D12Heap *uploadHeap[3] = { NULL, NULL, NULL };
-    ID3D12Heap *defaultHeap[3] = { NULL, NULL, NULL };
-    ID3D12DescriptorHeap *descriptorHeap[3] = { NULL, NULL, NULL };
 
     uint32_t readbackHeapSize[3] = { 0, 0, 0 };
     uint32_t uploadHeapSize[3] = {0, 0, 0 };
@@ -1670,6 +1766,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                             if (failedCmpBlockCount > 0)
                                 debugPrint(L"[FAIL] %u/%u CMP blocks failed validation. ExecuteSequences is likely broken unless an issue happens earlier in the pipeline or unless TDR is hit.\n", failedCmpBlockCount, fbInfo.cmpBlockCount);
 
+                            ctx->retv = 1;
+                            return 0;
                         }
                     }
                 }
@@ -1686,7 +1784,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     free(buffer);
                 }
 
-                static uint64_t freqGpuClocks = 0;
                 if (freqGpuClocks == 0)
                 {
                     cmdQueue.queue->GetTimestampFrequency(&freqGpuClocks);
@@ -1697,7 +1794,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                 uint64_t clks = 0;
                 uint64_t clksAll = 0;
 
-                static FILE *csvFile = NULL;
                 if (NULL == csvFile)
                 {
                     // find the start of .zst file name (to further add into .csv name)
@@ -1827,12 +1923,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
                     const uint64_t ns = (clksAll * 1000000000) / freqGpuClocks;
                     const double decompressionThroughput = (double)zstdUnCompressedFramesMemorySizeInBytes / ns;
                     fwprintf_s(csvFile, L"%lf\n", decompressionThroughput);
-
-                    if (frameIndex == repCount - 1)
-                    {
-                        fflush(csvFile);
-                        fclose(csvFile);
-                    }
                 }
             }
 
@@ -1854,69 +1944,30 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
             PIXEndEvent();
         }
     }
-
-    d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
-    {
-        void *memory = NULL;
-        ZSTDGPU_ENUM(Status) status = zstdgpu_DestroyPerRequestContext(&memory, NULL, perRequestContext);
-        ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(StatusSuccess) == status);
-        free(memory);
-    }
-
-    {
-        void *memory = NULL;
-        ZSTDGPU_ENUM(Status) status = zstdgpu_DestroyPersistentContext(&memory, NULL, persistentContext);
-        ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(StatusSuccess) == status);
-        free(memory);
-    }
-
-    if (extMem)
-    {
-        for (uint32_t i = 0; i < 3; ++i)
-        {
-            D3D12AID_SAFE_RELEASE(descriptorHeap[i]);
-            D3D12AID_SAFE_RELEASE(readbackHeap[i]);
-            D3D12AID_SAFE_RELEASE(uploadHeap[i]);
-            D3D12AID_SAFE_RELEASE(defaultHeap[i]);
-        }
-    }
-
-    if (testSourceInGpuMemory > 0)
-    {
-        d3d12aid_MappedBuffer_Release(&zstdCompressedFramesRefs);
-        d3d12aid_MappedBuffer_Release(&zstdCompressedFramesMemory);
-    }
-    d3d12aid_MappedBuffer_Release(&zstdUnCompressedFramesMemory);
-    d3d12aid_MappedBuffer_Release(&zstdUnCompressedFramesRefs);
-
-    d3d12aid_Timestamps_Release(&timestamps);
-    d3d12aid_CmdQueue_Release(&cmdQueue);
-
-    if (chkCpu)
-    {
-        zstdgpu_ResourceDataCpu_Term(&zstdCpu);
-    }
-    if (NULL != zstdReferenceUncompressedData)
-        free(zstdReferenceUncompressedData);
-    free(zstdOutFrameRefs);
-    free(zstdInFrameRefs);
-    free(zstdFrameInfo);
-    free(zstdDataFree);
-    if (NULL != zstFilePathStorage)
-        free(zstFilePathStorage);
-
-    if (NULL != csvFilePathStorage)
-        free(csvFilePathStorage);
-
-    device->SetStablePowerState(FALSE);
-    zstdgpu_Demo_PlatformTerm(device);
     debugPrint(L"Finished.\n");
     return 0;
 }
 
 #define TTA_ASSERT_IMPL
 
+/**
+ *  NOTE(pamartis): tta_assert.h leaves usage `TTA_ASSERT_NOEXCEPT` to the user,
+ *  so we choose to enable `TTA_ASSERT_NOEXCEPT` (which effectively switching to `longjmp` insteead of `throw`)
+ *  when the compiler doesn't support exceptions
+ */
+#if defined(__clang__)
+#   ifndef __EXCEPTIONS
+#       define TTA_ASSERT_NOEXCEPT 1
+#   endif
+#elif defined(_MSC_VER)
+#   ifndef _CPPUNWIND
+#       define TTA_ASSERT_NOEXCEPT 1
+#   endif
+#else
+#   error Unknown compiler
+#endif
+
 ZSTDGPU_WARN_PUSH_MSVC()
-ZSTDGPU_WARN_STOP_MSVC(4611) /* setjmp/C++ interaction in tta_assert's NOEXCEPT path; dead code under the Print report level */
+ZSTDGPU_WARN_STOP_MSVC(4611) /* warning C4611: interaction between 'function' and C++ object destruction is non-portable */
 #include <tta_assert.h>
 ZSTDGPU_WARN_POP_MSVC()
