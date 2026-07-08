@@ -1558,7 +1558,7 @@ static void zstdgpu_RecomputeAndRetrieveBlockInfoConstants(uint32_t *outCntLit, 
     *outCntLit = cntLit;
 }
 
-ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
+ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByteCount, uint64_t *outUploadHeapByteCount, uint64_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext req, uint32_t stageIndex)
 {
     uint32_t proceed = 1;
     uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
@@ -1604,9 +1604,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByt
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
-static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefaultHeapByteCount,
-                                                            uint32_t *outUploadHeapByteCount,
-                                                            uint32_t *outReadbackHeapByteCount,
+static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint64_t *outDefaultHeapByteCount,
+                                                            uint64_t *outUploadHeapByteCount,
+                                                            uint64_t *outReadbackHeapByteCount,
                                                             zstdgpu_PerRequestContext req)
 {
     uint32_t cntRaw, cntRle, cntCmp, cntLit, cntSeq;
@@ -1631,9 +1631,9 @@ static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint32_t *outDefault
                                 + req->resInfo.gpu2Cpu_ByteCount[2];
 }
 
-ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount,
-                                                             uint32_t *outUploadHeapByteCount,
-                                                             uint32_t *outReadbackHeapByteCount,
+ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaultHeapByteCount,
+                                                             uint64_t *outUploadHeapByteCount,
+                                                             uint64_t *outReadbackHeapByteCount,
                                                              uint32_t *outShaderVisibleDescriptorCount,
                                                              zstdgpu_PerRequestContext req)
 {
@@ -1673,19 +1673,19 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
                                                 uint32_t stageIndex,
                                                 struct ID3D12GraphicsCommandList *cmdList,
                                                 struct ID3D12Heap *defaultHeap,
-                                                uint32_t defaultHeapOffsetInBytes,
+                                                uint64_t defaultHeapOffsetInBytes,
                                                 struct ID3D12Heap *uploadHeap,
-                                                uint32_t uploadHeapOffsetInBytes,
+                                                uint64_t uploadHeapOffsetInBytes,
                                                 struct ID3D12Heap *readbackHeap,
-                                                uint32_t readbackHeap_OffsetInBytes,
+                                                uint64_t readbackHeap_OffsetInBytes,
                                                 struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                 uint32_t shaderVisibileHeapOffsetInDescriptors)
 {
     uint32_t proceed = 1;
     uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
-    uint32_t defaultHeapMemReq = 0;
-    uint32_t uploadHeapMemReq = 0;
-    uint32_t readbackHeapMemReq = 0;
+    uint64_t defaultHeapMemReq = 0;
+    uint64_t uploadHeapMemReq = 0;
+    uint64_t readbackHeapMemReq = 0;
     uint32_t shaderVisibleHeapDscCount = 0;
     proceed = ZSTDGPU_ENUM_CONST(StatusSuccess) == zstdgpu_GetGpuMemoryRequirement(&defaultHeapMemReq, &uploadHeapMemReq, &readbackHeapMemReq, &shaderVisibleHeapDscCount, req, stageIndex);
     proceed = proceed && (req->thisMemoryBlock == (void *)req);
@@ -1776,18 +1776,18 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
 ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext req,
                                                                struct ID3D12GraphicsCommandList *cmdList,
                                                                struct ID3D12Heap *defaultHeap,
-                                                               uint32_t defaultHeap_OffsetInBytes,
+                                                               uint64_t defaultHeap_OffsetInBytes,
                                                                struct ID3D12Heap *uploadHeap,
-                                                               uint32_t uploadHeap_OffsetInBytes,
+                                                               uint64_t uploadHeap_OffsetInBytes,
                                                                struct ID3D12Heap *readbackHeap,
-                                                               uint32_t readbackHeap_OffsetInBytes,
+                                                               uint64_t readbackHeap_OffsetInBytes,
                                                                struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                                uint32_t shaderVisibileHeap_OffsetInDescriptors)
 {
     uint32_t proceed = 1;
-    uint32_t defaultHeapMemReq = 0;
-    uint32_t uploadHeapMemReq = 0;
-    uint32_t readbackHeapMemReq = 0;
+    uint64_t defaultHeapMemReq = 0;
+    uint64_t uploadHeapMemReq = 0;
+    uint64_t readbackHeapMemReq = 0;
     uint32_t shaderVisibleHeapDscCount = 0;
     proceed = proceed && (0 == zstdgpu_IsAnyStageReadbackRequired(req));
     proceed = proceed && (ZSTDGPU_ENUM_CONST(StatusSuccess) == zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapMemReq, &uploadHeapMemReq, &readbackHeapMemReq, &shaderVisibleHeapDscCount, req));
@@ -1803,9 +1803,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerReques
     ZSTDGPU_ASSERT(proceed > 0);
     if (proceed)
     {
-        uint32_t defaultOffs = defaultHeap_OffsetInBytes;
-        uint32_t uploadOffs = uploadHeap_OffsetInBytes;
-        uint32_t readbackOffs = readbackHeap_OffsetInBytes;
+        uint64_t defaultOffs = defaultHeap_OffsetInBytes;
+        uint64_t uploadOffs = uploadHeap_OffsetInBytes;
+        uint64_t readbackOffs = readbackHeap_OffsetInBytes;
         zstdgpu_ResourceDataGpu_Term(&req->resData, 0);
         zstdgpu_ResourceDataGpu_Term(&req->resData, 1);
         zstdgpu_ResourceDataGpu_Term(&req->resData, 2);
@@ -2002,8 +2002,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
     if (proceed)
     {
         ID3D12Device *device = req->device;
-        uint32_t dflt, upld, rdbk;
-        uint32_t dfltP, upldP, rdbkP;
+        uint64_t dflt, upld, rdbk;
+        uint64_t dfltP, upldP, rdbkP;
         zstdgpu_GetAllStageGpuMemoryRequirementInternal(&dflt, &upld, &rdbk, req);
 
         dfltP = req->resData.gpuOnly_ByteCount[0]
@@ -2071,7 +2071,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
         if (NULL == req->resData.gpuOnly_Heap[0] && 0 != dflt)
         {
             ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, dflt, 0, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
-            uint32_t offs = 0;
+            uint64_t offs = 0;
             INIT_HEAP(gpuOnly, 0, heap);
             INIT_HEAP(gpuOnly, 1, heap);
             INIT_HEAP(gpuOnly, 2, heap);
@@ -2089,7 +2089,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
         if (NULL == req->resData.cpu2Gpu_Heap[0] && 0 != upld)
         {
             ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, upld, 0, D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
-            uint32_t offs = 0;
+            uint64_t offs = 0;
             INIT_HEAP(cpu2Gpu, 0, heap);
             INIT_HEAP(cpu2Gpu, 1, heap);
             INIT_HEAP(cpu2Gpu, 2, heap);
@@ -2106,7 +2106,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
         if (NULL == req->resData.gpu2Cpu_Heap[0] && 0 != rdbk)
         {
             ID3D12Heap *heap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, rdbk, 0, D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
-            uint32_t offs = 0;
+            uint64_t offs = 0;
             INIT_HEAP(gpu2Cpu, 0, heap);
             INIT_HEAP(gpu2Cpu, 1, heap);
             INIT_HEAP(gpu2Cpu, 2, heap);

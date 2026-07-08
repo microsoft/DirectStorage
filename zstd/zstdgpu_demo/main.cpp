@@ -1529,9 +1529,9 @@ static int demoRun(void *demoCtx)
     }
     zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
 
-    uint32_t readbackHeapSize[3] = { 0, 0, 0 };
-    uint32_t uploadHeapSize[3] = {0, 0, 0 };
-    uint32_t defaultHeapSize[3] = {0, 0, 0};
+    uint64_t readbackHeapSize[3] = { 0, 0, 0 };
+    uint64_t uploadHeapSize[3] = {0, 0, 0 };
+    uint64_t defaultHeapSize[3] = {0, 0, 0};
     uint32_t descriptorCount[3] = { 0, 0, 0 };
 
     for (uint32_t frameIndex = 0; frameIndex < repCount; ++frameIndex)
@@ -1604,9 +1604,9 @@ static int demoRun(void *demoCtx)
                 {
                     if (extMem /** a scenario with supplying external memory */)
                     {
-                        uint32_t defaultHeapSizeReq = 0;
-                        uint32_t uploadHeapSizeReq = 0;
-                        uint32_t readbackHeapSizeReq = 0;
+                        uint64_t defaultHeapSizeReq = 0;
+                        uint64_t uploadHeapSizeReq = 0;
+                        uint64_t readbackHeapSizeReq = 0;
                         uint32_t descriptorCountReq = 0;
 
                         zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext);
@@ -1636,9 +1636,9 @@ static int demoRun(void *demoCtx)
                     {
                         if (extMem /** a scenario with supplying external memory */)
                         {
-                            uint32_t defaultHeapSizeReq = 0;
-                            uint32_t uploadHeapSizeReq = 0;
-                            uint32_t readbackHeapSizeReq = 0;
+                            uint64_t defaultHeapSizeReq = 0;
+                            uint64_t uploadHeapSizeReq = 0;
+                            uint64_t readbackHeapSizeReq = 0;
                             uint32_t descriptorCountReq = 0;
 
                             zstdgpu_GetGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext, stageIndex);

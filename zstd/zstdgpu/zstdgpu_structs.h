@@ -453,6 +453,13 @@ static inline uint32_t zstdgpu_AlignUp(uint32_t offset, uint32_t alignment)
     return (offset + alignmentBits) & ~alignmentBits;
 }
 
+static inline uint64_t zstdgpu_AlignUp64(uint64_t offset, uint64_t alignment)
+{
+    ZSTDGPU_ASSERT(0 == (alignment & (alignment - 1)));
+    const uint64_t alignmentBits = alignment - 1;
+    return (offset + alignmentBits) & ~alignmentBits;
+}
+
 #ifdef __hlsl_dx_compiler
 #   define ZSTDGPU_FOR_WORK_ITEMS(workItemId, workItemCount, groupThreadId, groupThreadCount)   \
         for (ZSTDGPU_WARN_DISABLE_DXC(-Wfor-redefinition, uint32_t workItemId = groupThreadId); workItemId < workItemCount; workItemId += groupThreadCount)
