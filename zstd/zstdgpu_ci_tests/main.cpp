@@ -109,9 +109,6 @@ static void PrintUsage(const char* exe)
               << "  --log-file <path>       Consolidated text log file\n"
               << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
-              << "  --force-gbv             Skip the D3D12DebugLayer two-phase gate — always run with --d3d-dbg\n"
-              << "                          (default: two-phase mode — run without --d3d-dbg first,\n"
-              << "                           only re-run with --d3d-dbg if the first run fails)\n"
               << std::endl;
 }
 
@@ -160,10 +157,6 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.timeoutSeconds = std::atoi(argv[++i]);
             if (config.timeoutSeconds < 0)
                 config.timeoutSeconds = 0;
-        }
-        else if (std::strcmp(argv[i], "--force-gbv") == 0)
-        {
-            config.forceGbv = true;
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {

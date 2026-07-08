@@ -28,7 +28,6 @@ struct TestConfig
     std::string logFile;                        // Consolidated text log file path (--log-file)
     int runCount = 40;                          // Number of iterations for performance tests
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
-    bool forceGbv = false;                      // Skip the D3D12DebugLayer two-phase gate (always run with --d3d-dbg)
 
     // Cached list of .zst files discovered under contentPath. Populated once
     // in main() after validation; consumed by GetTestFiles() at fixture

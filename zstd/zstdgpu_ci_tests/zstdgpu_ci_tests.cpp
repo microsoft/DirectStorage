@@ -24,7 +24,6 @@
 
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
-#include <atomic>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -146,59 +145,6 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
     log << result.stdOut << "\n";
 }
 
-// Appends the phase-2 (--d3d-dbg diagnostic) demo output to the same
-// consolidated log file with a marker separator. Used only by the
-// D3D12DebugLayer gated helper below when phase 1 fails and we re-run
-// with --d3d-dbg for GBV diagnostic output. Keeping both phases in a
-// single log entry preserves the "one log block per gtest case" contract
-// so downstream log consumers don't need to know about the two-phase flow.
-static void AppendPhaseTwoToLogFile(const std::string& zstFile, const DemoResult& result)
-{
-    if (g_testConfig.logFile.empty())
-        return;
-
-    std::ofstream log(g_testConfig.logFile, std::ios::app);
-    if (!log)
-    {
-        std::cerr << "Warning: could not open --log-file '"
-                  << g_testConfig.logFile << "' for phase-2 append.\n";
-        return;
-    }
-    log << "--- PHASE 2 (--d3d-dbg diagnostic re-run) ---\n";
-    log << "File: " << zstFile << "\n";
-    log << "Exit code: " << result.exitCode << "\n";
-    log << result.stdOut << "\n";
-}
-
-// D3D12DebugLayer gated-fallback metrics. Incremented from
-// RunCorrectnessTestWithGbvFallback below. Destructor prints a one-line
-// summary at program exit so operators can see at a glance how often the
-// GBV re-run fired. File-static + destructor-print keeps the reporting
-// self-contained here without touching main.cpp or the header.
-namespace {
-struct D3D12DebugLayerFallbackCounters
-{
-    std::atomic<int> totalRuns{0};
-    std::atomic<int> fallbackFires{0};
-
-    ~D3D12DebugLayerFallbackCounters()
-    {
-        const int runs = totalRuns.load();
-        if (runs > 0)
-        {
-            // std::endl to force flush during static destruction — some
-            // stdout paths swallow buffered output when the runtime is
-            // tearing down.
-            std::cout << "\n[D3D12DebugLayer] " << fallbackFires.load()
-                      << " of " << runs
-                      << " test(s) re-ran with --d3d-dbg for GBV diagnostics."
-                      << std::endl;
-        }
-    }
-};
-D3D12DebugLayerFallbackCounters g_d3d12Metrics;
-} // anonymous namespace
-
 // Test runners
 
 // Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
@@ -234,97 +180,6 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine
         << "  (stdout already printed above as [DEMO OUT])";
-}
-
-// Two-phase D3D12DebugLayer runner (per DirectStorage team spec, 2026-07-07):
-// GBV validation is expensive, and most tests pass reference comparison
-// without needing any GBV diagnostic output. This helper skips GBV for the
-// passing majority and only re-runs with --d3d-dbg when the reference
-// comparison actually fails, keeping GBV output focused on genuinely
-// failing tests.
-//
-//   Phase 1: spawn demo with just [--chk-gpu] (reference comparison only).
-//   If phase 1 exits 0 -> test passes, we're done. GBV cost skipped.
-//   If phase 1 fails  -> spawn demo again with [--chk-gpu, --d3d-dbg] and
-//                        append its output to the same log block with a
-//                        marker separator. Test verdict stays based on
-//                        phase 1's exit code; phase 2 is diagnostic only.
-//
-// The --force-gbv CLI flag bypasses the gate entirely and always runs
-// with --d3d-dbg (matches pre-gating behavior). Useful when someone wants
-// unconditional GBV output on all tests for a stress run.
-//
-// A file-static counter (g_d3d12Metrics) tracks how often phase 2 fires
-// and prints a one-line summary at program exit — makes it easy to
-// eyeball whether the gate is doing meaningful work.
-static void RunCorrectnessTestWithGbvFallback(const std::string& zstFile)
-{
-    // --force-gbv: skip the gate entirely; behave like the original
-    // RunCorrectnessTest with the full flag set. We don't touch the
-    // g_d3d12Metrics counters in this path so the summary line at exit
-    // only prints when the gate was actually active.
-    if (g_testConfig.forceGbv)
-    {
-        RunCorrectnessTest(zstFile, {"--chk-gpu", "--d3d-dbg"});
-        return;
-    }
-
-    ++g_d3d12Metrics.totalRuns;
-
-    // Phase 1: reference comparison only (no --d3d-dbg).
-    auto phase1Args = BuildCorrectnessArgs(zstFile, {"--chk-gpu"});
-    auto phase1 = RunDemo(g_testConfig.demoPath, phase1Args, g_testConfig.timeoutSeconds);
-    WriteToLogFile(zstFile, phase1);
-
-    std::cout << "[DEMO CMD] " << phase1.commandLine << "\n";
-    if (!phase1.stdOut.empty())
-    {
-        std::cout << "[DEMO OUT] " << phase1.stdOut << "\n";
-    }
-
-    // If phase 1 passed cleanly, we're done — skip GBV, test passes.
-    const bool phase1Ok = !phase1.timedOut
-                          && phase1.launchError.empty()
-                          && phase1.exitCode == 0;
-    if (phase1Ok)
-    {
-        return;
-    }
-
-    // Phase 2: re-run with --d3d-dbg for GBV diagnostic. Log gets the
-    // marker separator + phase-2 output appended to the same test's block.
-    ++g_d3d12Metrics.fallbackFires;
-    std::cout << "[D3D12DebugLayer PHASE 2] Phase 1 (reference comparison) failed. "
-              << "Re-running with --d3d-dbg for GBV diagnostic output.\n";
-
-    auto phase2Args = BuildCorrectnessArgs(zstFile, {"--chk-gpu", "--d3d-dbg"});
-    auto phase2 = RunDemo(g_testConfig.demoPath, phase2Args, g_testConfig.timeoutSeconds);
-    AppendPhaseTwoToLogFile(zstFile, phase2);
-
-    std::cout << "[DEMO CMD] " << phase2.commandLine << "\n";
-    if (!phase2.stdOut.empty())
-    {
-        std::cout << "[DEMO OUT] " << phase2.stdOut << "\n";
-    }
-
-    // Assert on PHASE 1 exit code — phase 2 is diagnostic only. If phase 2
-    // also failed (which it usually will since it's the same input), the
-    // GBV output is already captured in the log for post-mortem analysis.
-    ASSERT_FALSE(phase1.timedOut)
-        << "Phase 1 (reference comparison) timed out after "
-        << g_testConfig.timeoutSeconds << " seconds.\n"
-        << "Command: " << phase1.commandLine;
-
-    ASSERT_TRUE(phase1.launchError.empty())
-        << "Failed to launch demo (phase 1): " << phase1.launchError << "\n"
-        << "Command: " << phase1.commandLine;
-
-    ASSERT_EQ(phase1.exitCode, 0)
-        << "Phase 1 (reference comparison) returned non-zero exit code: "
-        << phase1.exitCode << "\n"
-        << "Command: " << phase1.commandLine
-        << "\n  (phase 2 with --d3d-dbg was re-run — its GBV output is "
-        << "in the log above under the PHASE 2 marker)";
 }
 
 // Run a performance scenario. Spawns zstdgpu_demo.exe with profiling flags and requests CSV output. Uses EXPECT (not ASSERT) to verify the demo executed successfully and produced CSV output.
@@ -396,7 +251,7 @@ TEST_P(ZstdGpuDemoTests, SimulationCheck)
 
 TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
 {
-    RunCorrectnessTestWithGbvFallback(GetParam());
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg"});
 }
 
 TEST_P(ZstdGpuDemoTests, ExternalMemory)
