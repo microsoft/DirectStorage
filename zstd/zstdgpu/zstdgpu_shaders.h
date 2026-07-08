@@ -395,6 +395,7 @@ static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) window
         // 2^64-1 bytes (16 EB)."
         windowSize = uncompSize;
     }
+    ZSTDGPU_ASSERT(windowSize <= (1ull << kzstdgpu_SeqOffset_Encoded_BitBase) - 1ull);
 }
 
 static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_FrameInfo) outFrameInfo,
@@ -3187,129 +3188,10 @@ static void zstdgpu_SequenceOffsets_Init(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
     //  - we initialize offset3 to "final" (resulting offset after executing all sequences) offset3 from previous block
     //
     // but we apply special encoding, so they could be either replaced by "non-repeat" offsets or used multiple times
-    // with "-1 byte" operation (when llen == 0 and "repeat" offset is 3), see `zstdgpu_SequenceOffsets_Update2`
+    // with "-1 byte" operation (when llen == 0 and "repeat" offset is 3), see `zstdgpu_UpdatePreviousAndRecomputeIncoming`
     offset1 = zstdgpu_EncodeSeqRepeatOffset(1);
     offset2 = zstdgpu_EncodeSeqRepeatOffset(2);
     offset3 = zstdgpu_EncodeSeqRepeatOffset(3);
-}
-
-static uint32_t zstdgpu_SequenceOffsets_Update(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                               uint32_t offset,
-                                               uint32_t llen)
-{
-    uint32_t actualOffset = offset;
-    if (offset > 3u)
-    {
-        offset3 = offset2;
-        offset2 = offset1;
-        offset1 = offset;
-    }
-    else
-    {
-        if (llen != 0)
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset1;
-                //offset3 = offset3
-                //offset2 = offset2
-                //offset1 = actualOffset1
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-        else
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                if (offset1 > 3u)
-                {
-                    // case 1: if we have actual offset (bit 31 is 0) -- we subtract a byte
-                    // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-                    //         which depending on previous block. We keep subtracting bytes
-                    actualOffset = offset1 - 1u;
-                }
-                else if (offset1 > 0) // we don't have valid offset, but we have to subtract one byte, so we re-encode "repeat offset"
-                {
-                    // in the encoding
-                    //      - we set offs[31] bit to 1 to mark this uint32_t as "encoded"
-                    //      - we set offs[30:29] to the "repeated offset"
-                    //      - we set all other bits to 1, so it behaves as -1 (which is a starting bit)
-                    actualOffset = zstdgpu_EncodeSeqRepeatOffset(offset1);
-                }
-                else
-                {
-                    // offset must not be zero
-                    ZSTDGPU_BREAK();
-                }
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-    }
-    return actualOffset;
-}
-
-static uint32_t zstdgpu_SequenceOffsets_Update2(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                                uint32_t offset,
-                                                uint32_t llen)
-{
-    uint32_t encodedOffset = offset;
-    if (offset <= 3u)
-    {
-        offset += llen == 0u ? 1u : 0u;
-#if 0
-        if (offset == 4u)
-        {
-            // case 1: if we have an actual offset (bit 31 is 0) -- we subtract a byte
-            // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-            //         which depending on previous block. We keep subtracting bytes
-            encodedOffset = offset1 - 1u;
-        }
-        else
-        {
-            encodedOffset = (offset == 3u) ? offset3 : ((offset == 2u) ? offset2 : offset1);
-        }
-#else
-        encodedOffset = (offset < 3u) ? (offset < 2u ? offset1 : offset2) : (offset < 4u ? offset3 : (offset1 - 1u));
-#endif
-    }
-
-    offset3 = offset >= 3u ? offset2 : offset3;
-    offset2 = offset >= 2u ? offset1 : offset2;
-    offset1 = encodedOffset;
-    return encodedOffset;
 }
 
 static zstdgpu_SeqStreamInfo zstdgpu_LoadSeqStreamInfo(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt, uint32_t seqStreamIdx)
@@ -3372,18 +3254,20 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
 
     ZSTDGPU_ASSERT(symbolLLen < 36);
     ZSTDGPU_ASSERT(symbolMLen < 53);
+    ZSTDGPU_ASSERT(symbolOffs <= (kzstdgpu_SeqOffset_Encoded_BitBase - 1));
+    const uint32_t symbolOffs_Clamped = zstdgpu_MinU32(symbolOffs, kzstdgpu_SeqOffset_Encoded_BitBase - 1);
 
     const uint32_t llenInfo = SEQ_LITERAL_LENGTH_EXTRA_BITS_AND_BASELINES[symbolLLen];
     const uint32_t mlenInfo = SEQ_MATCH_LENGTH_EXTRA_BITS_AND_BASELINES[symbolMLen];
     const uint32_t bitcntLLen = llenInfo & 31;
-    const uint32_t bitcntOffs = symbolOffs;
+    const uint32_t bitcntOffs = symbolOffs_Clamped;
     const uint32_t bitcntMLen = mlenInfo & 31;
 
     const uint32_t bitsOffs = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntOffs);
     const uint32_t bitsMLen = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntMLen);
     const uint32_t bitsLLen = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntLLen);
 
-    outOffs = (1u << symbolOffs) + bitsOffs;
+    outOffs = (1u << symbolOffs_Clamped) + bitsOffs;
     outMLen = (mlenInfo >> 5) + bitsMLen;
     outLLen = (llenInfo >> 5) + bitsLLen;
 }
@@ -3490,7 +3374,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
                 zstdgpu_FseElem_Symbol(fseElemMLen),
                 llen, offs, mlen
             );
-            offs = zstdgpu_SequenceOffsets_Update2(offset1, offset2, offset3, offs, llen);
+            offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
             // TODO: output totalSize per iteration to automatically compute prefix
             totalSize += llen + mlen;
@@ -3639,7 +3523,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
             zstdgpu_FseElem_Symbol(packedFseElemOffs),
             zstdgpu_FseElem_Symbol(packedFseElemMLen),
             llen, offs, mlen);
-        offs = zstdgpu_SequenceOffsets_Update2(offset1, offset2, offset3, offs, llen);
+        offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
         /*totalSize += llen + mlen;*/
         totalMLen += mlen;
@@ -3788,7 +3672,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
                     zstdgpu_FseElem_Symbol(fseElemMLen),
                     llen, offs, mlen
                 );
-                offs = zstdgpu_SequenceOffsets_Update2(offset1, offset2, offset3, offs, llen);
+                offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
                 totalMLen += mlen;
 

@@ -512,129 +512,6 @@ void zstdgpu_ReferenceStore_Report_CompressedSequences(const void *base, uint32_
     GZstd.CompressedBlocks[cmpBlockId].seqStreamIndex = i;
 }
 
-__pragma(warning(push))
-__pragma(warning(disable : 4505))
-static uint32_t zstdgpu_SequenceOffsets_Update(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                               uint32_t offset,
-                                               uint32_t llen)
-{
-    uint32_t actualOffset = offset;
-    if (offset > 3u)
-    {
-        offset3 = offset2;
-        offset2 = offset1;
-        offset1 = offset;
-    }
-    else
-    {
-        if (llen != 0)
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset1;
-                //offset3 = offset3
-                //offset2 = offset2
-                //offset1 = actualOffset1
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-        else
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                if (offset1 > 3u)
-                {
-                    // case 1: if we have actual offset (bit 31 is 0) -- we subtract a byte
-                    // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-                    //         which depending on previous block. We keep subtracting bytes
-                    actualOffset = offset1 - 1u;
-                }
-                else if (offset1 > 0) // we don't have valid offset, but we have to subtract one byte, so we re-encode "repeat offset"
-                {
-                    // in the encoding
-                    //      - we set offs[31] bit to 1 to mark this uint32_t as "encoded"
-                    //      - we set offs[30:29] to the "repeated offset"
-                    //      - we set all other bits to 1, so it behaves as -1 (which is a starting bit)
-                    actualOffset = zstdgpu_EncodeSeqRepeatOffset(offset1);
-                }
-                else
-                {
-                    // offset must not be zero
-                    ZSTDGPU_BREAK();
-                }
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-    }
-    return actualOffset;
-}
-
-__pragma(warning(pop))
-
-static uint32_t zstdgpu_SequenceOffsets_Update2(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                                uint32_t offset,
-                                                uint32_t llen)
-{
-    uint32_t encodedOffset = offset;
-    if (offset <= 3u)
-    {
-        offset += llen == 0u ? 1u : 0u;
-#if 0
-        if (offset == 4u)
-        {
-            // case 1: if we have an actual offset (bit 31 is 0) -- we subtract a byte
-            // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-            //         which depending on previous block. We keep subtracting bytes
-            encodedOffset = offset1 - 1u;
-        }
-        else
-        {
-            encodedOffset = (offset == 3u) ? offset3 : ((offset == 2u) ? offset2 : offset1);
-        }
-#else
-        encodedOffset = (offset < 3u) ? (offset < 2u ? offset1 : offset2) : (offset < 4u ? offset3 : (offset1 - 1u));
-#endif
-    }
-
-    offset3 = offset >= 3u ? offset2 : offset3;
-    offset2 = offset >= 2u ? offset1 : offset2;
-    offset1 = encodedOffset;
-    return encodedOffset;
-}
-
 static uint32_t GResolvedOffsetResetFrame = 0;
 
 static uint32_t GRecentOffset1 = 0u; // initialize to "invalid" offset that can't happen
@@ -703,7 +580,7 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
         GZstd.DecompressedSequenceOffs[seqOffs + seqId] = offs;
 
 #if ENABLE_OFFSET_PROPAGATION
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_SequenceOffsets_Update2(recent1, recent2, recent3, offs, llen);
+        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
 #endif
     }
     // NOTE(pamartis): accumulated match length are used to update the uncompressed size of compressed block
