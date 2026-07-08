@@ -168,16 +168,16 @@ void zstdgpu_ReferenceStore_Report_Block(const void *base, uint32_t size, ZSTDGP
 
 void zstdgpu_ReferenceStore_Report_RawLiteral(const void *base, uint32_t size)
 {
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeRawLitOffset(izstdgpu_ReferenceStore_PtrToOffs(base));
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = size;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeRawLitTypeIntoLitSize(size);
     GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = ~0u;
     zstdgpu_AppendLastBlockSize(size);
 }
 
 void zstdgpu_ReferenceStore_Report_RleLiteral(const void *base, uint32_t size)
 {
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeRleLitOffset(*(uint8_t *)base);
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = size;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = *(uint8_t *)base;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeRleLitTypeIntoLitSize(size);
     GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = ~0u;
     zstdgpu_AppendLastBlockSize(size);
 }
@@ -188,8 +188,8 @@ void zstdgpu_ReferenceStore_Report_CompressedLiteral(const void* base, uint32_t 
     if (GCompressedBlockLiteralStreamIndex == 0)
     {
         GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = hufCompressedLiteralIndex;
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeCmpLitOffset(GHufDecompressedLiteralOffset);
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = GHufDecompressedLiteralSize;
+        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = GHufDecompressedLiteralOffset;
+        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeCmpLitTypeIntoLitSize(GHufDecompressedLiteralSize);
     }
 
     GZstd.LitRefs[hufCompressedLiteralIndex].src.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
@@ -261,8 +261,8 @@ void zstdgpu_ReferenceStore_Report_DecompressedLiteral(const uint8_t *literal, u
     }
 
     memcpy(GZstd.DecompressedLiterals + GHufDecompressedLiteralDataOffset, literal, size);
-    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs == zstdgpu_EncodeCmpLitOffset(GHufDecompressedLiteralDataOffset));
-    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size == size);
+    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs == GHufDecompressedLiteralDataOffset);
+    ZSTDGPU_ASSERT(zstdgpu_DecodeLitSize(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size) == size);
     GHufDecompressedLiteralDataOffset += size;
 }
 
@@ -1023,7 +1023,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                 //ZSTDGPU_ASSERT(refCompressedBlockData.literal.offs == refHufLiteral[0].dstOffs);
                 //ZSTDGPU_ASSERT(tstCmpBlocks[i].literal.offs == tstHufLiteral[0].dstOffs);
 
-                if (refCmpBlocks[i].literal.size == refHufLiteral[0].dst.size)
+                if (zstdgpu_DecodeLitSize(refCmpBlocks[i].literal.size) == refHufLiteral[0].dst.size)
                 {
                     if (refHufLiteral[0].dst.size != tstHufLiteral[0].dst.size)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1040,9 +1040,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                                               + tstHufLiteral[2].dst.size
                                               + tstHufLiteral[3].dst.size;
 
-                    if (refCmpBlocks[i].literal.size != refDstSize)
+                    if (zstdgpu_DecodeLitSize(refCmpBlocks[i].literal.size) != refDstSize)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
-                    if (tstCmpBlocks[i].literal.size != tstDstSize)
+                    if (zstdgpu_DecodeLitSize(tstCmpBlocks[i].literal.size) != tstDstSize)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
                     if (refCmpBlocks[i].literal.size != tstCmpBlocks[i].literal.size)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1158,14 +1158,14 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedLitera
         const zstdgpu_OffsetAndSize *refLit = &refData->CompressedBlocks[i].literal;
         const zstdgpu_OffsetAndSize *tstLit = &tstData->CompressedBlocks[i].literal;
 
-        const uint32_t refLitT = zstdgpu_DecodeLitOffsetType(refLit->offs);
-        const uint32_t tstLitT = zstdgpu_DecodeLitOffsetType(tstLit->offs);
+        const uint32_t refLitT = zstdgpu_DecodeLitType(refLit->size);
+        const uint32_t tstLitT = zstdgpu_DecodeLitType(tstLit->size);
 
         if (refLitT != tstLitT)
             return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
         // NOTE(pamartis): if the type of the offset not "compressed literal", then it's a non-compressed literal stored in the source data, so offsets are identical
-        if (zstdgpu_CheckLitOffsetTypeCmp(refLitT) == 0)
+        if (zstdgpu_IsLitTypeCmp(refLitT) == 0)
         {
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != izstdgpu_ReferenceStore_Validate_OffsetAndSize(refLit, tstLit))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1176,9 +1176,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedLitera
             if (refLit->size != tstLit->size)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            const uint8_t *refDecLit = refData->DecompressedLiterals + zstdgpu_DecodeLitOffset(refLit->offs);
-            const uint8_t *tstDecLit = tstData->DecompressedLiterals + zstdgpu_DecodeLitOffset(tstLit->offs);
-            if (0 != memcmp(refDecLit, tstDecLit, refLit->size))
+            const uint8_t *refDecLit = refData->DecompressedLiterals + refLit->offs;
+            const uint8_t *tstDecLit = tstData->DecompressedLiterals + tstLit->offs;
+            if (0 != memcmp(refDecLit, tstDecLit, zstdgpu_DecodeLitSize(refLit->size)))
             {
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }

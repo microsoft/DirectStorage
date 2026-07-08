@@ -706,49 +706,54 @@ static inline uint32_t zstdgpu_Decode31BitLookbackFlags(uint32_t x)
     return x & 0x80000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeRawLitOffset(uint32_t x)
+/**
+ * NOTE(pamartis): The 2-bit literal type (Raw/Rle/Cmp) is packed into the top 2 bits of the literal
+ * `size` field because it is within `kzstdgpu_MaxCount_LiteralBytes` (128 KiB) range, so the
+ * top 2 bits are always available.
+ */
+static inline uint32_t zstdgpu_EncodeRawLitTypeIntoLitSize(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0x40000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeRleLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_EncodeRleLitTypeIntoLitSize(uint32_t x)
 {
-    ZSTDGPU_ASSERT(x <= 0x000000ffu);
+    ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0x80000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeCmpLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_EncodeCmpLitTypeIntoLitSize(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0xc0000000u;
 }
 
-static inline uint32_t zstdgpu_DecodeLitOffsetType(uint32_t x)
+static inline uint32_t zstdgpu_DecodeLitType(uint32_t x)
 {
     const uint32_t type = x & 0xc0000000u;
     ZSTDGPU_ASSERT(type != 0);
     return type;
 }
 
-static inline uint32_t zstdgpu_DecodeLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_DecodeLitSize(uint32_t x)
 {
-    const uint32_t offset = x & ~0xc0000000u;
+    const uint32_t size = x & ~0xc0000000u;
     ZSTDGPU_ASSERT((x & 0xc0000000u) != 0);
-    return offset;
+    return size;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeRaw(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeRaw(uint32_t x)
 {
     return x == 0x40000000u ? 1u : 0u;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeRle(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeRle(uint32_t x)
 {
     return x == 0x80000000u ? 1u : 0u;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeCmp(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeCmp(uint32_t x)
 {
     return x == 0xc0000000u ? 1u : 0u;
 }

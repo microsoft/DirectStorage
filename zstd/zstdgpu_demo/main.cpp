@@ -434,7 +434,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             // we need to setup it properly
             for (uint32_t i = 0; i < cpuRes.Counters->Blocks_CMP; ++i)
             {
-                const uint32_t literalSize = cpuRes.CompressedBlocks[i].literal.size;
+                const uint32_t literalSize = zstdgpu_DecodeLitSize(cpuRes.CompressedBlocks[i].literal.size);
                 const uint32_t dstBlockIndex = cpuRes.GlobalBlockIndexPerCmpBlock[i];
                 cpuRes.BlockSizePrefix[dstBlockIndex] = literalSize;
             }

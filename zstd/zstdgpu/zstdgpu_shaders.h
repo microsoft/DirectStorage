@@ -1054,15 +1054,14 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         if (literalBlockType == 0)
         {
             outBlockData.literal.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            outBlockData.literal.offs = zstdgpu_EncodeRawLitOffset(outBlockData.literal.offs);
+            outBlockData.literal.size = zstdgpu_EncodeRawLitTypeIntoLitSize(regeneratedSize);
             zstdgpu_Forward_BitBuffer_Skip(buffer, regeneratedSize);
         }
         else
         {
             outBlockData.literal.offs = zstdgpu_Forward_BitBuffer_Get(buffer, 8);
-            outBlockData.literal.offs = zstdgpu_EncodeRleLitOffset(outBlockData.literal.offs);
+            outBlockData.literal.size = zstdgpu_EncodeRleLitTypeIntoLitSize(regeneratedSize);
         }
-        outBlockData.literal.size = regeneratedSize;
 
         const uint32_t rawStreamCountPerWave = WaveActiveCountBits(literalBlockType == 0);
         const uint32_t rleStreamCountPerWave = WaveActiveCountBits(literalBlockType == 1);
@@ -1128,8 +1127,8 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         }
         const uint32_t regeneratedOffset = WaveReadLaneFirst(regeneratedOffsetPerWave) + WavePrefixSum(regeneratedSize);
 
-        outBlockData.literal.offs = zstdgpu_EncodeCmpLitOffset(regeneratedOffset);
-        outBlockData.literal.size = regeneratedSize;
+        outBlockData.literal.offs = regeneratedOffset;
+        outBlockData.literal.size = zstdgpu_EncodeCmpLitTypeIntoLitSize(regeneratedSize);
         outBlockData.litStreamIndex = hufLitStreamStart;
 
         //  Note: `Compressed_Size` includes the size of the Huffman Tree description when it is present.
@@ -1314,7 +1313,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     //         of the remaining portion of literals not copied via sequence execution.
     const uint32_t blockIndexInFrame = srt.inGlobalBlockIndexPerCmpBlock[threadId];
 
-    srt.inoutBlockSizePrefix[blockIndexInFrame] = outBlockData.literal.size;
+    srt.inoutBlockSizePrefix[blockIndexInFrame] = zstdgpu_DecodeLitSize(outBlockData.literal.size);
 
     // A "HufLit" is a literal block that carries a Huffman Table (literalBlockType == 2, i.e. FullTree).
     // Its hufLitId (compacted, in cmpLit-encounter order) keys the per-HT literal stream range.
@@ -4139,19 +4138,19 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
             }
         }
 
-        const uint32_t litType = WaveReadLaneFirst(zstdgpu_DecodeLitOffsetType(literal.offs));
-        const uint32_t litOffs = zstdgpu_DecodeLitOffset(literal.offs);
-        const uint32_t litSize = literal.size;
+        const uint32_t litType = WaveReadLaneFirst(zstdgpu_DecodeLitType(literal.size));
+        const uint32_t litSize = zstdgpu_DecodeLitSize(literal.size);
+        const uint32_t litOffs = literal.offs;
 
-        if (zstdgpu_CheckLitOffsetTypeCmp(litType))
+        if (zstdgpu_IsLitTypeCmp(litType))
         {
             zstdgpu_ExecuteSequences_Lit(srt, srt.inDecompressedLiterals, litOffs, litOffs + litSize, blockByteBeg, blockByteEnd, seqOfs, seqEnd);
         }
-        else if (zstdgpu_CheckLitOffsetTypeRaw(litType))
+        else if (zstdgpu_IsLitTypeRaw(litType))
         {
             zstdgpu_ExecuteSequences_Lit(srt, srt.inCompressedData, litOffs, litOffs + litSize, blockByteBeg, blockByteEnd, seqOfs, seqEnd);
         }
-        else if (zstdgpu_CheckLitOffsetTypeRle(litType))
+        else if (zstdgpu_IsLitTypeRle(litType))
         {
             // NOTE(pamartis): RLE literals contain actual symbol instead of offset, so we set the offsets to zero.
             const uint32_t symbol = litOffs;
