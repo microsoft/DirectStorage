@@ -168,16 +168,16 @@ void zstdgpu_ReferenceStore_Report_Block(const void *base, uint32_t size, ZSTDGP
 
 void zstdgpu_ReferenceStore_Report_RawLiteral(const void *base, uint32_t size)
 {
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeRawLitOffset(izstdgpu_ReferenceStore_PtrToOffs(base));
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = size;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeRawLitTypeIntoLitSize(size);
     GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = ~0u;
     zstdgpu_AppendLastBlockSize(size);
 }
 
 void zstdgpu_ReferenceStore_Report_RleLiteral(const void *base, uint32_t size)
 {
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeRleLitOffset(*(uint8_t *)base);
-    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = size;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = *(uint8_t *)base;
+    GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeRleLitTypeIntoLitSize(size);
     GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = ~0u;
     zstdgpu_AppendLastBlockSize(size);
 }
@@ -188,8 +188,8 @@ void zstdgpu_ReferenceStore_Report_CompressedLiteral(const void* base, uint32_t 
     if (GCompressedBlockLiteralStreamIndex == 0)
     {
         GZstd.CompressedBlocks[GBlockIndexCMP - 1].litStreamIndex = hufCompressedLiteralIndex;
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = zstdgpu_EncodeCmpLitOffset(GHufDecompressedLiteralOffset);
-        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = GHufDecompressedLiteralSize;
+        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs = GHufDecompressedLiteralOffset;
+        GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size = zstdgpu_EncodeCmpLitTypeIntoLitSize(GHufDecompressedLiteralSize);
     }
 
     GZstd.LitRefs[hufCompressedLiteralIndex].src.offs = izstdgpu_ReferenceStore_PtrToOffs(base);
@@ -261,8 +261,8 @@ void zstdgpu_ReferenceStore_Report_DecompressedLiteral(const uint8_t *literal, u
     }
 
     memcpy(GZstd.DecompressedLiterals + GHufDecompressedLiteralDataOffset, literal, size);
-    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs == zstdgpu_EncodeCmpLitOffset(GHufDecompressedLiteralDataOffset));
-    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size == size);
+    ZSTDGPU_ASSERT(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.offs == GHufDecompressedLiteralDataOffset);
+    ZSTDGPU_ASSERT(zstdgpu_DecodeLitSize(GZstd.CompressedBlocks[GBlockIndexCMP - 1].literal.size) == size);
     GHufDecompressedLiteralDataOffset += size;
 }
 
@@ -512,129 +512,6 @@ void zstdgpu_ReferenceStore_Report_CompressedSequences(const void *base, uint32_
     GZstd.CompressedBlocks[cmpBlockId].seqStreamIndex = i;
 }
 
-__pragma(warning(push))
-__pragma(warning(disable : 4505))
-static uint32_t zstdgpu_SequenceOffsets_Update(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                               ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                               uint32_t offset,
-                                               uint32_t llen)
-{
-    uint32_t actualOffset = offset;
-    if (offset > 3u)
-    {
-        offset3 = offset2;
-        offset2 = offset1;
-        offset1 = offset;
-    }
-    else
-    {
-        if (llen != 0)
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset1;
-                //offset3 = offset3
-                //offset2 = offset2
-                //offset1 = actualOffset1
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-        else
-        {
-            if (offset == 1u)
-            {
-                actualOffset = offset2;
-                //offset3 = offset3
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else if (offset == 2u)
-            {
-                actualOffset = offset3;
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-            else
-            {
-                if (offset1 > 3u)
-                {
-                    // case 1: if we have actual offset (bit 31 is 0) -- we subtract a byte
-                    // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-                    //         which depending on previous block. We keep subtracting bytes
-                    actualOffset = offset1 - 1u;
-                }
-                else if (offset1 > 0) // we don't have valid offset, but we have to subtract one byte, so we re-encode "repeat offset"
-                {
-                    // in the encoding
-                    //      - we set offs[31] bit to 1 to mark this uint32_t as "encoded"
-                    //      - we set offs[30:29] to the "repeated offset"
-                    //      - we set all other bits to 1, so it behaves as -1 (which is a starting bit)
-                    actualOffset = zstdgpu_EncodeSeqRepeatOffset(offset1);
-                }
-                else
-                {
-                    // offset must not be zero
-                    ZSTDGPU_BREAK();
-                }
-                offset3 = offset2;
-                offset2 = offset1;
-                offset1 = actualOffset;
-            }
-        }
-    }
-    return actualOffset;
-}
-
-__pragma(warning(pop))
-
-static uint32_t zstdgpu_SequenceOffsets_Update2(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
-                                                ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
-                                                uint32_t offset,
-                                                uint32_t llen)
-{
-    uint32_t encodedOffset = offset;
-    if (offset <= 3u)
-    {
-        offset += llen == 0u ? 1u : 0u;
-#if 0
-        if (offset == 4u)
-        {
-            // case 1: if we have an actual offset (bit 31 is 0) -- we subtract a byte
-            // case 2: if the offset is "repeat offset" (bit 31 is 1, bits 29 and 30 encode previous "repeat offset")
-            //         which depending on previous block. We keep subtracting bytes
-            encodedOffset = offset1 - 1u;
-        }
-        else
-        {
-            encodedOffset = (offset == 3u) ? offset3 : ((offset == 2u) ? offset2 : offset1);
-        }
-#else
-        encodedOffset = (offset < 3u) ? (offset < 2u ? offset1 : offset2) : (offset < 4u ? offset3 : (offset1 - 1u));
-#endif
-    }
-
-    offset3 = offset >= 3u ? offset2 : offset3;
-    offset2 = offset >= 2u ? offset1 : offset2;
-    offset1 = encodedOffset;
-    return encodedOffset;
-}
-
 static uint32_t GResolvedOffsetResetFrame = 0;
 
 static uint32_t GRecentOffset1 = 0u; // initialize to "invalid" offset that can't happen
@@ -703,7 +580,7 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
         GZstd.DecompressedSequenceOffs[seqOffs + seqId] = offs;
 
 #if ENABLE_OFFSET_PROPAGATION
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_SequenceOffsets_Update2(recent1, recent2, recent3, offs, llen);
+        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
 #endif
     }
     // NOTE(pamartis): accumulated match length are used to update the uncompressed size of compressed block
@@ -1023,7 +900,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                 //ZSTDGPU_ASSERT(refCompressedBlockData.literal.offs == refHufLiteral[0].dstOffs);
                 //ZSTDGPU_ASSERT(tstCmpBlocks[i].literal.offs == tstHufLiteral[0].dstOffs);
 
-                if (refCmpBlocks[i].literal.size == refHufLiteral[0].dst.size)
+                if (zstdgpu_DecodeLitSize(refCmpBlocks[i].literal.size) == refHufLiteral[0].dst.size)
                 {
                     if (refHufLiteral[0].dst.size != tstHufLiteral[0].dst.size)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1040,9 +917,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_CompressedBlocksDa
                                               + tstHufLiteral[2].dst.size
                                               + tstHufLiteral[3].dst.size;
 
-                    if (refCmpBlocks[i].literal.size != refDstSize)
+                    if (zstdgpu_DecodeLitSize(refCmpBlocks[i].literal.size) != refDstSize)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
-                    if (tstCmpBlocks[i].literal.size != tstDstSize)
+                    if (zstdgpu_DecodeLitSize(tstCmpBlocks[i].literal.size) != tstDstSize)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
                     if (refCmpBlocks[i].literal.size != tstCmpBlocks[i].literal.size)
                         return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1158,14 +1035,14 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedLitera
         const zstdgpu_OffsetAndSize *refLit = &refData->CompressedBlocks[i].literal;
         const zstdgpu_OffsetAndSize *tstLit = &tstData->CompressedBlocks[i].literal;
 
-        const uint32_t refLitT = zstdgpu_DecodeLitOffsetType(refLit->offs);
-        const uint32_t tstLitT = zstdgpu_DecodeLitOffsetType(tstLit->offs);
+        const uint32_t refLitT = zstdgpu_DecodeLitType(refLit->size);
+        const uint32_t tstLitT = zstdgpu_DecodeLitType(tstLit->size);
 
         if (refLitT != tstLitT)
             return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
         // NOTE(pamartis): if the type of the offset not "compressed literal", then it's a non-compressed literal stored in the source data, so offsets are identical
-        if (zstdgpu_CheckLitOffsetTypeCmp(refLitT) == 0)
+        if (zstdgpu_IsLitTypeCmp(refLitT) == 0)
         {
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != izstdgpu_ReferenceStore_Validate_OffsetAndSize(refLit, tstLit))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1176,9 +1053,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedLitera
             if (refLit->size != tstLit->size)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            const uint8_t *refDecLit = refData->DecompressedLiterals + zstdgpu_DecodeLitOffset(refLit->offs);
-            const uint8_t *tstDecLit = tstData->DecompressedLiterals + zstdgpu_DecodeLitOffset(tstLit->offs);
-            if (0 != memcmp(refDecLit, tstDecLit, refLit->size))
+            const uint8_t *refDecLit = refData->DecompressedLiterals + refLit->offs;
+            const uint8_t *tstDecLit = tstData->DecompressedLiterals + tstLit->offs;
+            if (0 != memcmp(refDecLit, tstDecLit, zstdgpu_DecodeLitSize(refLit->size)))
             {
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }

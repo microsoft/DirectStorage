@@ -225,14 +225,14 @@ ZSTDGPU_API uint32_t zstdgpu_IsAnyStageReadbackRequired(zstdgpu_PerRequestContex
 /**
  *  @brief      Returns memory requirement for each heap type per submission stage for a given `zstdgpu_PerRequestContext`
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
+ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByteCount, uint64_t *outUploadHeapByteCount, uint64_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
 /**
  *  @brief      Returns memory requirement for each heap type for all submission stages for a given `zstdgpu_PerRequestContext`
  *
  *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_GetAllStageGpuMemoryRequirement(uint32_t *outDefaultHeapByteCount, uint32_t *outUploadHeapByteCount, uint32_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext);
+ZSTDGPU_API zstdgpu_Status zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaultHeapByteCount, uint64_t *outUploadHeapByteCount, uint64_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
  *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with externally
@@ -247,11 +247,11 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
                                                             uint32_t stageIndex,
                                                             struct ID3D12GraphicsCommandList *cmdList,
                                                             struct ID3D12Heap *defaultHeap,
-                                                            uint32_t defaultHeapOffsetInBytes,
+                                                            uint64_t defaultHeapOffsetInBytes,
                                                             struct ID3D12Heap *uploadHeap,
-                                                            uint32_t uploadHeapOffsetInBytes,
+                                                            uint64_t uploadHeapOffsetInBytes,
                                                             struct ID3D12Heap *readbackHeap,
-                                                            uint32_t readbackHeap_OffsetInBytes,
+                                                            uint64_t readbackHeap_OffsetInBytes,
                                                             struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                             uint32_t shaderVisibileHeapOffsetInDescriptors);
 
@@ -266,11 +266,11 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
                                                                      struct ID3D12GraphicsCommandList *cmdList,
                                                                      struct ID3D12Heap *defaultHeap,
-                                                                     uint32_t defaultHeapOffsetInBytes,
+                                                                     uint64_t defaultHeapOffsetInBytes,
                                                                      struct ID3D12Heap *uploadHeap,
-                                                                     uint32_t uploadHeapOffsetInBytes,
+                                                                     uint64_t uploadHeapOffsetInBytes,
                                                                      struct ID3D12Heap *readbackHeap,
-                                                                     uint32_t readbackHeap_OffsetInBytes,
+                                                                     uint64_t readbackHeap_OffsetInBytes,
                                                                      struct ID3D12DescriptorHeap *shaderVisibleHeap,
                                                                      uint32_t shaderVisibileHeapOffsetInDescriptors);
 

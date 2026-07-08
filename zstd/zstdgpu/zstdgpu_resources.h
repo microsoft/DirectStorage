@@ -160,20 +160,20 @@ typedef struct zstdgpu_ResourceInfo
         ZSTDGPU_ALL_BUFFERS_LIST()
     #undef  ZSTDGPU_BUFFER
 
-    uint32_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
-    uint32_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
-    uint32_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
 
     // declare byte offsets
-    #define ZSTDGPU_BUFFER(type, name) uint32_t name##_gpuOnlyByteOffset;
+    #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpuOnlyByteOffset;
         ZSTDGPU_ALL_BUFFERS_LIST()
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) uint32_t name##_cpu2GpuByteOffset;
+    #define ZSTDGPU_BUFFER(type, name) uint64_t name##_cpu2GpuByteOffset;
         ZSTDGPU_ALL_BUFFERS_LIST_UPLOAD()
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) uint32_t name##_gpu2CpuByteOffset;
+    #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpu2CpuByteOffset;
         ZSTDGPU_ALL_BUFFERS_LIST_READBACK()
     #undef  ZSTDGPU_BUFFER
 } zstdgpu_ResourceInfo;
@@ -223,9 +223,9 @@ typedef struct zstdgpu_ResourceDataGpu
     uint64_t cpu2Gpu_HeapOffset[kzstdgpu_ResourceAllocation_StageCount];
     uint64_t gpu2Cpu_HeapOffset[kzstdgpu_ResourceAllocation_StageCount];
 
-    uint32_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
-    uint32_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
-    uint32_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+    uint64_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
 } zstdgpu_ResourceDataGpu;
 
 #endif /** ZSTDGPU_DISABLE_RESOURCE_DATA_GPU */
@@ -252,7 +252,7 @@ static void zstdgpu_ResourceInfo_InitZero(zstdgpu_ResourceInfo *outInfo)
     #undef  ZSTDGPU_BUFFER
 }
 
-#define ZSTDGPU_ALIGN_DEFAULT(offset) zstdgpu_AlignUp(offset, 0x10000)
+#define ZSTDGPU_ALIGN_DEFAULT(offset) zstdgpu_AlignUp64(offset, 0x10000)
 #define ZSTDGPU_IS_DEFAULT_ALIGNED(offset) (0 == (offset & (0x10000 - 1)))
 
 // initialize the counts, sizes and offsets
@@ -370,21 +370,21 @@ static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo,
 
 static void zstdgpu_ResourceInfo_Stage_0_InitOffsetGpuOnly(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
     outInfo->gpuOnly_ByteCount[0] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_1_InitOffsetGpuOnly(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
     outInfo->gpuOnly_ByteCount[1] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_2_InitOffsetGpuOnly(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
     outInfo->gpuOnly_ByteCount[2] = byteOffset;
 }
@@ -397,21 +397,21 @@ static void zstdgpu_ResourceInfo_Stage_2_InitOffsetGpuOnly(zstdgpu_ResourceInfo 
 
 static void zstdgpu_ResourceInfo_Stage_0_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()
     outInfo->cpu2Gpu_ByteCount[0] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_1_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1()
     outInfo->cpu2Gpu_ByteCount[1] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_2_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2()
     outInfo->cpu2Gpu_ByteCount[2] = byteOffset;
 }
@@ -424,21 +424,21 @@ static void zstdgpu_ResourceInfo_Stage_2_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo 
 
 static void zstdgpu_ResourceInfo_Stage_0_InitOffsetGpu2Cpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()
     outInfo->gpu2Cpu_ByteCount[0] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_1_InitOffsetGpu2Cpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_1()
     outInfo->gpu2Cpu_ByteCount[1] = byteOffset;
 }
 
 static void zstdgpu_ResourceInfo_Stage_2_InitOffsetGpu2Cpu(zstdgpu_ResourceInfo *outInfo)
 {
-    uint32_t byteOffset = 0;
+    uint64_t byteOffset = 0;
     ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
     outInfo->gpu2Cpu_ByteCount[2] = byteOffset;
 }

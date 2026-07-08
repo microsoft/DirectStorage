@@ -453,6 +453,13 @@ static inline uint32_t zstdgpu_AlignUp(uint32_t offset, uint32_t alignment)
     return (offset + alignmentBits) & ~alignmentBits;
 }
 
+static inline uint64_t zstdgpu_AlignUp64(uint64_t offset, uint64_t alignment)
+{
+    ZSTDGPU_ASSERT(0 == (alignment & (alignment - 1)));
+    const uint64_t alignmentBits = alignment - 1;
+    return (offset + alignmentBits) & ~alignmentBits;
+}
+
 #ifdef __hlsl_dx_compiler
 #   define ZSTDGPU_FOR_WORK_ITEMS(workItemId, workItemCount, groupThreadId, groupThreadCount)   \
         for (ZSTDGPU_WARN_DISABLE_DXC(-Wfor-redefinition, uint32_t workItemId = groupThreadId); workItemId < workItemCount; workItemId += groupThreadCount)
@@ -706,55 +713,61 @@ static inline uint32_t zstdgpu_Decode31BitLookbackFlags(uint32_t x)
     return x & 0x80000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeRawLitOffset(uint32_t x)
+/**
+ * NOTE(pamartis): The 2-bit literal type (Raw/Rle/Cmp) is packed into the top 2 bits of the literal
+ * `size` field because it is within `kzstdgpu_MaxCount_LiteralBytes` (128 KiB) range, so the
+ * top 2 bits are always available.
+ */
+static inline uint32_t zstdgpu_EncodeRawLitTypeIntoLitSize(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0x40000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeRleLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_EncodeRleLitTypeIntoLitSize(uint32_t x)
 {
-    ZSTDGPU_ASSERT(x <= 0x000000ffu);
+    ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0x80000000u;
 }
 
-static inline uint32_t zstdgpu_EncodeCmpLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_EncodeCmpLitTypeIntoLitSize(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0xc0000000u;
 }
 
-static inline uint32_t zstdgpu_DecodeLitOffsetType(uint32_t x)
+static inline uint32_t zstdgpu_DecodeLitType(uint32_t x)
 {
     const uint32_t type = x & 0xc0000000u;
     ZSTDGPU_ASSERT(type != 0);
     return type;
 }
 
-static inline uint32_t zstdgpu_DecodeLitOffset(uint32_t x)
+static inline uint32_t zstdgpu_DecodeLitSize(uint32_t x)
 {
-    const uint32_t offset = x & ~0xc0000000u;
+    const uint32_t size = x & ~0xc0000000u;
     ZSTDGPU_ASSERT((x & 0xc0000000u) != 0);
-    return offset;
+    return size;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeRaw(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeRaw(uint32_t x)
 {
     return x == 0x40000000u ? 1u : 0u;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeRle(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeRle(uint32_t x)
 {
     return x == 0x80000000u ? 1u : 0u;
 }
 
-static inline uint32_t zstdgpu_CheckLitOffsetTypeCmp(uint32_t x)
+static inline uint32_t zstdgpu_IsLitTypeCmp(uint32_t x)
 {
     return x == 0xc0000000u ? 1u : 0u;
 }
 
 static inline uint32_t zstdgpu_EncodeSeqRepeatOffset(uint32_t x)
 {
+    ZSTDGPU_ASSERT(x >= 1 && x <= 3);
     // NOTE(pamartis):
     //      - we set bit 29 to mark this uint32_t as "encoded"
     //      - we set bits [28:27] to the "repeated offset"
@@ -762,19 +775,32 @@ static inline uint32_t zstdgpu_EncodeSeqRepeatOffset(uint32_t x)
     return (x << 27u) | 0x27ffffffu;
 }
 
+
+static const uint32_t kzstdgpu_SeqOffset_RepType_BitBase = 27u;
+static const uint32_t kzstdgpu_SeqOffset_RepType_BitMask = 3u << kzstdgpu_SeqOffset_RepType_BitBase;
+
+static const uint32_t kzstdgpu_SeqOffset_Encoded_BitBase = 29u;
+static const uint32_t kzstdgpu_SeqOffset_Encoded_BitMask = 1u << kzstdgpu_SeqOffset_Encoded_BitBase;
+
+static const uint32_t kzstdgpu_SeqOffset_Lookback_BitBase = 30u;
+static const uint32_t kzstdgpu_SeqOffset_Lookback_BitMask = 3u << kzstdgpu_SeqOffset_Lookback_BitBase;
+
+
+static inline uint32_t zstdgpu_DecodeSeqRepeatOffsetEncoded(uint32_t x)
+{
+    return x & kzstdgpu_SeqOffset_Encoded_BitMask;
+}
+
 static inline uint32_t zstdgpu_DecodeSeqRepeatOffset(uint32_t x)
 {
-    return (x >> 27u) & 3u;
+    ZSTDGPU_ASSERT_MSG(zstdgpu_DecodeSeqRepeatOffsetEncoded(x) > 0, "offset(0x%08x) is NOT REPEAT-encoded while the function expects so.", x);
+    return (x & kzstdgpu_SeqOffset_RepType_BitMask) >> kzstdgpu_SeqOffset_RepType_BitBase;
 }
 
 static inline uint32_t zstdgpu_DecodeSeqRepeatOffsetSubtractedBytes(uint32_t x)
 {
+    ZSTDGPU_ASSERT_MSG(zstdgpu_DecodeSeqRepeatOffsetEncoded(x) > 0, "offset(0x%08x) is NOT REPEAT-encoded while the function expects so.", x);
     return ~(x | 0xf8000000u);
-}
-
-static inline uint32_t zstdgpu_DecodeSeqRepeatOffsetEncoded(uint32_t x)
-{
-    return x & 0x20000000;
 }
 
 static inline uint32_t zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(uint32_t offset, uint32_t prevOffs1, uint32_t prevOffs2, uint32_t prevOffs3)
@@ -783,6 +809,49 @@ static inline uint32_t zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(uint
     const uint32_t cnt = zstdgpu_DecodeSeqRepeatOffsetSubtractedBytes(offset);
     offset = (idx == 3u) ? prevOffs3 : ((idx == 2u) ? prevOffs2 : prevOffs1);
     return offset - cnt;
+}
+
+static inline uint32_t zstdgpu_SubtractByteFromSeqOffset(uint32_t x)
+{
+    // NOTE(pamartis): Because the offset can be either "encoded" or normal, we have to check underflows differently
+    uint32_t bit = zstdgpu_DecodeSeqRepeatOffsetEncoded(x);
+    ZSTDGPU_ASSERT((0 == bit && x >= 4 && x < kzstdgpu_SeqOffset_Encoded_BitMask) || (0 != bit && zstdgpu_DecodeSeqRepeatOffsetSubtractedBytes(x) < ((1u << kzstdgpu_SeqOffset_RepType_BitBase) - 1)));
+
+    // case 1: if we have an actual offset (bit 29 is 0) -- we subtract a byte
+    // case 2: if the offset is "repeat offset" (bit 29 is 1, bits 28 and 27 encode previous "repeat offset")
+    //         which depending on previous block. We keep subtracting bytes
+    return x - 1;
+}
+
+static uint32_t zstdgpu_UpdatePreviousAndRecomputeIncoming(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
+                                                           ZSTDGPU_PARAM_INOUT(uint32_t) offset2,
+                                                           ZSTDGPU_PARAM_INOUT(uint32_t) offset3,
+                                                           uint32_t offset,
+                                                           uint32_t llen)
+{
+    ZSTDGPU_ASSERT_MSG(offset < 0x20000000, "Incoming 'offset'(0x%08x) overflow into 'repeat' offset bit", offset);
+    uint32_t encodedOffset = offset;
+    if (offset <= 3u)
+    {
+        offset += llen == 0u ? 1u : 0u;
+#if 0
+        if (offset == 4u)
+        {
+            encodedOffset = zstdgpu_SubtractByteFromSeqOffset(offset1);
+        }
+        else
+        {
+            encodedOffset = (offset == 3u) ? offset3 : ((offset == 2u) ? offset2 : offset1);
+        }
+#else
+        encodedOffset = (offset < 3u) ? (offset < 2u ? offset1 : offset2) : (offset < 4u ? offset3 : zstdgpu_SubtractByteFromSeqOffset(offset1));
+#endif
+    }
+
+    offset3 = offset >= 3u ? offset2 : offset3;
+    offset2 = offset >= 2u ? offset1 : offset2;
+    offset1 = encodedOffset;
+    return encodedOffset;
 }
 
 static inline void zstdgpu_DecodeSeqRepeatOffsetsAndApplyPreviousOffsets(ZSTDGPU_PARAM_INOUT(uint32_t) offset1,
