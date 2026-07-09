@@ -103,11 +103,11 @@ Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, O
     struct DecompressionStageResources
     {
         com_ptr<ID3D12Heap> defaultHeap;
-        uint32_t defaultHeapSizeBytes = 0;
+        uint64_t defaultHeapSizeBytes = 0;
         com_ptr<ID3D12Heap> uploadHeap;
-        uint32_t uploadHeapSizeBytes = 0;
+        uint64_t uploadHeapSizeBytes = 0;
         com_ptr<ID3D12Heap> readbackHeap;
-        uint32_t readbackHeapSizeBytes = 0;
+        uint64_t readbackHeapSizeBytes = 0;
         com_ptr<ID3D12DescriptorHeap> shaderVisibleDescriptorHeap;
         uint32_t shaderVisibleDescriptorCount = 0;
     };

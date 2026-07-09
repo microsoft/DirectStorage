@@ -138,9 +138,9 @@ namespace Decompression
     HRESULT _cdecl GetHeapMemorySizesForStage(
         void* perRequestContext,
         uint32_t stage,
-        uint32_t* defaultHeapSizeBytes,
-        uint32_t* uploadHeapSizeBytes,
-        uint32_t* readbackHeapSizeBytes,
+        uint64_t* defaultHeapSizeBytes,
+        uint64_t* uploadHeapSizeBytes,
+        uint64_t* readbackHeapSizeBytes,
         uint32_t* shaderVisibleDescriptorCount)
     {
         return hresult_from_status(zstdgpu_GetGpuMemoryRequirement(
