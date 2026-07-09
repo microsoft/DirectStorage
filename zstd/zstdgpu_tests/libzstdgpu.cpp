@@ -6,6 +6,30 @@
 #include <windows.h>
 #include <winrt/base.h>
 
+// TTA_ASSERT_IMPL translation unit for zstdgpu_tests.exe.
+// zstdgpu.lib references tta_ symbols from tta_assert.h; every exe
+// linking it needs exactly one TU that defines TTA_ASSERT_IMPL first.
+
+#define TTA_ASSERT_IMPL
+
+#if defined(__clang__)
+#   ifndef __EXCEPTIONS
+#       define TTA_ASSERT_NOEXCEPT 1
+#   endif
+#elif defined(_MSC_VER)
+#   ifndef _CPPUNWIND
+#       define TTA_ASSERT_NOEXCEPT 1
+#   endif
+#else
+#   error Unknown compiler
+#endif
+
+#pragma warning(push)
+#pragma warning(disable: 4611) /* warning C4611: interaction between 'function' and C++ object destruction is non-portable */
+#include <tta_assert.h>
+#pragma warning(pop)
+
+
 namespace Decompression
 {
     HRESULT hresult_from_status(zstdgpu_Status status)
