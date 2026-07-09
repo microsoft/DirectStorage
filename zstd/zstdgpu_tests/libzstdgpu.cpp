@@ -6,6 +6,18 @@
 #include <windows.h>
 #include <winrt/base.h>
 
+// TTA_ASSERT_IMPL translation unit for zstdgpu_tests.exe.
+// zstdgpu.lib references tta_ symbols from tta_assert.h; every exe
+// linking it needs exactly one TU that defines TTA_ASSERT_IMPL first.
+
+#define TTA_ASSERT_IMPL
+
+#pragma warning(push)
+#pragma warning(disable: 4611) /* warning C4611: interaction between 'function' and C++ object destruction is non-portable */
+#include <tta_assert.h>
+#pragma warning(pop)
+
+
 namespace Decompression
 {
     HRESULT hresult_from_status(zstdgpu_Status status)
@@ -138,9 +150,9 @@ namespace Decompression
     HRESULT _cdecl GetHeapMemorySizesForStage(
         void* perRequestContext,
         uint32_t stage,
-        uint32_t* defaultHeapSizeBytes,
-        uint32_t* uploadHeapSizeBytes,
-        uint32_t* readbackHeapSizeBytes,
+        uint64_t* defaultHeapSizeBytes,
+        uint64_t* uploadHeapSizeBytes,
+        uint64_t* readbackHeapSizeBytes,
         uint32_t* shaderVisibleDescriptorCount)
     {
         return hresult_from_status(zstdgpu_GetGpuMemoryRequirement(

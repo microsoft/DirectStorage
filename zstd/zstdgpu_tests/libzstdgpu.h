@@ -52,9 +52,9 @@ namespace Decompression
     HRESULT _cdecl GetHeapMemorySizesForStage(
         void* perRequestContext,
         uint32_t stage, // 0-based stage index ( bounded by the totalStageCount returned by SetupDecompressionStages )
-        uint32_t* defaultHeapSizeBytes,
-        uint32_t* uploadHeapSizeBytes,
-        uint32_t* readbackHeapSizeBytes,
+        uint64_t* defaultHeapSizeBytes,
+        uint64_t* uploadHeapSizeBytes,
+        uint64_t* readbackHeapSizeBytes,
         uint32_t* shaderVisibleDescriptorCount);
 
     HRESULT _cdecl AddDecompressionStageToCommandlist(
@@ -143,9 +143,9 @@ namespace Decompression
         // Returns true if the the specified stage requires allocations, false if the stage was not required.
         bool TryGetHeapMemorySizes(
             uint32_t stage,
-            uint32_t* defaultHeapSizeBytes,
-            uint32_t* uploadHeapSizeBytes,
-            uint32_t* readbackHeapSizeBytes,
+            uint64_t* defaultHeapSizeBytes,
+            uint64_t* uploadHeapSizeBytes,
+            uint64_t* readbackHeapSizeBytes,
             uint32_t* shaderVisibleDescriptorCount)
         {
             HRESULT hr = GetHeapMemorySizesForStage(
