@@ -1796,41 +1796,55 @@ static int demoRun(void *demoCtx)
 
                 if (NULL == csvFile)
                 {
-                    // find the start of .zst file name (to further add into .csv name)
-                    const wchar_t *zstNameStart = wcsrchr(zstFilePath, L'\\');
-                    if (NULL == zstNameStart)
+                    if (NULL != csvFilePathStorage)
                     {
-                        zstNameStart = zstFilePath;
+                        // --out-csv <path> was specified by the caller.
+                        // Honor the exact path so automated callers can locate the CSV
+                        // at the location they requested.
+                        _wfopen_s(&csvFile, csvFilePath, L"w");
                     }
                     else
                     {
-                        zstNameStart += 1;
+                        // --out-csv was not specified; default csvFilePath is "perf.csv".
+                        // Append the .zst stem and a timestamp so repeated interactive runs
+                        // don't clobber each other.
+
+                        // find the start of .zst file name (to further add into .csv name)
+                        const wchar_t *zstNameStart = wcsrchr(zstFilePath, L'\\');
+                        if (NULL == zstNameStart)
+                        {
+                            zstNameStart = zstFilePath;
+                        }
+                        else
+                        {
+                            zstNameStart += 1;
+                        }
+
+                        // find the start of .zst extension (to remove it from the name when adding into .csv name)
+                        const wchar_t *zstExtStart = wcsrchr(zstNameStart, L'.');
+
+                        // calculate the length of .zst name without extension
+                        size_t zstNameLen = NULL != zstExtStart ? (zstExtStart - zstNameStart) : wcslen(zstNameStart);
+
+                        const wchar_t *csvExtStart = wcsrchr(csvFilePath, L'.');
+                        size_t csvFilePathLenNoExt = NULL != csvExtStart ? (csvExtStart - csvFilePath) : wcslen(csvFilePath);
+                        csvExtStart = L".csv";
+
+                        time_t timeData = time(NULL);
+                        tm timeDataLocal;
+                        localtime_s(&timeDataLocal, &timeData);
+
+                        const int printBufSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart) + 1);
+                        wchar_t *printBuf = (wchar_t *)malloc(printBufSize * sizeof(wchar_t));
+
+                        if (NULL != printBuf)
+                        {
+                            ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(printBuf, printBufSize, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart));
+                            _wfopen_s(&csvFile, printBuf, L"w");
+                        }
+
+                        free(printBuf);
                     }
-
-                    // find the start of .zst extension (to remove it from the name when adding into .csv name)
-                    const wchar_t *zstExtStart = wcsrchr(zstNameStart, L'.');
-
-                    // calculate the length of .zst name without extension
-                    size_t zstNameLen = NULL != zstExtStart ? (zstExtStart - zstNameStart) : wcslen(zstNameStart);
-
-                    const wchar_t *csvExtStart = wcsrchr(csvFilePath, L'.');
-                    size_t csvFilePathLenNoExt = NULL != csvExtStart ? (csvExtStart - csvFilePath) : wcslen(csvFilePath);
-                    csvExtStart = L".csv";
-
-                    time_t timeData = time(NULL);
-                    tm timeDataLocal;
-                    localtime_s(&timeDataLocal, &timeData);
-
-                    const int printBufSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart) + 1);
-                    wchar_t *printBuf = (wchar_t *)malloc(printBufSize * sizeof(wchar_t));
-
-                    if (NULL != printBuf)
-                    {
-                        ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(printBuf, printBufSize, L"%.*s_%.*s_%4d-%02d-%02d_%02d-%02d-%02d%s", (int)csvFilePathLenNoExt, csvFilePath, (int)zstNameLen, zstNameStart, 1900 + timeDataLocal.tm_year, 1 + timeDataLocal.tm_mon, timeDataLocal.tm_mday, timeDataLocal.tm_hour, timeDataLocal.tm_min, timeDataLocal.tm_sec, csvExtStart));
-                        _wfopen_s(&csvFile, printBuf, L"w");
-                    }
-
-                    free(printBuf);
                 }
 
                 if (NULL != csvFile)
