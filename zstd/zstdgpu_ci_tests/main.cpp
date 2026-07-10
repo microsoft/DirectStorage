@@ -109,13 +109,14 @@ static void PrintUsage(const char* exe)
               << "  --log-file <path>       Consolidated text log file\n"
               << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
-              << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files (typically\n"
-              << "                                  ships with the content package alongside the .zst files it\n"
-              << "                                  describes; e.g. <content-path>/adversarial_manifest.json).\n"
-              << "                                  When present, matching files change the assertion criteria:\n"
+              << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
+              << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
+              << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
+              << "                                  matching files change the assertion criteria:\n"
               << "                                    - perf tests skip these files entirely\n"
               << "                                    - correctness tests expect a specific exit code + stderr signature\n"
-              << "                                  If omitted, all files are expected to succeed (legacy behavior).\n"
+              << "                                  If no manifest is found (no flag AND no file in content-path), the\n"
+              << "                                  wrapper falls back to legacy behavior: every file expected to succeed.\n"
               << std::endl;
 }
 
@@ -221,21 +222,47 @@ static int ValidateAndDiscover(TestConfig& config)
         std::filesystem::create_directories(config.logDir);
     }
 
-    // Load the adversarial manifest if a path was provided. A missing file is
-    // an error (user asked for the manifest but we can't find it — probably
-    // a pipeline misconfiguration worth failing loud). If the flag wasn't
-    // passed at all, we run in legacy mode where every file is expected to
-    // succeed.
+    // Load the adversarial manifest. Resolution order:
+    //   1. If --adversarial-manifest was passed, use that path (explicit override).
+    //      A missing file at an explicit path is a hard error — the user asked
+    //      for a specific manifest and we can't find it (probably pipeline
+    //      misconfiguration worth failing loud).
+    //   2. Else look for <content-path>/adversarial_manifest.json. If it
+    //      exists, load it. If it doesn't, run in legacy mode (every file
+    //      expected to succeed) — no message, no error.
+    //   3. In BOTH loaded cases, if the file exists but fails to parse, that
+    //      is a hard error — a broken manifest sitting in the content tree
+    //      is a corruption bug worth flagging, not silently ignoring.
+    bool manifestFromExplicitFlag = !config.adversarialManifestPath.empty();
+    if (!manifestFromExplicitFlag)
+    {
+        std::filesystem::path autoPath =
+            std::filesystem::path(config.contentPath) / "adversarial_manifest.json";
+        if (std::filesystem::exists(autoPath))
+        {
+            config.adversarialManifestPath = autoPath.string();
+        }
+    }
+
     if (!config.adversarialManifestPath.empty())
     {
         std::string loadError;
         if (!config.adversarialManifest.LoadFromFile(config.adversarialManifestPath, loadError))
         {
-            return Fail("--adversarial-manifest failed to load: " + loadError);
+            return Fail("adversarial manifest failed to load from '" +
+                        config.adversarialManifestPath + "': " + loadError);
         }
         std::cout << "Loaded adversarial manifest with "
                   << config.adversarialManifest.Size()
-                  << " entries from '" << config.adversarialManifestPath << "'.\n";
+                  << " entries from '" << config.adversarialManifestPath << "'"
+                  << (manifestFromExplicitFlag ? " (via --adversarial-manifest)." : " (auto-discovered in content-path).")
+                  << "\n";
+    }
+    else
+    {
+        std::cout << "No adversarial manifest found (neither --adversarial-manifest passed "
+                  << "nor <content-path>/adversarial_manifest.json exists). "
+                  << "Running in legacy mode: every file expected to succeed.\n";
     }
 
     return 0;
