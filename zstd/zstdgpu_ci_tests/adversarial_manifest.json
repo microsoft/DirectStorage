@@ -1,6 +1,6 @@
 {
   "$schema_version": 1,
-  "notes": "Known-adversarial fuzz files. Each entry lists files matched by path_glob (relative to --content-path), the expected demo exit code, and one or more stderr substrings the wrapper must see for the failure to count as a correct rejection. The path_glob supports '*' wildcards and '[a-b]' character ranges. Paths use forward slashes for matching; backslashes in real paths are normalized before comparison. If skip_perf is true, OverallThroughput and PerStageTiming tests are skipped for matching files (perf can't measure what won't decode). Signatures verified from TestLab build 151861651 perf-mode logs; correctness-mode signatures inferred by category and may need refinement as more logs are analyzed.",
+  "notes": "Known-adversarial fuzz files. Each entry lists files matched by path_glob (relative to --content-path), the expected demo exit code, and one or more stderr substrings the wrapper must see for the failure to count as a correct rejection. The path_glob supports '*' wildcards and '[a-b]' character ranges. Paths use forward slashes for matching; backslashes in real paths are normalized before comparison. If skip_perf is true, OverallThroughput and PerStageTiming tests are skipped for matching files (perf can't measure what won't decode). Signatures cross-validated across TestLab builds 151782860, 151831983, 151861651 (3 builds × 6-7 machines per build); build 151753278 was excluded because it predates the CSV-mangling fix and had different observed behavior. NOTE: some machines (observed on ARM64 / DSTESTPC1) crash with exit code -1073741819 (ACCESS_VIOLATION) on D3D12DebugLayer scenarios for adversarial input at a ~15% rate instead of graceful rejection — those tests will fail the manifest exit-code check by design, which is the correct signal to flag as a demo bug.",
   "entries": [
     {
       "path_glob": "public/fuzz/generated/gen_bitflip_off0[0-3]_*.zst",
@@ -9,7 +9,9 @@
       "expected_stderr_any_of": [
         "ZSTD frame magic number did not match",
         "zstdgpu_ParseFrame",
-        "zstdgpu.cpp"
+        "zstdgpu.cpp",
+        "d3d12aid.h",
+        "CreateCommittedResource"
       ],
       "skip_perf": true
     },
@@ -44,7 +46,9 @@
       "expected_stderr_any_of": [
         "ZSTD frame magic number did not match",
         "zstdgpu_ParseFrame",
-        "zstdgpu.cpp"
+        "zstdgpu.cpp",
+        "d3d12aid.h",
+        "CreateCommittedResource"
       ],
       "skip_perf": true
     },
@@ -56,7 +60,10 @@
         "Forward_BitBuffer",
         "zstdgpu_structs.h",
         "ZSTD frame magic number did not match",
-        "zstdgpu_ParseFrame"
+        "zstdgpu_ParseFrame",
+        "Input buffer smaller than it should be or input is corrupted",
+        "d3d12aid.h",
+        "CreateCommittedResource"
       ],
       "skip_perf": true
     },
@@ -74,9 +81,10 @@
     },
     {
       "path_glob": "public/fuzz/generated/gen_tiny_1byte.zst",
-      "corruption": "1-byte file. Same D3D12 E_INVALIDARG path as gen_empty_0bytes.",
+      "corruption": "1-byte file. Correctness modes trigger educational decoder's input-length rejection; perf modes hit D3D12 CreateCommittedResource with E_INVALIDARG.",
       "expected_exit_code": 1,
       "expected_stderr_any_of": [
+        "Input buffer smaller than it should be or input is corrupted",
         "d3d12aid.h",
         "CreateCommittedResource",
         "80070057",
