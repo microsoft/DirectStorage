@@ -109,6 +109,11 @@ static void PrintUsage(const char* exe)
               << "  --log-file <path>       Consolidated text log file\n"
               << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
+              << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
+              << "                                  When present, matching files change the assertion criteria:\n"
+              << "                                    - perf tests skip these files entirely\n"
+              << "                                    - correctness tests expect a specific exit code + stderr signature\n"
+              << "                                  If omitted, all files are expected to succeed (legacy behavior).\n"
               << std::endl;
 }
 
@@ -157,6 +162,10 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.timeoutSeconds = std::atoi(argv[++i]);
             if (config.timeoutSeconds < 0)
                 config.timeoutSeconds = 0;
+        }
+        else if (std::strcmp(argv[i], "--adversarial-manifest") == 0 && i + 1 < argc)
+        {
+            config.adversarialManifestPath = argv[++i];
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
@@ -208,6 +217,23 @@ static int ValidateAndDiscover(TestConfig& config)
     if (!std::filesystem::exists(config.logDir))
     {
         std::filesystem::create_directories(config.logDir);
+    }
+
+    // Load the adversarial manifest if a path was provided. A missing file is
+    // an error (user asked for the manifest but we can't find it — probably
+    // a pipeline misconfiguration worth failing loud). If the flag wasn't
+    // passed at all, we run in legacy mode where every file is expected to
+    // succeed.
+    if (!config.adversarialManifestPath.empty())
+    {
+        std::string loadError;
+        if (!config.adversarialManifest.LoadFromFile(config.adversarialManifestPath, loadError))
+        {
+            return Fail("--adversarial-manifest failed to load: " + loadError);
+        }
+        std::cout << "Loaded adversarial manifest with "
+                  << config.adversarialManifest.Size()
+                  << " entries from '" << config.adversarialManifestPath << "'.\n";
     }
 
     return 0;

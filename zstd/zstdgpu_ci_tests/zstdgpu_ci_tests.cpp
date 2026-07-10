@@ -147,6 +147,68 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 
 // Test runners
 
+// If the adversarial manifest lists this file, verify that the demo produced
+// the expected rejection (exit code + at least one expected stderr signature).
+// Returns true iff the outcome is a correct rejection, or if the file isn't
+// in the manifest (in which case the caller applies the legacy "expect 0" check).
+// On mismatch, adds gtest failures with a clear diagnostic. Signature-list
+// mismatches are especially valuable — they mean the demo IS failing on the
+// file but at a DIFFERENT code path than expected (something moved / a new
+// bug / a manifest signature that needs updating).
+static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResult& result, bool& handledByManifest)
+{
+    handledByManifest = false;
+    const AdversarialEntry* entry = g_testConfig.adversarialManifest.Match(zstFile, g_testConfig.contentPath);
+    if (!entry)
+        return false;
+
+    handledByManifest = true;
+
+    if (result.exitCode != entry->expectedExitCode)
+    {
+        ADD_FAILURE()
+            << "Adversarial file expected to be rejected with exit code "
+            << entry->expectedExitCode << " but demo returned " << result.exitCode << ".\n"
+            << "File: " << zstFile << "\n"
+            << "Corruption: " << entry->corruption << "\n"
+            << "Command: " << result.commandLine
+            << "  (stdout already printed above as [DEMO OUT])";
+        return false;
+    }
+
+    bool matched = false;
+    for (const auto& sig : entry->expectedStderrAnyOf)
+    {
+        if (!sig.empty() && result.stdOut.find(sig) != std::string::npos)
+        {
+            matched = true;
+            break;
+        }
+    }
+    if (!matched)
+    {
+        std::ostringstream expected;
+        for (size_t i = 0; i < entry->expectedStderrAnyOf.size(); ++i)
+        {
+            if (i > 0) expected << ", ";
+            expected << "\"" << entry->expectedStderrAnyOf[i] << "\"";
+        }
+        ADD_FAILURE()
+            << "Adversarial file was rejected (exit " << result.exitCode
+            << ") but with an unexpected error signature.\n"
+            << "File: " << zstFile << "\n"
+            << "Corruption: " << entry->corruption << "\n"
+            << "Expected any of: " << expected.str() << "\n"
+            << "This means the demo IS failing on this file but at a different code path than the manifest describes. "
+            << "Either the demo behavior changed and the manifest needs updating, "
+            << "or the failure is genuinely new and unexpected.\n"
+            << "Command: " << result.commandLine
+            << "  (stdout already printed above as [DEMO OUT])";
+        return false;
+    }
+    return true;
+}
+
 // Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
 // main() has already validated the demo path exists, so we don't re-check here.
 // stdout is printed via the unconditional [DEMO OUT] block below and does NOT
@@ -176,6 +238,21 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
         << "Failed to launch demo: " << result.launchError << "\n"
         << "Command: " << result.commandLine;
 
+    bool handledByManifest = false;
+    if (CheckAdversarialOrLegacy(zstFile, result, handledByManifest))
+    {
+        // Adversarial file rejected as expected — success. Nothing more to check.
+        return;
+    }
+    if (handledByManifest)
+    {
+        // Manifest entry matched but the outcome didn't match. CheckAdversarialOrLegacy
+        // already added the failure diagnostic. Stop here rather than fall through
+        // to the legacy check (which would produce a redundant "exit != 0" failure).
+        return;
+    }
+
+    // Legacy path: file not in manifest, expect success.
     ASSERT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine
@@ -186,6 +263,19 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 // main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 {
+    // Adversarial files with skip_perf=true are skipped BEFORE running the demo.
+    // No timing data can be produced for files that don't decode, and running
+    // the demo just to fail it adds nothing.
+    const AdversarialEntry* entry = g_testConfig.adversarialManifest.Match(zstFile, g_testConfig.contentPath);
+    if (entry != nullptr && entry->skipPerf)
+    {
+        GTEST_SKIP()
+            << "Perf test skipped: file is listed in adversarial manifest with skip_perf=true.\n"
+            << "File: " << zstFile << "\n"
+            << "Corruption: " << entry->corruption;
+        return;
+    }
+
     // Build CSV output path matching spec convention:
     //   prf-lvl 0 → results/throughput_<stem>.csv
     //   prf-lvl 2 → results/stages_<stem>.csv
@@ -220,6 +310,21 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
         << "Failed to launch demo: " << result.launchError << "\n"
         << "Command: " << result.commandLine;
 
+    // Adversarial files with skip_perf=false (if any get added later) still
+    // route through the manifest check — they get the exit-code + signature
+    // check instead of "expect success + CSV". The GTEST_SKIP above short-
+    // circuits the common case where skip_perf=true.
+    bool handledByManifest = false;
+    if (CheckAdversarialOrLegacy(zstFile, result, handledByManifest))
+    {
+        return;
+    }
+    if (handledByManifest)
+    {
+        return;
+    }
+
+    // Legacy path: file not in manifest, expect success AND CSV written.
     EXPECT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine

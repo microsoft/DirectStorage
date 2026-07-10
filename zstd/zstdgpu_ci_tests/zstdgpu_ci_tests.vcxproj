@@ -221,11 +221,19 @@
   </ItemDefinitionGroup>
   <!-- Source files -->
   <ItemGroup>
+    <ClCompile Include="adversarial_manifest.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="zstdgpu_ci_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="adversarial_manifest.h" />
     <ClInclude Include="zstdgpu_ci_tests.h" />
+  </ItemGroup>
+  <!-- Data files: JSON manifest ships alongside the exe. Path passed at runtime by the pipeline. -->
+  <ItemGroup>
+    <None Include="adversarial_manifest.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <!-- Project references: only googletest -->
   <ItemGroup>
