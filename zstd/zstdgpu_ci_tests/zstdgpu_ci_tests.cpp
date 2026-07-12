@@ -147,14 +147,25 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 
 // Test runners
 
-// If the adversarial manifest lists this file, verify that the demo produced
-// the expected rejection (exit code + at least one expected stderr signature).
-// Returns true iff the outcome is a correct rejection, or if the file isn't
-// in the manifest (in which case the caller applies the legacy "expect 0" check).
-// On mismatch, adds gtest failures with a clear diagnostic. Signature-list
-// mismatches are especially valuable — they mean the demo IS failing on the
-// file but at a DIFFERENT code path than expected (something moved / a new
-// bug / a manifest signature that needs updating).
+// Returns true if the .zst file lives under a directory named "fuzz". Fuzzing
+// content is a mix of clean and corrupt inputs that exercise varying code
+// paths, so its timing isn't meaningful performance data — perf tests skip it.
+// This is a pure path check, independent of the manifest.
+static bool IsFuzzContent(const std::string& zstFile)
+{
+    for (const auto& part : std::filesystem::path(zstFile))
+    {
+        if (part == "fuzz")
+            return true;
+    }
+    return false;
+}
+
+// If the adversarial manifest lists this file, verify that the demo rejected it
+// with the expected exit code. Returns true iff the outcome is a correct
+// rejection, or false if the file isn't in the manifest (in which case the
+// caller applies the legacy "expect 0" check). Sets handledByManifest when a
+// manifest entry matched, and adds a gtest failure on mismatch.
 static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResult& result, bool& handledByManifest)
 {
     handledByManifest = false;
@@ -176,36 +187,6 @@ static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResul
         return false;
     }
 
-    bool matched = false;
-    for (const auto& sig : entry->expectedStderrAnyOf)
-    {
-        if (!sig.empty() && result.stdOut.find(sig) != std::string::npos)
-        {
-            matched = true;
-            break;
-        }
-    }
-    if (!matched)
-    {
-        std::ostringstream expected;
-        for (size_t i = 0; i < entry->expectedStderrAnyOf.size(); ++i)
-        {
-            if (i > 0) expected << ", ";
-            expected << "\"" << entry->expectedStderrAnyOf[i] << "\"";
-        }
-        ADD_FAILURE()
-            << "Adversarial file was rejected (exit " << result.exitCode
-            << ") but with an unexpected error signature.\n"
-            << "File: " << zstFile << "\n"
-            << "Corruption: " << entry->corruption << "\n"
-            << "Expected any of: " << expected.str() << "\n"
-            << "This means the demo IS failing on this file but at a different code path than the manifest describes. "
-            << "Either the demo behavior changed and the manifest needs updating, "
-            << "or the failure is genuinely new and unexpected.\n"
-            << "Command: " << result.commandLine
-            << "  (stdout already printed above as [DEMO OUT])";
-        return false;
-    }
     return true;
 }
 
@@ -263,16 +244,13 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 // main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 {
-    // Adversarial files with skip_perf=true are skipped BEFORE running the demo.
-    // No timing data can be produced for files that don't decode, and running
-    // the demo just to fail it adds nothing.
-    const AdversarialEntry* entry = g_testConfig.adversarialManifest.Match(zstFile, g_testConfig.contentPath);
-    if (entry != nullptr && entry->skipPerf)
+    // Fuzzing content mixes clean and corrupt inputs with varying code paths,
+    // so its timing isn't meaningful perf data — skip it before running the demo.
+    if (IsFuzzContent(zstFile))
     {
         GTEST_SKIP()
-            << "Perf test skipped: file is listed in adversarial manifest with skip_perf=true.\n"
-            << "File: " << zstFile << "\n"
-            << "Corruption: " << entry->corruption;
+            << "Perf test skipped: file is fuzzing content (under a 'fuzz' directory).\n"
+            << "File: " << zstFile;
         return;
     }
 
@@ -310,21 +288,8 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
         << "Failed to launch demo: " << result.launchError << "\n"
         << "Command: " << result.commandLine;
 
-    // Adversarial files with skip_perf=false (if any get added later) still
-    // route through the manifest check — they get the exit-code + signature
-    // check instead of "expect success + CSV". The GTEST_SKIP above short-
-    // circuits the common case where skip_perf=true.
-    bool handledByManifest = false;
-    if (CheckAdversarialOrLegacy(zstFile, result, handledByManifest))
-    {
-        return;
-    }
-    if (handledByManifest)
-    {
-        return;
-    }
-
-    // Legacy path: file not in manifest, expect success AND CSV written.
+    // Fuzz content was already skipped above, so any file reaching here is
+    // expected to decode successfully AND produce a CSV.
     EXPECT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine

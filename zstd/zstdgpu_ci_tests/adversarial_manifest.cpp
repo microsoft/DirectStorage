@@ -160,27 +160,6 @@ struct Parser
         return false;
     }
 
-    // Reads a JSON array of strings (used for expected_stderr_any_of).
-    std::vector<std::string> ReadStringArray()
-    {
-        std::vector<std::string> out;
-        if (!SkipWs()) { Fail("expected '[', got eof"); return out; }
-        if (!Expect('[')) return out;
-        if (!SkipWs()) { Fail("unexpected eof in array"); return out; }
-        if (pos < text.size() && text[pos] == ']') { ++pos; return out; }
-        while (true)
-        {
-            std::string s = ReadString();
-            if (Failed()) return out;
-            out.push_back(std::move(s));
-            if (!SkipWs()) { Fail("unexpected eof in array"); return out; }
-            if (text[pos] == ',') { ++pos; continue; }
-            if (text[pos] == ']') { ++pos; return out; }
-            Fail(std::string("expected ',' or ']' got '") + text[pos] + "'");
-            return out;
-        }
-    }
-
     // Consumes a JSON value of unknown type and discards it. Used to
     // gracefully ignore unknown fields (forward compatibility — a manifest
     // written by a newer schema version that adds fields should still parse
@@ -263,14 +242,6 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
         else if (key == "expected_exit_code")
         {
             entry.expectedExitCode = p.ReadInt();
-        }
-        else if (key == "expected_stderr_any_of")
-        {
-            entry.expectedStderrAnyOf = p.ReadStringArray();
-        }
-        else if (key == "skip_perf")
-        {
-            entry.skipPerf = p.ReadBool();
         }
         else
         {

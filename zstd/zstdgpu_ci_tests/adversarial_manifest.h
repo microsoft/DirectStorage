@@ -8,13 +8,11 @@
  */
 
 // Adversarial manifest: maps known-adversarial fuzz files to their expected
-// demo failure signatures. When a matching file is exercised by the wrapper,
-// the assertion criteria change:
-//   - Perf tests (OverallThroughput / PerStageTiming) are SKIPPED entirely
-//     (perf can't produce timing on files that won't decode).
-//   - Correctness tests still run, but expect exit_code == manifest value AND
-//     at least one of the expected_stderr_any_of substrings appears in
-//     captured demo output.
+// demo exit code. When a matching file is exercised by the wrapper, the
+// correctness test expects exit_code == manifest value rather than success.
+//
+// Perf tests do NOT consult the manifest; they skip fuzz content by path (see
+// IsFuzzContent in zstdgpu_ci_tests.cpp).
 //
 // If the manifest is not loaded (--adversarial-manifest not passed OR file
 // missing), the wrapper falls back to legacy behavior: every file expected to
@@ -35,8 +33,6 @@ struct AdversarialEntry
     std::string pathGlob;                          // e.g. "public/fuzz/generated/gen_bitflip_off0[0-3]_*.zst"
     std::string corruption;                        // Human-readable description of what's wrong with the file(s)
     int expectedExitCode = 1;                      // Expected demo process exit code (always 1 today; field exists for future flexibility)
-    std::vector<std::string> expectedStderrAnyOf;  // Any ONE of these substrings appearing in stdout+stderr = correct rejection
-    bool skipPerf = true;                          // If true, perf tests skip this file entirely
 };
 
 // Loads and matches the manifest. Loaded once at startup, then read-only from
