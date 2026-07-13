@@ -321,7 +321,11 @@ TEST_P(ZstdGpuDemoTests, SimulationCheck)
 
 TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
 {
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg"});
+#endif
 }
 
 TEST_P(ZstdGpuDemoTests, ExternalMemory)
