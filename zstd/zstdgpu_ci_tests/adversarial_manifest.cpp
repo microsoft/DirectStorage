@@ -235,9 +235,9 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
             entry.pathGlob = p.ReadString();
             haveGlob = true;
         }
-        else if (key == "corruption")
+        else if (key == "reason")
         {
-            entry.corruption = p.ReadString();
+            entry.reason = p.ReadString();
         }
         else if (key == "expected_exit_code")
         {

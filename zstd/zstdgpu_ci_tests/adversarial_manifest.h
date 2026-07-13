@@ -31,7 +31,7 @@
 struct AdversarialEntry
 {
     std::string pathGlob;                          // e.g. "public/fuzz/generated/gen_bitflip_off0[0-3]_*.zst"
-    std::string corruption;                        // Human-readable description of what's wrong with the file(s)
+    std::string reason;                            // Human-readable description of what's wrong with the file(s) (JSON key "reason")
     int expectedExitCode = 1;                      // Expected demo process exit code (always 1 today; field exists for future flexibility)
 };
 

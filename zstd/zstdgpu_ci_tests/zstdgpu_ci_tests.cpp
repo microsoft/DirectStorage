@@ -181,7 +181,7 @@ static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResul
             << "Adversarial file expected to be rejected with exit code "
             << entry->expectedExitCode << " but demo returned " << result.exitCode << ".\n"
             << "File: " << zstFile << "\n"
-            << "Corruption: " << entry->corruption << "\n"
+            << "Reason: " << entry->reason << "\n"
             << "Command: " << result.commandLine
             << "  (stdout already printed above as [DEMO OUT])";
         return false;
