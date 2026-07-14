@@ -20,7 +20,7 @@
 ZSTDGPU_EXECUTE_SEQUENCES_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=12), UAV(u0, numDescriptors=2))")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=11), UAV(u0, numDescriptors=2))")]
 [numthreads(MAX_COPY_SIZE, 1, 1)]
 void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {

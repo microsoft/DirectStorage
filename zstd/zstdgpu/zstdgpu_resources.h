@@ -108,6 +108,7 @@
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , BlocksCMPRefs                 )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_1() \
+    ZSTDGPU_BUFFER(uint32_t                                 , BlockDestOffs                 )   \
     ZSTDGPU_BUFFER(uint32_t                                 , HuffmanTableCodeAndSymbol     )   \
     ZSTDGPU_BUFFER(uint32_t                                 , HuffmanTableRankIndex         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , HuffmanTableInfo              )
@@ -297,6 +298,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
 
     // TODO: this must a total of all blocks (including RLE and RAW)
     const uint32_t BlockSizePrefix_Count = allBlockCount + zstdgpu_GetLookbackBlockCount(allBlockCount);
+    const uint32_t BlockDestOffs_Count = allBlockCount;
     const uint32_t GlobalBlockIndexPerRawBlock_Count = rawBlockCount;
     const uint32_t GlobalBlockIndexPerRleBlock_Count = rleBlockCount;
     const uint32_t GlobalBlockIndexPerCmpBlock_Count = cmpBlockCount;

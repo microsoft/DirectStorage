@@ -49,6 +49,7 @@
 
 #include "zstdgpu_resources.h"
 
+#include "ZstdGpuComputeDestBlockOffsets.h"
 #include "ZstdGpuComputeDestSequenceOffsets.h"
 #include "ZstdGpuComputePrefixSum.h"
 #include "ZstdGpuDecodeHuffmanWeights.h"
@@ -712,6 +713,7 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
 }
 
 #define ZSTDGPU_KERNEL_LIST()                                                                                                           \
+    ZSTDGPU_KERNEL(ComputeDestBlockOffsets                          ,   L"Compute Destination Block Offsets")                                   \
     ZSTDGPU_KERNEL(ComputeDestSequenceOffsets                       ,   L"Compute Destination Sequence Offsets")                                \
     ZSTDGPU_KERNEL(ComputePrefixSum                                 ,   L"Compute Prefix of Literal and TG Count for Literal Decompression")    \
     ZSTDGPU_KERNEL(DecodeHuffmanWeights                             ,   L"Decode (from nibbles) Uncompressed Huffman Weights")                  \
@@ -777,6 +779,7 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
 };
 
 #define ZSTDGPU_DISPATCH32_CMD_SIG_LIST()                       \
+    ZSTDGPU_DISPATCH32_CMD_SIG(ComputeDestBlockOffsets  , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(DecodeHuffmanWeights     , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(DecompressHuffmanWeights , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(DecompressLiterals       , 1)    \
@@ -785,7 +788,7 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_DISPATCH32_CMD_SIG(InitFseTable             , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(InitHuffmanTable         , 1)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(Memset                   , 1)    \
-    ZSTDGPU_DISPATCH32_CMD_SIG(MemsetMemcpy             , 5)    \
+    ZSTDGPU_DISPATCH32_CMD_SIG(MemsetMemcpy             , 4)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(PrefixSequenceOffsets    , 10)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(PrefixSum                , 2)    \
     ZSTDGPU_DISPATCH32_CMD_SIG(ComputePrefixSum         , 5)    \
@@ -793,6 +796,7 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_DISPATCH32_CMD_SIG(PropagateFseIndex        , 0)
 
 #define ZSTDGPU_RUNTIME_KERNEL_LIST_SHARED()        \
+    ZSTDGPU_KERNEL(ComputeDestBlockOffsets)         \
     ZSTDGPU_KERNEL(ComputeDestSequenceOffsets)      \
     ZSTDGPU_KERNEL(ComputePrefixSum)                \
     ZSTDGPU_KERNEL(DecodeHuffmanWeights)            \
@@ -843,6 +847,7 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL_SCOPE_X(DecompressSequences                  , L"Decompress Sequences"       )   \
     ZSTDGPU_KERNEL_SCOPE_X(PrefixSequenceOffsets                , L"Propagate Sequence Offsets" )   \
     ZSTDGPU_KERNEL_SCOPE_X(FinaliseSequenceOffsets              , L"Finalise Sequence Offsets"  )   \
+    ZSTDGPU_KERNEL_SCOPE_X(ComputeDestBlockOffsets              , L"Compute Dest Block Offsets" )   \
     ZSTDGPU_KERNEL_SCOPE_X(ExecuteSequences                     , L"ExecuteSequences"           )   \
     ZSTDGPU_KERNEL_SCOPE_X(MemcpyRAW_MemsetRLE                  , L"Memcpy Raw/Memset RLE Blocks")  \
     ZSTDGPU_KERNEL_SCOPE_X(PrefixBlockSizes                     , L"Prefix Block Sizes"         )
@@ -3249,10 +3254,23 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         }
 
         // last written by [Prefix Block Sizes]
-        // next read by [Memcpy RAW blocks, Memset RLE blocks] and [Execute Sequences]
+        // next read by [Compute Dest Block Offsets], [Memcpy RAW blocks, Memset RLE blocks], and [Execute Sequences]
         setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.BlockSizePrefix);
         bc += 1;
         cmdList->ResourceBarrier(bc, barriers);
+        PIXEndEvent(cmdList);
+    }
+
+    {
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute Dest Block Offsets]");
+        BIND_RS_PS_SRT(ComputeDestBlockOffsets);
+        // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
+        cmdList->SetComputeRoot32BitConstant(1, req->zstdFrameCount, 2);
+
+        ZSTDGPU_KERNEL_SCOPE(ComputeDestBlockOffsets, cmdList,
+            zstdgpu_DispatchIndirect(cmdList, ComputeDestBlockOffsets, PrefixBlockSizes);
+        );
+
         PIXEndEvent(cmdList);
     }
 
@@ -3270,10 +3288,13 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Memcpy RAW blocks, Memset RLE blocks] and [Execute Sequences]");
-        D3D12_RESOURCE_BARRIER barriers[1];
+        D3D12_RESOURCE_BARRIER barriers[2];
         // last written/updated by [Finalise Sequence Offsets]
         // next read by [Execute Sequences]
         setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedSequenceOffs);
+        // last written by [Compute Dest Block Offsets]
+        // next read by [Memcpy RAW blocks, Memset RLE blocks], [Execute Sequences], and [Compute Dest Sequence Offsets]
+        setResourceUavToSrvSync(barriers, 1, req->resData.gpuOnly.BlockDestOffs);
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
     }
@@ -3287,25 +3308,19 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         {
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RawBlockSizePrefix->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRAW->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(3, req->resData.gpuOnly.BlocksRAWRefs->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(4, req->resData.gpuOnly.GlobalBlockIndexPerRawBlock->GetGPUVirtualAddress());
+                cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.BlocksRAWRefs->GetGPUVirtualAddress());
+                cmdList->SetComputeRootShaderResourceView(3, req->resData.gpuOnly.GlobalBlockIndexPerRawBlock->GetGPUVirtualAddress());
                 // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
-                cmdList->SetComputeRoot32BitConstant(5, req->zstdRawBlockCountMax, 2);
-                cmdList->SetComputeRoot32BitConstant(5, req->zstdFrameCount, 3);
-                cmdList->SetComputeRoot32BitConstant(5, 1 /* flags */, 4);
+                cmdList->SetComputeRoot32BitConstant(4, 1 /* flags */, 2);
                 zstdgpu_DispatchIndirect(cmdList, MemsetMemcpy, MemcpyRAW);
             }
 
             {
                 cmdList->SetComputeRootShaderResourceView(1, req->resData.gpuOnly.RleBlockSizePrefix->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.PerFrameBlockSizesRLE->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(3, req->resData.gpuOnly.BlocksRLERefs->GetGPUVirtualAddress());
-                cmdList->SetComputeRootShaderResourceView(4, req->resData.gpuOnly.GlobalBlockIndexPerRleBlock->GetGPUVirtualAddress());
+                cmdList->SetComputeRootShaderResourceView(2, req->resData.gpuOnly.BlocksRLERefs->GetGPUVirtualAddress());
+                cmdList->SetComputeRootShaderResourceView(3, req->resData.gpuOnly.GlobalBlockIndexPerRleBlock->GetGPUVirtualAddress());
                 // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
-                cmdList->SetComputeRoot32BitConstant(5, req->zstdRleBlockCountMax, 2);
-                cmdList->SetComputeRoot32BitConstant(5, req->zstdFrameCount, 3);
-                cmdList->SetComputeRoot32BitConstant(5, 0 /* flags */, 4);
+                cmdList->SetComputeRoot32BitConstant(4, 0 /* flags */, 2);
                 zstdgpu_DispatchIndirect(cmdList, MemsetMemcpy, MemsetRLE);
             }
         });

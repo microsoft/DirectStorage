@@ -3964,18 +3964,6 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
                                ? srt.inPerFrameBlockCountCMP[frameIdx + 1u]
                                : srt.inoutCounters[0].Blocks_CMP;
 
-    const uint32_t firstFrameBlockIdx = srt.inPerFrameBlockCountAll[frameIdx];
-
-    uint32_t firstFrameBlockOfs = 0;
-    // NOTE(pamartis): Without `ZSTDGPU_BRANCH`, there's out-of-bounds `ZstdInBlockSizePrefix` access detected by validation layer when
-    // DXC used: "Version: dxcompiler.dll: 1.6 - 1.6.2112.16 (e8295973c); dxil.dll: 1.6(101.6.2112.13)"
-    ZSTDGPU_BRANCH if (firstFrameBlockIdx > 0)
-    {
-        firstFrameBlockOfs = srt.inBlockSizePrefix[firstFrameBlockIdx - 1];
-    }
-
-    const zstdgpu_OffsetAndSize dstFrameOffsAndSize = srt.inUnCompressedFramesRefs[frameIdx];
-
     for (uint32_t cmpBlockIdx = cmpBlockBeg; cmpBlockIdx < cmpBlockEnd; ++cmpBlockIdx)
     {
         const uint32_t blockIdx = srt.inGlobalBlockIndexPerCmpBlock[cmpBlockIdx];
@@ -3988,8 +3976,9 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
             blockOfs = srt.inBlockSizePrefix[blockIdx - 1];
         }
 
-        const uint32_t blockByteBeg = dstFrameOffsAndSize.offs + (blockOfs - firstFrameBlockOfs);
-        const uint32_t blockByteEnd = dstFrameOffsAndSize.offs + (srt.inBlockSizePrefix[blockIdx] - firstFrameBlockOfs);
+        const uint32_t blockSize = srt.inBlockSizePrefix[blockIdx] - blockOfs;
+        const uint32_t blockByteBeg = srt.inBlockDestOffs[blockIdx];
+        const uint32_t blockByteEnd = blockByteBeg + blockSize;
 
 #if 0
         for (uint32_t blockByteIdx = blockByteBeg + i; blockByteIdx < blockByteEnd; blockByteIdx += maxCopySize)
