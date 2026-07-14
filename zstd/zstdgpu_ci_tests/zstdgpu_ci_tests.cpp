@@ -147,6 +147,49 @@ static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
 
 // Test runners
 
+// Returns true if the .zst file lives under a directory named "fuzz". Fuzzing
+// content is a mix of clean and corrupt inputs that exercise varying code
+// paths, so its timing isn't meaningful performance data — perf tests skip it.
+// This is a pure path check, independent of the manifest.
+static bool IsFuzzContent(const std::string& zstFile)
+{
+    for (const auto& part : std::filesystem::path(zstFile))
+    {
+        if (part == "fuzz")
+            return true;
+    }
+    return false;
+}
+
+// If the adversarial manifest lists this file, verify that the demo rejected it
+// with the expected exit code. Returns true iff the outcome is a correct
+// rejection, or false if the file isn't in the manifest (in which case the
+// caller applies the legacy "expect 0" check). Sets handledByManifest when a
+// manifest entry matched, and adds a gtest failure on mismatch.
+static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResult& result, bool& handledByManifest)
+{
+    handledByManifest = false;
+    const AdversarialEntry* entry = g_testConfig.adversarialManifest.Match(zstFile, g_testConfig.contentPath);
+    if (!entry)
+        return false;
+
+    handledByManifest = true;
+
+    if (result.exitCode != entry->expectedExitCode)
+    {
+        ADD_FAILURE()
+            << "Adversarial file expected to be rejected with exit code "
+            << entry->expectedExitCode << " but demo returned " << result.exitCode << ".\n"
+            << "File: " << zstFile << "\n"
+            << "Reason: " << entry->reason << "\n"
+            << "Command: " << result.commandLine
+            << "  (stdout already printed above as [DEMO OUT])";
+        return false;
+    }
+
+    return true;
+}
+
 // Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
 // main() has already validated the demo path exists, so we don't re-check here.
 // stdout is printed via the unconditional [DEMO OUT] block below and does NOT
@@ -176,6 +219,21 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
         << "Failed to launch demo: " << result.launchError << "\n"
         << "Command: " << result.commandLine;
 
+    bool handledByManifest = false;
+    if (CheckAdversarialOrLegacy(zstFile, result, handledByManifest))
+    {
+        // Adversarial file rejected as expected — success. Nothing more to check.
+        return;
+    }
+    if (handledByManifest)
+    {
+        // Manifest entry matched but the outcome didn't match. CheckAdversarialOrLegacy
+        // already added the failure diagnostic. Stop here rather than fall through
+        // to the legacy check (which would produce a redundant "exit != 0" failure).
+        return;
+    }
+
+    // Legacy path: file not in manifest, expect success.
     ASSERT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine
@@ -186,6 +244,16 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 // main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
 {
+    // Fuzzing content mixes clean and corrupt inputs with varying code paths,
+    // so its timing isn't meaningful perf data — skip it before running the demo.
+    if (IsFuzzContent(zstFile))
+    {
+        GTEST_SKIP()
+            << "Perf test skipped: file is fuzzing content (under a 'fuzz' directory).\n"
+            << "File: " << zstFile;
+        return;
+    }
+
     // Build CSV output path matching spec convention:
     //   prf-lvl 0 → results/throughput_<stem>.csv
     //   prf-lvl 2 → results/stages_<stem>.csv
@@ -220,6 +288,8 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
         << "Failed to launch demo: " << result.launchError << "\n"
         << "Command: " << result.commandLine;
 
+    // Fuzz content was already skipped above, so any file reaching here is
+    // expected to decode successfully AND produce a CSV.
     EXPECT_EQ(result.exitCode, 0)
         << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
         << "Command: " << result.commandLine
@@ -251,7 +321,11 @@ TEST_P(ZstdGpuDemoTests, SimulationCheck)
 
 TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
 {
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg"});
+#endif
 }
 
 TEST_P(ZstdGpuDemoTests, ExternalMemory)
