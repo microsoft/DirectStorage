@@ -63,11 +63,11 @@
 #include "ZstdGpuDecompressLiterals_LdsStoreCache32_8.h"
 #include "ZstdGpuDecompressSequences_MultiStream_4.h"
 #include "ZstdGpuDecompressSequences_MultiStream_8.h"
-#include "ZstdGpuDecompressSequences_MultiStream_4_LdsOutCache_128.h"
-#include "ZstdGpuDecompressSequences_MultiStream_4_LdsOutCache_64.h"
+#include "ZstdGpuDecompressSequences_MultiStream_8_LdsOutCache_128.h"
 #include "ZstdGpuDecompressSequences_MultiStream_8_LdsOutCache_64.h"
-#include "ZstdGpuDecompressSequences_MultiStream_8_LdsOutCache_32.h"
-#include "ZstdGpuDecompressSequences_MultiStream_16_LdsOutCache_32.h"
+#include "ZstdGpuDecompressSequences_MultiStream_4_LdsOutCache_64.h"
+#include "ZstdGpuDecompressSequences_MultiStream_4_LdsOutCache_32.h"
+#include "ZstdGpuDecompressSequences_MultiStream_2_LdsOutCache_32.h"
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache128.h"
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache64.h"
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache32.h"
@@ -733,11 +733,11 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     ZSTDGPU_KERNEL(DecompressSequences_SingleStream_ScalarFseLoad32 ,   L"Decompress Sequences (Single-Stream, Scalar FSE Load, TG Size= 32)")  \
     ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4                ,   L"Decompress Sequences (Multi-Stream, Streams= 4)")                     \
     ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8                ,   L"Decompress Sequences (Multi-Stream, Streams= 8)")                     \
-    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4_LdsOutCache_128,   L"Decompress Sequences (Multi-Stream, Streams= 4, LDS Out Cache=128 Sequences)")    \
-    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4_LdsOutCache_64 ,   L"Decompress Sequences (Multi-Stream, Streams= 4, LDS Out Cache= 64 Sequences)")    \
-    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8_LdsOutCache_64 ,   L"Decompress Sequences (Multi-Stream, Streams= 8, LDS Out Cache= 64 Sequences)")    \
-    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8_LdsOutCache_32 ,   L"Decompress Sequences (Multi-Stream, Streams= 8, LDS Out Cache= 32 Sequences)")    \
-    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_16_LdsOutCache_32,   L"Decompress Sequences (Multi-Stream, Streams=16, LDS Out Cache= 32 Sequences)")    \
+    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8_LdsOutCache_128,   L"Decompress Sequences (Multi-Stream, Threads Per Stream=8, LDS Out Cache=128 Sequences)")    \
+    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8_LdsOutCache_64 ,   L"Decompress Sequences (Multi-Stream, Threads Per Stream=8, LDS Out Cache= 64 Sequences)")    \
+    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4_LdsOutCache_64 ,   L"Decompress Sequences (Multi-Stream, Threads Per Stream=4, LDS Out Cache= 64 Sequences)")    \
+    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4_LdsOutCache_32 ,   L"Decompress Sequences (Multi-Stream, Threads Per Stream=4, LDS Out Cache= 32 Sequences)")    \
+    ZSTDGPU_KERNEL(DecompressSequences_MultiStream_2_LdsOutCache_32 ,   L"Decompress Sequences (Multi-Stream, Threads Per Stream=2, LDS Out Cache= 32 Sequences)")    \
     ZSTDGPU_KERNEL(ExecuteSequences128                              ,   L"Execute Sequences 128")                                               \
     ZSTDGPU_KERNEL(ExecuteSequences64                               ,   L"Execute Sequences 64")                                                \
     ZSTDGPU_KERNEL(ExecuteSequences32                               ,   L"Execute Sequences 32")                                                \
@@ -1076,8 +1076,17 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             // Nvidia
             ZSTDGPU_KERNEL_MAP(DecompressLiterals, DecompressLiterals_LdsStoreCache32_16);
             context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = 16;
-            ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_LdsFseCache32);
-            context->DecompressSequences_StreamsPerGroup = 1;
+
+            // NOTE(pamartis): Enable multi-stream variant by default. This variant outperforms single-stream
+            // variant in cases when the number of sequence streams large enough so GPU becomes fully saturated
+            // with threadgroups/waves running single-stream shader. On the other side, because single-stream
+            // variant waves/threadgroups are shorter individually, workloads not saturating GPU would perform
+            // faster with single-stream variant and multi-stream version would be a pessimisation.
+            //
+            // But we choose "throughput" maximising kernel.
+            ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32);
+            context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
+
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
         }
         else if (featureOptions1.WaveLaneCountMax == 128)

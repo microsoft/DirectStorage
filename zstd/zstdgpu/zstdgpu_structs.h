@@ -422,6 +422,8 @@ static const uint32_t kzstdgpu_TgSizeX_DecompressHuffmanWeights = 8;
 
 static const uint32_t kzstdgpu_TgSizeX_DecodeHuffmanWeights = 32;
 
+static const uint32_t kzstdgpu_TgSizeX_DecompressSequences = 128;
+
 // NOTE(pamartis): Decompressing Literals should be as small as possible (divergent workload)
 // but not too small to make sure Huffman table initialisation isn't repeated too often
 // TODO(pamartis) Try threadgroup sizes that less than wave size to see whether reducing

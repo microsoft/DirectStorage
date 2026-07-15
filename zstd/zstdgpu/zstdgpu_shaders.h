@@ -3570,8 +3570,13 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 #endif
 
 #ifndef kzstdgpu_DecompressSequences_StreamsPerTG
-#define kzstdgpu_DecompressSequences_StreamsPerTG 8
+#define kzstdgpu_DecompressSequences_StreamsPerTG (kzstdgpu_TgSizeX_DecompressSequences / kzstdgpu_DecompressSequences_ThreadsPerStream)
 #define kzstdgpu_DecompressSequences_StreamsPerTG_UNDEF 1
+#endif
+
+#ifndef kzstdgpu_DecompressSequences_ThreadsPerStream
+#define kzstdgpu_DecompressSequences_ThreadsPerStream 4
+#define kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF 1
 #endif
 
 #include "zstdgpu_lds_decl_size.h"
@@ -3589,7 +3594,20 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     const uint32_t seqStreamBeg = groupId * streamsPerGroup;
 
     const uint32_t seqStreamCntInGroup = zstdgpu_MinU32(seqStreamCnt - seqStreamBeg, streamsPerGroup);
-    const uint32_t seqStreamIdxInGroup = zstdgpu_MinU32(threadId, seqStreamCntInGroup - 1u);
+
+    // NOTE(pamartis): distribute the group's streams equally across the TG's waves (wave-size agnostic).
+    // Each wave owns `streamsPerWave` consecutive streams
+    const uint32_t laneCnt = zstdgpu_MinU32(WaveGetLaneCount(), tgSize);
+    const uint32_t waveCnt = tgSize / laneCnt;
+    const uint32_t waveIdx = WaveReadLaneFirst(threadId / laneCnt);
+    const uint32_t laneIdx = WaveGetLaneIndex();
+    const uint32_t streamsPerWave = streamsPerGroup / waveCnt;
+    const uint32_t waveStreamBase = waveIdx * streamsPerWave;
+    const uint32_t waveStreamEnd = zstdgpu_MinU32(waveStreamBase + streamsPerWave, seqStreamCntInGroup);
+    const uint32_t laneStreamIdxInGroup = waveStreamBase + laneIdx;
+    const bool seqStreamActive = laneStreamIdxInGroup < waveStreamEnd;
+
+    const uint32_t seqStreamIdxInGroup = zstdgpu_MinU32(laneStreamIdxInGroup, seqStreamCntInGroup - 1u);
     const uint32_t seqStreamIdx = seqStreamBeg + seqStreamIdxInGroup;
 
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
@@ -3639,14 +3657,11 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 
         const uint32_t storeCacheThreadOffset = seqStreamIdxInGroup * cacheDwordsPerStream;
 
-        const uint32_t laneCnt = zstdgpu_MinU32(WaveGetLaneCount(), tgSize);
-        const uint32_t streamBeg = WaveReadLaneFirst(threadId);
-
         uint32_t seqIdx = seqRefDst.offs;
 
         // WARN(pamartis): The condition here is important even if size and offset are correct to make sure no work is done by
         // threads that get replicated data
-        const uint32_t seqIdxEnd = seqRefDst.offs + ((threadId < seqStreamCntInGroup) ? seqRefDst.size : 0);
+        const uint32_t seqIdxEnd = seqRefDst.offs + (seqStreamActive ? seqRefDst.size : 0);
 
         do
         {
@@ -3679,7 +3694,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
                 const uint32_t seqIdxInBatch = seqIdx - seqIdxBatchBeg;
 
                 //
-                const uint32_t seqIdxInCache = (seqIdxInBatch & ~kStoreCacheBankMask) + ((seqIdxInBatch + threadId) & kStoreCacheBankMask);
+                const uint32_t seqIdxInCache = (seqIdxInBatch & ~kStoreCacheBankMask) + ((seqIdxInBatch + seqStreamIdxInGroup) & kStoreCacheBankMask);
                 zstdgpu_LdsStoreU32(GS_LLenCache + storeCacheThreadOffset + seqIdxInCache, llen);
                 zstdgpu_LdsStoreU32(GS_MLenCache + storeCacheThreadOffset + seqIdxInCache, mlen);
                 zstdgpu_LdsStoreU32(GS_OffsCache + storeCacheThreadOffset + seqIdxInCache, offs);
@@ -3691,13 +3706,12 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
             }
 
             // Cooperative flush phase: all threads flush each stream's LDS cache to UAV memory
-            uint32_t i = streamBeg;
-            const uint32_t streamEnd = zstdgpu_MinU32(i + laneCnt, seqStreamCntInGroup);
+            uint32_t i = waveStreamBase;
 
-            ZSTDGPU_LOOP for (; i < streamEnd; ++i)
+            ZSTDGPU_LOOP for (; i < waveStreamEnd; ++i)
             {
-                const uint32_t seqCntInBatch = WaveReadLaneAt(seqIdxBatchEnd - seqIdxBatchBeg, i - streamBeg);
-                const uint32_t dstSeqIdx = WaveReadLaneAt(seqIdxBatchBeg, i - streamBeg);
+                const uint32_t seqCntInBatch = WaveReadLaneAt(seqIdxBatchEnd - seqIdxBatchBeg, i - waveStreamBase);
+                const uint32_t dstSeqIdx = WaveReadLaneAt(seqIdxBatchBeg, i - waveStreamBase);
 
                 ZSTDGPU_FOR_WORK_ITEMS(seqIdxToStore, seqCntInBatch, WaveGetLaneIndex(), laneCnt)
                 {
@@ -3718,7 +3732,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
         while (WaveActiveAnyTrue(seqIdx < seqIdxEnd));
     }
 
-    if (threadId < seqStreamCntInGroup)
+    if (seqStreamActive)
     {
         // NOTE(pamartis): update block size adding `totalMLen` bytes on top
         srt.inoutBlockSizePrefix[seqRef.blockId] = totalMLen + literalSize;
@@ -3740,6 +3754,11 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 #ifdef kzstdgpu_DecompressSequences_StreamsPerTG_UNDEF
 #undef kzstdgpu_DecompressSequences_StreamsPerTG_UNDEF
 #undef kzstdgpu_DecompressSequences_StreamsPerTG
+#endif
+
+#ifdef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
+#undef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
+#undef kzstdgpu_DecompressSequences_ThreadsPerStream
 #endif
 
 static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets_SRT) srt, uint32_t threadId)
