@@ -20,8 +20,6 @@ struct Consts
 {
     uint32_t tgOffset;
     uint32_t workItemCount;
-    uint32_t blockCount;
-    uint32_t frameCount;
     uint32_t flags;
 };
 
@@ -31,22 +29,22 @@ ConstantBuffer<Consts>                  Constants                           : re
 ZSTDGPU_MEMSET_MEMCPY_SRT()
 #include "../zstdgpu_srt_decl_undef.h"
 
-StructuredBuffer<uint32_t>              ZstdInBlockSizePrefixTyped          : register(t5);
+StructuredBuffer<uint32_t>              ZstdInBlockSizePrefixTyped          : register(t3);
 
-StructuredBuffer<uint32_t>              ZstdInPerFrameBlockSizePrefixTyped  : register(t6);
+StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : register(t4);
 
-StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : register(t7);
+StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t5);
 
-StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t8);
-
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=5), UAV(u0, numDescriptors=1)), SRV(t5), SRV(t6), SRV(t7), SRV(t8), RootConstants(b0, num32BitConstants=5)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=3), UAV(u0, numDescriptors=1)), SRV(t3), SRV(t4), SRV(t5), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
     i += zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
 
     if (i >= Constants.workItemCount)
+    {
         return;
+    }
 
     const uint32_t blockCnt = (Constants.flags & 0x1u) ? ZstdInCounters[0].Blocks_RAW : ZstdInCounters[0].Blocks_RLE;
     const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, blockCnt, i);
@@ -57,30 +55,12 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 
     const uint32_t globalBlockIdx = ZstdInGlobalBlockIndexTyped[blockIdx];
 
-    uint32_t globalBlockGlobalOffset = 0;
-    [branch] if (globalBlockIdx > 0)
+    const uint32_t dstBlockOffset = ZstdInBlockDestOffs[globalBlockIdx];
+
+    if (byteIdx >= blockRef.size)
     {
-        globalBlockGlobalOffset = ZstdInBlockSizePrefix[globalBlockIdx - 1];
-    }
-
-    const uint32_t frameIdx = zstdgpu_BinarySearch(ZstdInPerFrameBlockCountAll, 0, Constants.frameCount, globalBlockIdx);
-
-    const uint32_t frameFirstGlobalBlockIdx = ZstdInPerFrameBlockCountAll[frameIdx];
-
-    uint32_t frameFirstBlockGlobalOffset = 0;
-    [branch] if (frameFirstGlobalBlockIdx > 0)
-    {
-        frameFirstBlockGlobalOffset = ZstdInBlockSizePrefix[frameFirstGlobalBlockIdx - 1];
-    }
-
-    const uint32_t frameRelativeBlockOffset = globalBlockGlobalOffset - frameFirstBlockGlobalOffset;
-
-    const zstdgpu_OffsetAndSize dstFrameOffsetAndSize = ZstdInUnCompressedFramesRefs[frameIdx];
-
-    const uint32_t dstBlockOffset = dstFrameOffsetAndSize.offs + frameRelativeBlockOffset;
-
-    if (byteIdx >= dstFrameOffsetAndSize.size)
         return;
+    }
 
     [branch] if (Constants.flags & 0x1u)
     {

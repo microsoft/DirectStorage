@@ -31,7 +31,17 @@
 #   error 'kzstdgpu_DecompressSequences_LdsStoreCache_DwCount' must be defined before including this '.hlsli'
 #endif
 
-#define NUM_THREADS 32
+#ifndef kzstdgpu_DecompressSequences_ThreadsPerStream
+#   error 'kzstdgpu_DecompressSequences_ThreadsPerStream' must be defined before including this '.hlsli'
+#endif
+
+#if kzstdgpu_DecompressSequences_ThreadsPerStream < 1 || kzstdgpu_DecompressSequences_ThreadsPerStream > 8
+#   error 'kzstdgpu_DecompressSequences_ThreadsPerStream' must be in range [1, 8]
+#endif
+
+#if (kzstdgpu_DecompressSequences_ThreadsPerStream & (kzstdgpu_DecompressSequences_ThreadsPerStream - 1)) != 0
+#   error 'kzstdgpu_DecompressSequences_ThreadsPerStream' must be a power of 2
+#endif
 
 #include "../zstdgpu_shaders.h"
 
@@ -52,7 +62,7 @@ groupshared uint32_t Lds[kzstdgpu_DecompressSequences_MultiStream_LdsOutCache_Ld
 #include "../zstdgpu_lds_hlsl.h"
 
 [RootSignature("DescriptorTable(SRV(t0, numDescriptors=10), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
-[numthreads(NUM_THREADS, 1, 1)]
+[numthreads(kzstdgpu_TgSizeX_DecompressSequences, 1, 1)]
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
     const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
@@ -62,5 +72,11 @@ void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
     ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()
     #include "../zstdgpu_srt_decl_undef.h"
 
-    zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(srt, groupId, i, NUM_THREADS, kzstdgpu_DecompressSequences_StreamsPerTG, kzstdgpu_DecompressSequences_LdsStoreCache_DwCount);
+    zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(
+        srt,
+        groupId,
+        i,
+        kzstdgpu_TgSizeX_DecompressSequences,
+        kzstdgpu_TgSizeX_DecompressSequences / kzstdgpu_DecompressSequences_ThreadsPerStream,
+        kzstdgpu_DecompressSequences_LdsStoreCache_DwCount);
 }
