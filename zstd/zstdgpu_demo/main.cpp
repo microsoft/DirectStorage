@@ -1122,6 +1122,7 @@ static int demoRun(void *demoCtx)
     bool chkCpu = false;
     bool simGpu = false;
     bool d3dDbg = false;
+    bool d3dGbv = false;
     bool d3dGfx = false;
     bool outFrm = false;
     bool ssm = false;
@@ -1231,6 +1232,11 @@ static int demoRun(void *demoCtx)
                 {
                     d3dDbg = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--d3d-gbv"))
+                {
+                    d3dGbv = true;
+                    d3dDbg = true; // --d3d-gbv implies --d3d-dbg (GBV requires the debug layer)
+                }
                 else if (0 == wcscmp(argv[argi], L"--d3d-gfx"))
                 {
                     d3dGfx = true;
@@ -1287,7 +1293,8 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--sim-gpu                 [Optional] After running decompression on GPU, runs key GPU decompressor stages on CPU using intermediate inputs from GPU decompression and validates its outputs against the outputs from reference decompressor.\n");
                 debugPrint(L"\t--gpu-ven-id <id (hex)>   [Optional] VendorId (base16) to use when choosing GPU to run on.\n");
                 debugPrint(L"\t--gpu-dev-id <id (hex)>   [Optional] DeviceId (base16) to use when choosing GPU to run on.\n");
-                debugPrint(L"\t--d3d-dbg                 [Optional] Enables D3D12 debug layer.\n");
+                debugPrint(L"\t--d3d-dbg                 [Optional] Enables D3D12 debug layer (without GPU-Based Validation).\n");
+                debugPrint(L"\t--d3d-gbv                 [Optional] Enables D3D12 GPU-Based Validation (implies --d3d-dbg).\n");
                 debugPrint(L"\t--d3d-gfx                 [Optional] Enables D3D12 Graphics queue (DIRECT), otherwise COMPUTE (by default).\n");
                 debugPrint(L"\t--run-cnt <count>         [Optional] The number of times to repeat the experiment.\n");
                 debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them.\n");
@@ -1388,7 +1395,7 @@ static int demoRun(void *demoCtx)
     static const uint32_t kFrameInterval = 1;
 #endif
 
-    device = zstdgpu_Demo_PlatformInit(gpuVenId, gpuDevId, d3dDbg);
+    device = zstdgpu_Demo_PlatformInit(gpuVenId, gpuDevId, d3dDbg, d3dGbv);
     if (NULL == device)
     {
         debugPrint(L"[FAIL] Couldn't load create D3D12 device with venId=%u, devId=%u. Early Out.\n", gpuVenId, gpuDevId);

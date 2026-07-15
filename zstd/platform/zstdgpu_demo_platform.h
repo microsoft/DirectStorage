@@ -17,7 +17,7 @@ extern "C"
 {
 #endif
 
-struct ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bool d3dDbg);
+struct ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bool d3dDbg, bool d3dGbv);
 
 void zstdgpu_Demo_PlatformTerm(struct ID3D12Device *device);
 

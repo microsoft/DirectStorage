@@ -74,7 +74,7 @@ static void CALLBACK zstdgpu_Demo_D3D12MessageCallback(D3D12_MESSAGE_CATEGORY ca
     wprintf(L"[%ls] %hs\n", zstdgpu_Demo_D3D12SeverityToWide(severity), pDescription);
 }
 
-ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bool d3dDbg)
+ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bool d3dDbg, bool d3dGbv)
 {
     // Default main thread to CPU 0
     SetThreadAffinityMask(GetCurrentThread(), 0x1);
@@ -102,7 +102,10 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
             ID3D12Debug1 *d3d12Debug1 = NULL;
             D3D12AID_CHECK(fnD3D12GetDebugInterface(D3D12AID_IID_PPV_ARGS(&d3d12Debug1)));
             d3d12Debug1->EnableDebugLayer();
-            d3d12Debug1->SetEnableGPUBasedValidation(TRUE);
+            if (d3dGbv)
+            {
+                d3d12Debug1->SetEnableGPUBasedValidation(TRUE);
+            }
             //d3d12Debug1->SetEnableSynchronizedCommandQueueValidation(FALSE /* otherwise enabled by default */);
             D3D12AID_SAFE_RELEASE(d3d12Debug1);
         }
