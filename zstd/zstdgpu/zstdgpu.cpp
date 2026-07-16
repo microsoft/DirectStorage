@@ -2522,30 +2522,32 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Count] and [Parse Compressed Blocks]");
         D3D12_RESOURCE_BARRIER barriers[6];
         uint32_t bc = 0;
-        // last read by [Update Dispatch Args :: Stage 0]
-        // next read by [Readback Counters :: After Block Count] or [Init Resources :: Stage 1]
+
         if (zstdgpu_IsReadbackRequired(req, 0))
         {
+            // last read by [Update Dispatch Args :: Stage 0]
+            // next read by [Readback Counters :: After Block Count]
             setResourceState(barriers, bc ++, req->resData.gpuOnly.Counters, UNORDERED_ACCESS, COPY_SOURCE);
         }
         else
         {
+            // last read by [Update Dispatch Args :: Stage 0]
+            // next read by [Init Resources :: Stage 1]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
-        }
-        // last written by [PrefixSum :: Block Counts]
-        // next bound to [Parse Compressed Blocks] as UAV
-        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountCMP);
-        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountAll);
-        // last written by [Update Dispatch Args :: Stage 0]
-        // next read by ExecuteIndirect calls as argument/count buffers
-        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
-        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
 
-        if (0 == zstdgpu_IsReadbackRequired(req, 0))
-        {
+            // last written by [Update Dispatch Args :: Stage 0]
+            // next read by ExecuteIndirect calls as argument/count buffers
+            setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+            setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+
             // last written by [Update Dispatch Args :: Stage 0]
             // next read by Stage 1/2 predication
             setResourceState(barriers, bc ++, req->resData.gpuOnly.Predicate, UNORDERED_ACCESS, PREDICATION);
+
+            // last written by [PrefixSum :: Block Counts]
+            // next bound to [Parse Compressed Blocks] as UAV
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountCMP);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountAll);
         }
         ZSTDGPU_ASSERT(bc <= _countof(barriers));
         cmdList->ResourceBarrier(bc, barriers);
