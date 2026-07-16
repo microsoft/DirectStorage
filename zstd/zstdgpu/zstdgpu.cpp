@@ -2403,10 +2403,14 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         // last written by [Init Resources :: Stage 0]
         // next written/atomically updated by [Parse Frames :: Count Blocks]
+        // triggers the barrier by immediate dependency between passes
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
-        // last written by [InitResources :: Memset :: Stage 0]
-        // next written/updated by [Parse Compressed Blocks]
-        setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+        if (0 == zstdgpu_IsReadbackRequired(req, 0))
+        {
+            // last written by [InitResources :: Memset :: Stage 0]
+            // next written/updated by [Parse Compressed Blocks]
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+        }
         // last written by [InitResources :: Memset :: Stage 0]
         // next written by [Parse Frames :: Block Counts]
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountRAW);
@@ -2416,7 +2420,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockSizesRAW);
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockSizesRLE);
 
-        ZSTDGPU_ASSERT(bc == _countof(barriers));
+        ZSTDGPU_ASSERT(bc <= _countof(barriers));
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
@@ -2674,7 +2678,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Parse Compressed Blocks] and [Memcpy RAW blocks, Memset RLE blocks]");
-        D3D12_RESOURCE_BARRIER barriers[20];
+        D3D12_RESOURCE_BARRIER barriers[19];
 
         uint32_t bc = 0;
         {
@@ -2695,9 +2699,6 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // last written by [InitResources :: Memset :: Stage 1] to initialise "lookback" region.
             // next written/updated by [Compute `Per-Huffman Table` Literal Stream Count Prefix]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.LitGroupEndPerHuffmanTable);
-            // last written by [InitResources :: Memset :: Stage 0]
-            // next written/updated by [Parse Compressed Blocks]
-            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
             // last written by [Parse Frames :: Collect Blocks]
             // next read by [Parse Compressed Blocks]
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlocksCMPRefs);
