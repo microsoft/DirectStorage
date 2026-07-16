@@ -262,7 +262,8 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
 
 // Glob matcher supporting '*' wildcards and '[a-b]' character ranges.
 // Case-sensitive. Not general-purpose — no '?', no '**', no negation.
-// O(N*M) worst case but N and M are small (paths are typically <256 chars).
+// Fully anchored: the pattern must consume the entire `path`. O(N*M) worst case
+// but N and M are small (paths are typically <256 chars).
 static bool GlobMatch(std::string_view pattern, std::string_view path)
 {
     size_t pi = 0, si = 0;
@@ -327,6 +328,24 @@ static bool GlobMatch(std::string_view pattern, std::string_view path)
     }
     while (pi < pattern.size() && pattern[pi] == '*') ++pi;
     return pi == pattern.size();
+}
+
+// Segment-anchored suffix match. Returns true if `pattern` matches the whole
+// `path`, OR a trailing portion of `path` that begins at a path-segment boundary
+// (position 0, or immediately after a '/'). This lets a glob authored relative
+// to a sub-tree still match when the caller supplies a deeper content root that
+// prepends extra leading path segments. Anchoring on '/' boundaries prevents
+// accidental mid-segment matches.
+static bool GlobMatchSuffix(std::string_view pattern, std::string_view path)
+{
+    if (GlobMatch(pattern, path))
+        return true;
+    for (size_t i = 0; i + 1 < path.size(); ++i)
+    {
+        if (path[i] == '/' && GlobMatch(pattern, path.substr(i + 1)))
+            return true;
+    }
+    return false;
 }
 
 // Normalizes a path for glob matching: relative to contentPath (if provided)
@@ -439,8 +458,31 @@ const AdversarialEntry* AdversarialManifest::Match(const std::string& zstFullPat
     const std::string rel = RelativeAndNormalize(zstFullPath, contentPath);
     for (const auto& e : m_entries)
     {
-        if (GlobMatch(e.pathGlob, rel))
+        if (GlobMatchSuffix(e.pathGlob, rel))
             return &e;
     }
     return nullptr;
+}
+
+size_t AdversarialManifest::CountCoverage(const std::vector<std::string>& files,
+                                          const std::filesystem::path& contentPath) const
+{
+    if (!m_loaded)
+        return 0;
+
+    size_t filesMatched = 0;
+    for (const auto& f : files)
+    {
+        const std::string rel = RelativeAndNormalize(f, contentPath);
+        for (const auto& e : m_entries)
+        {
+            if (GlobMatchSuffix(e.pathGlob, rel))
+            {
+                ++filesMatched;
+                break;
+            }
+        }
+    }
+
+    return filesMatched;
 }

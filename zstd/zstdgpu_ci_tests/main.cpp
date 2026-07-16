@@ -31,6 +31,7 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 // Global config, declared extern in zstdgpu_ci_tests.h. Set once in main(),
 // read from test bodies.
@@ -257,6 +258,26 @@ static int ValidateAndDiscover(TestConfig& config)
                   << " entries from '" << config.adversarialManifestPath << "'"
                   << (manifestFromExplicitFlag ? " (via --adversarial-manifest)." : " (auto-discovered in content-path).")
                   << "\n";
+
+        // Coverage self-check. A manifest that loads but matches NOTHING is
+        // almost always a content-path / glob-prefix misconfiguration (globs are
+        // authored relative to a sub-tree while --content-path points elsewhere).
+        // Left undetected this silently turns every correctly-rejected file into
+        // a spurious failure AND disables the rejection safety net, so fail loud
+        // rather than run with an inert manifest.
+        const size_t filesMatched = config.adversarialManifest.CountCoverage(
+            config.discoveredFiles, config.contentPath);
+        if (config.adversarialManifest.Size() > 0 && filesMatched == 0)
+        {
+            return Fail("adversarial manifest loaded " +
+                        std::to_string(config.adversarialManifest.Size()) +
+                        " entries but matched 0 of " +
+                        std::to_string(config.discoveredFiles.size()) +
+                        " discovered files. This is almost certainly a content-path/glob "
+                        "prefix mismatch: manifest globs are authored relative to a sub-tree. "
+                        "Verify --content-path '" +
+                        config.contentPath + "' points at or above that tree.");
+        }
     }
     else
     {

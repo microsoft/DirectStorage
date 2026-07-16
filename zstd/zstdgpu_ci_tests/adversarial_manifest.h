@@ -58,6 +58,13 @@ public:
     bool Loaded() const { return m_loaded; }
     const std::filesystem::path& SourcePath() const { return m_sourcePath; }
 
+    // Startup coverage self-check. Returns how many of `files` match at least
+    // one manifest entry. The wrapper uses this to fail loud when a loaded
+    // manifest matches nothing (an inert manifest is otherwise indistinguishable
+    // from a working one and silently disables the adversarial-rejection checks).
+    size_t CountCoverage(const std::vector<std::string>& files,
+                         const std::filesystem::path& contentPath) const;
+
 private:
     std::vector<AdversarialEntry> m_entries;
     std::filesystem::path m_sourcePath;
