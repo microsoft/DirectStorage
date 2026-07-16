@@ -2520,7 +2520,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Count] and [Parse Compressed Blocks]");
-        D3D12_RESOURCE_BARRIER barriers[6];
+        D3D12_RESOURCE_BARRIER barriers[10];
         uint32_t bc = 0;
 
         if (zstdgpu_IsReadbackRequired(req, 0))
@@ -2545,9 +2545,13 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             setResourceState(barriers, bc ++, req->resData.gpuOnly.Predicate, UNORDERED_ACCESS, PREDICATION);
 
             // last written by [PrefixSum :: Block Counts]
-            // next bound to [Parse Compressed Blocks] as UAV
+            // next read by [Parse Frames :: Collect Blocks] as UAV
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountRAW);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountRLE);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountCMP);
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockCountAll);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockSizesRAW);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameBlockSizesRLE);
         }
         ZSTDGPU_ASSERT(bc <= _countof(barriers));
         cmdList->ResourceBarrier(bc, barriers);
