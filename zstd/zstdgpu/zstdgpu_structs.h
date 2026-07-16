@@ -1597,23 +1597,22 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , FramesRefs                    , 1)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 0)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_FrameInfo                    , Frames                        , 1)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRAW         , 2)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRLE         , 3)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 4)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 5)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRAW         , 6)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRLE         , 7)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RawBlockSizePrefix            , 8)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RleBlockSizePrefix            , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRAW         , 1)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRLE         , 2)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 3)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 4)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRAW         , 5)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRLE         , 6)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RawBlockSizePrefix            , 7)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RleBlockSizePrefix            , 8)    \
     \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRAWRefs                 ,10)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRLERefs                 ,11)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 ,12)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               ,13)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRawBlock   ,14)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRleBlock   ,15)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,16)
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRAWRefs                 , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRLERefs                 ,10)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 ,11)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               ,12)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRawBlock   ,13)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRleBlock   ,14)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,15)
 
 #define ZSTDGPU_INIT_RESOURCES_SRT()                                                                    \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbsDefault               , 0)    \

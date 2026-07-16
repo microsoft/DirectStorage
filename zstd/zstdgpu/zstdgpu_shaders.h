@@ -567,7 +567,6 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 bits,
                 srt.countBlocksOnly > 0 ? 0u : 1u
             );
-            srt.inoutFrames[threadId] = frameInfo;
 
             if (srt.countBlocksOnly > 0)
             {

@@ -36,8 +36,7 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountAll         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockSizesRAW         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockSizesRLE         )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )   \
-    ZSTDGPU_BUFFER(zstdgpu_FrameInfo                        , Frames                        )
+    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
@@ -268,7 +267,6 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
                                          + kzstdgpu_FseDefaultProbCount_Offs
                                          + kzstdgpu_FseDefaultProbCount_MLen;
 
-    const uint32_t Frames_Count = frameCount;
     const uint32_t FramesRefs_Count = frameCount;
     const uint32_t CompressedData_Count = (dataCount + 3) / 4; // because CompressedData is in uint32_t
     const uint32_t Counters_Count = 1;
