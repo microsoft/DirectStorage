@@ -622,7 +622,6 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
             srt.inoutCounters[0].FseOffs                                     = 1;
             srt.inoutCounters[0].FseMLen                                     = 1;
             srt.inoutCounters[0].DecompressLiteralsGroups                    = 0;
-            srt.inoutCounters[0].DecompressSequencesGroups                   = 0;
             srt.inoutCounters[0].HUF_WgtStreams                              = 0;
             srt.inoutCounters[0].Seq_Streams_DecodedItems                    = 0;
             srt.inoutCounters[0].HUF_Streams_DecodedBytes                    = 0;

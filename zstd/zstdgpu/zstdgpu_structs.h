@@ -294,7 +294,6 @@ typedef struct zstdgpu_Counters
     uint32_t FseOffs;
     uint32_t FseMLen;
     uint32_t DecompressLiteralsGroups;
-    uint32_t DecompressSequencesGroups;
 
     uint32_t HUF_WgtStreams;
     uint32_t Seq_Streams_DecodedItems;
