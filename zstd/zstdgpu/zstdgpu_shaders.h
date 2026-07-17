@@ -467,7 +467,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
                 outBlocksRAWRefs[outFrameInfo.rawBlockStart].offs = blockOffs;
                 outBlocksRAWRefs[outFrameInfo.rawBlockStart].size = blockSize;
 
-                outRawBlockSizes[outFrameInfo.rawBlockStart] = outFrameInfo.rawBlockBytesStart;
+                outRawBlockSizes[outFrameInfo.rawBlockStart] = blockSize;
                 outGlobalBlockIndexPerRawBlock[outFrameInfo.rawBlockStart] = blockIndex;
             }
 
@@ -476,7 +476,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
                 outBlocksRLERefs[outFrameInfo.rleBlockStart].offs = blockOffs;
                 outBlocksRLERefs[outFrameInfo.rleBlockStart].size = blockSize;
 
-                outRleBlockSizes[outFrameInfo.rleBlockStart] = outFrameInfo.rleBlockBytesStart;
+                outRleBlockSizes[outFrameInfo.rleBlockStart] = blockSize;
                 outGlobalBlockIndexPerRleBlock[outFrameInfo.rleBlockStart] = blockIndex;
             }
 
@@ -548,9 +548,6 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 frameInfo.rawBlockStart = srt.inoutPerFrameBlockCountRAW[threadId];
                 frameInfo.rleBlockStart = srt.inoutPerFrameBlockCountRLE[threadId];
                 frameInfo.cmpBlockStart = srt.inoutPerFrameBlockCountCMP[threadId];
-
-                frameInfo.rawBlockBytesStart = srt.inoutPerFrameBlockSizesRAW[threadId];
-                frameInfo.rleBlockBytesStart = srt.inoutPerFrameBlockSizesRLE[threadId];
             }
 
             zstdgpu_ShaderEntry_ParseFrame(
@@ -576,9 +573,6 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 srt.inoutPerFrameBlockCountAll[threadId] = frameInfo.rawBlockStart
                                                          + frameInfo.rleBlockStart
                                                          + frameInfo.cmpBlockStart;
-
-                srt.inoutPerFrameBlockSizesRAW[threadId] = frameInfo.rawBlockBytesStart;
-                srt.inoutPerFrameBlockSizesRLE[threadId] = frameInfo.rleBlockBytesStart;
 
                 const uint32_t rawBlockCount = WaveActiveSum(frameInfo.rawBlockStart);
                 const uint32_t rleBlockCount = WaveActiveSum(frameInfo.rleBlockStart);

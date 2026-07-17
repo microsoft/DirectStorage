@@ -34,7 +34,7 @@ ZSTDGPU_PARSE_FRAMES_SRT()
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=16)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=14)), RootConstants(b0, num32BitConstants=3)")]
 [numthreads(kzstdgpu_TgSizeX_ParseCompressedBlocks, 1, 1)]
 void main(uint i : SV_DispatchThreadId)
 {

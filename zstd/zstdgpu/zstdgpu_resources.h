@@ -34,8 +34,6 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLE         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMP         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountAll         )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockSizesRAW         )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockSizesRLE         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
@@ -274,8 +272,6 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameBlockCountRLE_Count = PerFrameBlockCountRAW_Count;
     const uint32_t PerFrameBlockCountCMP_Count = PerFrameBlockCountRAW_Count;
     const uint32_t PerFrameBlockCountAll_Count = PerFrameBlockCountRAW_Count;
-    const uint32_t PerFrameBlockSizesRAW_Count = PerFrameBlockCountRAW_Count;
-    const uint32_t PerFrameBlockSizesRLE_Count = PerFrameBlockCountRLE_Count;
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
@@ -291,8 +287,8 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t BlocksCMPRefs_Count = cmpBlockCount;
     const uint32_t allBlockCount = rawBlockCount + rleBlockCount + cmpBlockCount;
 
-    const uint32_t RawBlockSizePrefix_Count = rawBlockCount;
-    const uint32_t RleBlockSizePrefix_Count = rleBlockCount;
+    const uint32_t RawBlockSizePrefix_Count = rawBlockCount + zstdgpu_GetLookbackBlockCount(rawBlockCount);
+    const uint32_t RleBlockSizePrefix_Count = rleBlockCount + zstdgpu_GetLookbackBlockCount(rleBlockCount);
 
     // TODO: this must a total of all blocks (including RLE and RAW)
     const uint32_t BlockSizePrefix_Count = allBlockCount + zstdgpu_GetLookbackBlockCount(allBlockCount);
