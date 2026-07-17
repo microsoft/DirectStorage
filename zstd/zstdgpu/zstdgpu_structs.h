@@ -294,7 +294,6 @@ typedef struct zstdgpu_Counters
     uint32_t FseOffs;
     uint32_t FseMLen;
     uint32_t DecompressLiteralsGroups;
-    uint32_t DecompressSequencesGroups;
 
     uint32_t HUF_WgtStreams;
     uint32_t Seq_Streams_DecodedItems;
@@ -326,15 +325,19 @@ static const uint32_t kzstdgpu_DispatchSlot_DecompressSequences          = 8;
 static const uint32_t kzstdgpu_DispatchSlot_FinaliseSequenceOffsets      = 9;
 static const uint32_t kzstdgpu_DispatchSlot_PrefixSequenceOffsets        = 10;
 static const uint32_t kzstdgpu_DispatchSlot_ComputePrefixSum             = 11;
-static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizes             = 12;
-static const uint32_t kzstdgpu_DispatchSlot_MemcpyRAW                    = 13;
-static const uint32_t kzstdgpu_DispatchSlot_MemsetRLE                    = 14;
-static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 15;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 16;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 17;
-static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex            = 18;
-static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockCount         = 19;
-static const uint32_t kzstdgpu_DispatchSlot_Count                        = 20;
+static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizesAll          = 12;
+static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizesRAW          = 13;
+static const uint32_t kzstdgpu_DispatchSlot_PrefixBlockSizesRLE          = 14;
+static const uint32_t kzstdgpu_DispatchSlot_MemcpyRAW                    = 15;
+static const uint32_t kzstdgpu_DispatchSlot_MemsetRLE                    = 16;
+static const uint32_t kzstdgpu_DispatchSlot_ParseCompressedBlocks        = 17;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_RawBlockLookback      = 18;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_RleBlockLookback      = 19;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockLookback      = 20;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_AllBlockLookback      = 21;
+static const uint32_t kzstdgpu_DispatchSlot_PropagateFseIndex            = 22;
+static const uint32_t kzstdgpu_DispatchSlot_Memset_CmpBlockCount         = 23;
+static const uint32_t kzstdgpu_DispatchSlot_Count                        = 24;
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_DispatchSlot_CmdsPerSlot                  = 1;
@@ -1598,23 +1601,20 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     ZSTDGPU_RO_BUFFER_DECL(zstdgpu_OffsetAndSize                , FramesRefs                    , 1)    \
     \
     ZSTDGPU_RW_BUFFER_DECL(zstdgpu_Counters                     , Counters                      , 0)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_FrameInfo                    , Frames                        , 1)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRAW         , 2)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRLE         , 3)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 4)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 5)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRAW         , 6)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockSizesRLE         , 7)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RawBlockSizePrefix            , 8)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RleBlockSizePrefix            , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRAW         , 1)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountRLE         , 2)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountCMP         , 3)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , PerFrameBlockCountAll         , 4)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RawBlockSizePrefix            , 5)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , RleBlockSizePrefix            , 6)    \
     \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRAWRefs                 ,10)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRLERefs                 ,11)    \
-    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 ,12)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               ,13)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRawBlock   ,14)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRleBlock   ,15)    \
-    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,16)
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRAWRefs                 , 7)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksRLERefs                 , 8)    \
+    ZSTDGPU_RW_BUFFER_DECL(zstdgpu_OffsetAndSize                , BlocksCMPRefs                 , 9)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , BlockSizePrefix               ,10)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRawBlock   ,11)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerRleBlock   ,12)    \
+    ZSTDGPU_RW_BUFFER_DECL(uint32_t                             , GlobalBlockIndexPerCmpBlock   ,13)
 
 #define ZSTDGPU_INIT_RESOURCES_SRT()                                                                    \
     ZSTDGPU_RO_TYPED_BUFFER_DECL(int32_t, int16_t               , FseProbsDefault               , 0)    \
