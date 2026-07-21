@@ -577,16 +577,17 @@ static void zstdgpu_ResourceDataGpu_ReInitOutputsExternal(zstdgpu_ResourceDataGp
             &bufDesc,                                                   \
             D3D12_RESOURCE_STATE_##state                                \
         );                                                              \
-        outResData->dest.name->SetName(L""#name);
+        outResData->dest.name->SetName(L"" #name "_" #dest);
 
 #else
-    #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)                      \
-        bufDesc.Width = info->name##_ByteSizeInternal;                          \
-        outResData->dest.name = d3d12aid_Resource_CreateCommitted(              \
-            device,                                                             \
-            &bufDesc,                                                           \
-            D3D12_HEAP_TYPE_##type                                              \
-        );
+    #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)              \
+        bufDesc.Width = info->name##_ByteSizeInternal;                  \
+        outResData->dest.name = d3d12aid_Resource_CreateCommitted(      \
+            device,                                                     \
+            &bufDesc,                                                   \
+            D3D12_HEAP_TYPE_##type                                      \
+        );                                                              \
+        outResData->dest.name->SetName(L"" #name "_" #dest);
 #endif
 
 #define ZSTDGPU_BUFFER(type, name)                                              \
@@ -660,29 +661,6 @@ static void zstdgpu_ResourceDataGpu_Init_CpuToGpu(zstdgpu_ResourceDataGpu *outRe
 }
 
 #undef  ZSTDGPU_BUFFER
-
-#undef  ZSTDGPU_CREATE_BUFFER
-
-#if USE_PLACED_BUFFERS
-    #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)              \
-        bufDesc.Width = info->name##_ByteSizeInternal;                  \
-        outResData->dest.name = d3d12aid_Resource_CreatePlaced(         \
-            device,                                                     \
-            heap,                                                       \
-            baseOffset + info->name##_##dest##ByteOffset,               \
-            &bufDesc,                                                   \
-            D3D12_RESOURCE_STATE_##state                                \
-        );
-
-#else
-    #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)              \
-        bufDesc.Width = info->name##_ByteSizeInternal;                  \
-        outResData->dest.name = d3d12aid_Resource_CreateCommitted(      \
-            device,                                                     \
-            &bufDesc,                                                   \
-            D3D12_HEAP_TYPE_##type                                      \
-        );
-#endif
 
 #define ZSTDGPU_BUFFER(type, name)                                                          \
     if (NULL == outResData->gpu2Cpu.name && 0 != info->name##_ByteSizeInternal)             \
