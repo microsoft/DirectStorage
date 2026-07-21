@@ -51,6 +51,9 @@
 
 static bool Gd3dDbg = false;
 static DWORD Gd3d12MsgCookie = 0;
+static ID3D12InfoQueue *Gd3d12InfoQueue = NULL;
+static void  *Gd3d12InfoQueueMemory = NULL;
+static size_t Gd3d12InfoQueueMemoryByteCount = 0;
 
 static const wchar_t *zstdgpu_Demo_D3D12SeverityToWide(D3D12_MESSAGE_SEVERITY severity)
 {
@@ -152,27 +155,43 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
 
             if (Gd3dDbg)
             {
+                ID3D12InfoQueue *d3d12InfoQueue = NULL;
+#ifdef  __ID3D12InfoQueue1_INTERFACE_DEFINED__
                 ID3D12InfoQueue1 *d3d12InfoQueue1 = NULL;
+                if (S_OK == device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1)))
+                {
+                    d3d12InfoQueue = d3d12InfoQueue1;
+                }
+#endif
+                if (NULL == d3d12InfoQueue)
+                {
+                    D3D12AID_CHECK(device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue)));
+                    Gd3d12InfoQueue = d3d12InfoQueue;
+                }
                 BOOL isDbg = IsDebuggerPresent();
-                device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1));
 
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, isDbg);
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, isDbg);
-                d3d12InfoQueue1->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, isDbg);
-                d3d12InfoQueue1->ClearRetrievalFilter();
-                d3d12InfoQueue1->ClearStorageFilter();
-                d3d12InfoQueue1->SetMuteDebugOutput(FALSE);
+                d3d12InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, isDbg);
+                d3d12InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, isDbg);
+                d3d12InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, isDbg);
+                d3d12InfoQueue->ClearRetrievalFilter();
+                d3d12InfoQueue->ClearStorageFilter();
+                d3d12InfoQueue->SetMuteDebugOutput(FALSE);
 
                 // Disable State Creation message category
                 D3D12_MESSAGE_CATEGORY disableCategoryList [] = { D3D12_MESSAGE_CATEGORY_STATE_CREATION };
                 D3D12_INFO_QUEUE_FILTER filter = {};
                 filter.DenyList.pCategoryList = disableCategoryList;
                 filter.DenyList.NumCategories = _countof(disableCategoryList);
-                d3d12InfoQueue1->PushStorageFilter(&filter);
-                d3d12InfoQueue1->PushRetrievalFilter(&filter);
-                d3d12InfoQueue1->RegisterMessageCallback(zstdgpu_Demo_D3D12MessageCallback, D3D12_MESSAGE_CALLBACK_FLAG_NONE, NULL, &Gd3d12MsgCookie);
+                d3d12InfoQueue->PushStorageFilter(&filter);
+                d3d12InfoQueue->PushRetrievalFilter(&filter);
 
-                D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
+#ifdef __ID3D12InfoQueue1_INTERFACE_DEFINED__
+                if (NULL != d3d12InfoQueue1)
+                {
+                    d3d12InfoQueue1->RegisterMessageCallback(zstdgpu_Demo_D3D12MessageCallback, D3D12_MESSAGE_CALLBACK_FLAG_NONE, NULL, &Gd3d12MsgCookie);
+                    D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
+                }
+#endif
             }
             return device;
         }
@@ -186,10 +205,18 @@ void zstdgpu_Demo_PlatformTerm(struct ID3D12Device *device)
 {
     if (Gd3dDbg)
     {
+        D3D12AID_SAFE_RELEASE(Gd3d12InfoQueue);
+        if (NULL != Gd3d12InfoQueueMemory)
+        {
+            free(Gd3d12InfoQueueMemory);
+            Gd3d12InfoQueueMemory = NULL;
+            Gd3d12InfoQueueMemoryByteCount = 0;
+        }
+
         ID3D12DebugDevice1 *d3d12DebugDevice1 = NULL;
-        ID3D12InfoQueue1 *d3d12InfoQueue1 = NULL;
+        //ID3D12InfoQueue1 *d3d12InfoQueue1 = NULL;
         device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12DebugDevice1));
-        device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1));
+        //device->QueryInterface(D3D12AID_IID_PPV_ARGS(&d3d12InfoQueue1));
         D3D12AID_SAFE_RELEASE(device);
 
         d3d12DebugDevice1->ReportLiveDeviceObjects(D3D12_RLDO_SUMMARY | D3D12_RLDO_DETAIL | D3D12_RLDO_IGNORE_INTERNAL);
@@ -206,7 +233,7 @@ void zstdgpu_Demo_PlatformTerm(struct ID3D12Device *device)
             Gd3d12MsgCookie = 0;
         }
 #endif
-        D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
+        //D3D12AID_SAFE_RELEASE(d3d12InfoQueue1);
 
         IDXGIDebug *dxgiDebug = NULL;
         IDXGIInfoQueue *dxgiInfoQueue = NULL;
@@ -230,5 +257,36 @@ void zstdgpu_Demo_PlatformTerm(struct ID3D12Device *device)
 
 uint32_t zstdgpu_Demo_PlatformTick(void)
 {
+    if (NULL != Gd3d12InfoQueue)
+    {
+        const uint64_t msgCnt = Gd3d12InfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+        for (uint64_t i = 0; i < msgCnt; ++i)
+        {
+            size_t msgByteCnt = 0;
+            if (S_OK == Gd3d12InfoQueue->GetMessageW(i, NULL, &msgByteCnt))
+            {
+                if (msgByteCnt > Gd3d12InfoQueueMemoryByteCount)
+                {
+                    free(Gd3d12InfoQueueMemory);
+                    Gd3d12InfoQueueMemory = NULL;
+                    Gd3d12InfoQueueMemoryByteCount = 0;
+                }
+                if (NULL == Gd3d12InfoQueueMemory)
+                {
+                    Gd3d12InfoQueueMemory = malloc(msgByteCnt);
+                    Gd3d12InfoQueueMemoryByteCount = msgByteCnt;
+                }
+                if (NULL != Gd3d12InfoQueueMemory)
+                {
+                    D3D12_MESSAGE* msg = (D3D12_MESSAGE *)Gd3d12InfoQueueMemory;
+                    if (S_OK == Gd3d12InfoQueue->GetMessageW(i, msg, &msgByteCnt))
+                    {
+                        zstdgpu_Demo_D3D12MessageCallback(msg->Category, msg->Severity, msg->ID, msg->pDescription, NULL);
+                    }
+                }
+            }
+        }
+        Gd3d12InfoQueue->ClearStoredMessages();
+    }
     return 1;
 }
