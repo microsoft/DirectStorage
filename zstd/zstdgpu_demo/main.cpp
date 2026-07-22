@@ -1601,7 +1601,7 @@ static int demoRun(void *demoCtx)
                     if (name##HeapSizeReq > name##HeapSize[i])      \
                     {                                               \
                         D3D12AID_SAFE_RELEASE(name##Heap[i]);       \
-                        name##Heap[i] = d3d12aid_Heap_Create(device, name##HeapSizeReq, 0, name##Type);\
+                        name##Heap[i] = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, name##HeapSizeReq, 0, name##Type, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);\
                         name##HeapSize[i] = name##HeapSizeReq;      \
                     }
                 D3D12_HEAP_TYPE defaultType = D3D12_HEAP_TYPE_DEFAULT;
