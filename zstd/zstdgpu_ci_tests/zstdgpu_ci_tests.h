@@ -31,6 +31,8 @@ struct TestConfig
     std::string adversarialManifestPath;        // Optional path to adversarial_manifest.json (--adversarial-manifest)
     int runCount = 40;                          // Number of iterations for performance tests
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
+    int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).
+    int gbvSampleCount = 10;                    // Number of files the Gbv/GbvSeq scenarios run on, chosen by an even stride across the sorted corpus. <= 0 = no cap (run GBV on all files).
 
     // Cached list of .zst files discovered under contentPath. Populated once
     // in main() after validation; consumed by GetTestFiles() at fixture
@@ -45,9 +47,7 @@ struct TestConfig
 };
 
 // Global config, set once in main() before RUN_ALL_TESTS(), then read-only
-// from test bodies. A plain extern global instead of a getter/setter is enough
-// here — the "set once, then read" contract is enforced by the main() call
-// sequence and there is no benefit to hiding the storage.
+// from test bodies.
 extern TestConfig g_testConfig;
 
 // File discovery — scans a directory for *.zst files. Returns sorted full paths.

@@ -10,17 +10,25 @@
 // Test definitions and demo runner for the Zstd GPU CI tests.
 //
 // Parameterized test suite (ZstdGpuDemoTests) instantiated once per .zst file
-// under the content path. Each file produces 6 scenarios:
+// under the content path. Each file produces the following scenarios:
 //
-//   Correctness (ASSERT — hard fail):
-//     - SimulationCheck  : --sim-gpu with CPU+GPU validation
-//     - D3D12DebugLayer  : --d3d-dbg
-//     - ExternalMemory   : --ext-mem
-//     - GraphicsQueue    : --d3d-gfx
+//   Correctness — "for all data" (ASSERT — hard fail):
+//     - GpuCheck           : --chk-gpu
+//     - GpuCheckSeq        : --chk-gpu --seq-cnt
+//     - ExternalMemory     : --chk-gpu --ext-mem
+//     - ExternalMemorySeq  : --chk-gpu --ext-mem --seq-cnt
+//     - D3D12DebugLayer    : --chk-gpu --d3d-dbg            (skipped on ARM)
+//     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --seq-cnt  (skipped on ARM)
+//     - SimulationCheck    : --chk-gpu --chk-cpu --sim-gpu
+//     - SimulationCheckSeq : --chk-gpu --chk-cpu --sim-gpu --seq-cnt
+//
+//   Correctness — GBV (ASSERT; skipped on ARM; run only on the stride-selected
+//   subset of files chosen by --gbv-sample-count):
+//     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
+//     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
 //
 //   Performance (EXPECT — soft fail, also verify CSV output was written):
-//     - OverallThroughput: --prf-lvl 0 → results/throughput_<stem>.csv
-//     - PerStageTiming   : --prf-lvl 2 → results/stages_<stem>.csv
+//     - PerStageTiming     : --prf-lvl 2 --d3d-gfx --seq-cnt → results/stages_<stem>.csv
 
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
@@ -30,6 +38,7 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 #include <Windows.h>
 
 // Internal types + forward declarations
@@ -63,7 +72,8 @@ namespace
         const std::string& zstFile,
         int profilingLevel,
         int runCount,
-        const std::string& csvOutputPath);
+        const std::string& csvOutputPath,
+        const std::vector<std::string>& extraFlags);
 }
 
 // Helpers
@@ -161,6 +171,62 @@ static bool IsFuzzContent(const std::string& zstFile)
     return false;
 }
 
+// Returns the set of files the Gbv/GbvSeq scenarios run on: an even, endpoint-
+// inclusive stride of g_testConfig.gbvSampleCount files across the sorted
+// discovered-file list. A count <= 0, or a corpus no larger than the count,
+// selects every file; a count of 1 selects the first file. Computed once.
+static const std::unordered_set<std::string>& GbvSampledFiles()
+{
+    static const std::unordered_set<std::string> selected = []
+    {
+        std::unordered_set<std::string> s;
+        const auto& files = g_testConfig.discoveredFiles;   // sorted full paths
+        const size_t n = files.size();
+        if (n == 0)
+            return s;
+        const int target = g_testConfig.gbvSampleCount;
+        if (target <= 0 || n <= static_cast<size_t>(target))
+        {
+            // count <= 0, or corpus no larger than the count: select every file.
+            s.insert(files.begin(), files.end());
+            return s;
+        }
+        if (target == 1)
+        {
+            s.insert(files.front());
+            return s;
+        }
+        const size_t t = static_cast<size_t>(target);
+        // Endpoint-inclusive stride: indices 0 .. n-1 taken in t steps so the
+        // sample spans the whole sorted list (first through last).
+        for (size_t i = 0; i < t; ++i)
+        {
+            const size_t idx = (i * (n - 1)) / (t - 1);
+            s.insert(files[idx]);
+        }
+        return s;
+    }();
+    return selected;
+}
+
+// True if this file is one of the stride-selected files the GBV scenarios run on.
+static bool IsSelectedForGbv(const std::string& zstFile)
+{
+    const auto& sel = GbvSampledFiles();
+    return sel.find(zstFile) != sel.end();
+}
+
+// True if the file is smaller than --perf-min-mb. Returns false when
+// --perf-min-mb <= 0 (disabled) or the file size cannot be read.
+static bool IsSmallForPerf(const std::string& zstFile)
+{
+    if (g_testConfig.perfMinMB <= 0) return false;
+    std::error_code ec;
+    auto size = std::filesystem::file_size(zstFile, ec);
+    if (ec) return false;
+    return size < static_cast<uintmax_t>(g_testConfig.perfMinMB) * 1024ULL * 1024ULL;
+}
+
 // If the adversarial manifest lists this file, verify that the demo rejected it
 // with the expected exit code. Returns true iff the outcome is a correct
 // rejection, or false if the file isn't in the manifest (in which case the
@@ -242,7 +308,8 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 
 // Run a performance scenario. Spawns zstdgpu_demo.exe with profiling flags and requests CSV output. Uses EXPECT (not ASSERT) to verify the demo executed successfully and produced CSV output.
 // main() has already validated the demo path exists.
-static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
+static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
+                                const std::vector<std::string>& extraFlags)
 {
     // Fuzzing content mixes clean and corrupt inputs with varying code paths,
     // so its timing isn't meaningful perf data — skip it before running the demo.
@@ -254,19 +321,26 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel)
         return;
     }
 
-    // Build CSV output path matching spec convention:
-    //   prf-lvl 0 → results/throughput_<stem>.csv
-    //   prf-lvl 2 → results/stages_<stem>.csv
+    // Skip files smaller than --perf-min-mb.
+    if (IsSmallForPerf(zstFile))
+    {
+        GTEST_SKIP()
+            << "Perf test skipped: file is under --perf-min-mb ("
+            << g_testConfig.perfMinMB << " MB).\n"
+            << "File: " << zstFile;
+        return;
+    }
+
+    // Perf CSVs are written as stages_<stem>.csv under the results directory.
     std::string stem = std::filesystem::path(zstFile).stem().string();
-    std::string prefix = (profilingLevel == 0) ? "throughput" : "stages";
     std::filesystem::path resultsDir = std::filesystem::path(g_testConfig.logDir) / "results";
     if (!std::filesystem::exists(resultsDir))
     {
         std::filesystem::create_directories(resultsDir);
     }
-    std::string csvPath = (resultsDir / (prefix + "_" + stem + ".csv")).string();
+    std::string csvPath = (resultsDir / ("stages_" + stem + ".csv")).string();
 
-    auto args = BuildPerformanceArgs(zstFile, profilingLevel, g_testConfig.runCount, csvPath);
+    auto args = BuildPerformanceArgs(zstFile, profilingLevel, g_testConfig.runCount, csvPath, extraFlags);
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
     // Write to log file before assertions so logs are captured even if a check fails.
@@ -312,11 +386,28 @@ class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
 {
 };
 
-// --- Correctness tests ---
+// --- Correctness tests — "for all data" matrix ---
 
-TEST_P(ZstdGpuDemoTests, SimulationCheck)
+// GPU correctness check (--chk-gpu only).
+TEST_P(ZstdGpuDemoTests, GpuCheck)
 {
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--chk-cpu", "--sim-gpu"});
+    RunCorrectnessTest(GetParam(), {"--chk-gpu"});
+}
+
+// GpuCheck in single-submission mode (--seq-cnt).
+TEST_P(ZstdGpuDemoTests, GpuCheckSeq)
+{
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--seq-cnt"});
+}
+
+TEST_P(ZstdGpuDemoTests, ExternalMemory)
+{
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
+}
+
+TEST_P(ZstdGpuDemoTests, ExternalMemorySeq)
+{
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
 }
 
 TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
@@ -328,26 +419,64 @@ TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
 #endif
 }
 
-TEST_P(ZstdGpuDemoTests, ExternalMemory)
+TEST_P(ZstdGpuDemoTests, D3D12DebugLayerSeq)
 {
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
+#endif
 }
 
-TEST_P(ZstdGpuDemoTests, GraphicsQueue)
+TEST_P(ZstdGpuDemoTests, SimulationCheck)
 {
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-gfx"});
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--chk-cpu", "--sim-gpu"});
+}
+
+TEST_P(ZstdGpuDemoTests, SimulationCheckSeq)
+{
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--chk-cpu", "--sim-gpu", "--seq-cnt"});
+}
+
+// --- Correctness tests — GBV ---
+
+TEST_P(ZstdGpuDemoTests, Gbv)
+{
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
+    if (!IsSelectedForGbv(GetParam()))
+    {
+        GTEST_SKIP() << "GBV skipped: file is not in the stride-selected GBV sample ("
+                     << g_testConfig.gbvSampleCount << " files).";
+        return;
+    }
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv"});
+#endif
+}
+
+TEST_P(ZstdGpuDemoTests, GbvSeq)
+{
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
+    if (!IsSelectedForGbv(GetParam()))
+    {
+        GTEST_SKIP() << "GBV skipped: file is not in the stride-selected GBV sample ("
+                     << g_testConfig.gbvSampleCount << " files).";
+        return;
+    }
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv", "--seq-cnt"});
+#endif
 }
 
 // --- Performance tests ---
 
-TEST_P(ZstdGpuDemoTests, OverallThroughput)
-{
-    RunPerformanceTest(GetParam(), 0);
-}
-
+// Per-stage timings (--prf-lvl 2) on the DIRECT queue (--d3d-gfx) in single-
+// submission mode (--seq-cnt). Skips fuzz content and files under --perf-min-mb.
 TEST_P(ZstdGpuDemoTests, PerStageTiming)
 {
-    RunPerformanceTest(GetParam(), 2);
+    RunPerformanceTest(GetParam(), 2, {"--d3d-gfx", "--seq-cnt"});
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -510,12 +639,14 @@ std::vector<std::string> BuildCorrectnessArgs(
 }
 
 // Builds argument list for performance tests: run N iterations at the specified
-// profiling level, optionally writing per-run timing data to a CSV file.
+// profiling level, optionally writing per-run timing data to a CSV file. Any
+// scenario-specific demo flags are appended from `extraFlags`.
 std::vector<std::string> BuildPerformanceArgs(
     const std::string& zstFile,
     int profilingLevel,
     int runCount,
-    const std::string& csvOutputPath)
+    const std::string& csvOutputPath,
+    const std::vector<std::string>& extraFlags)
 {
     std::vector<std::string> args;
     args.push_back("--zst");
@@ -528,6 +659,10 @@ std::vector<std::string> BuildPerformanceArgs(
     {
         args.push_back("--out-csv");
         args.push_back(csvOutputPath);
+    }
+    for (const auto& flag : extraFlags)
+    {
+        args.push_back(flag);
     }
     return args;
 }
