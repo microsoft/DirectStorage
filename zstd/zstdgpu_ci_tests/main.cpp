@@ -41,9 +41,8 @@ TestConfig g_testConfig;
 //
 // Uses the non-throwing overloads of recursive_directory_iterator so a single
 // unreadable subdirectory anywhere in the tree does not abort the entire walk
-// (which would take down the process before any test runs — see review
-// feedback on the throwing overload). Per-entry errors are logged as warnings
-// and the walk continues.
+// (the throwing overloads would terminate the process before any test runs).
+// Per-entry errors are logged as warnings and the walk continues.
 
 std::vector<std::string> DiscoverZstFiles(const std::string& contentPath)
 {
@@ -97,8 +96,8 @@ std::vector<std::string> DiscoverZstFiles(const std::string& contentPath)
 
 // CLI and entry point
 
-// QOL for diagnostics. For running manually
-// Activate with --help-ci to avoid conflicting with GTest's own --help output.
+// Prints CLI usage for manual and diagnostic runs. Activated with --help-ci to
+// avoid conflicting with GTest's own --help output.
 static void PrintUsage(const char* exe)
 {
     std::cout << "Usage: " << exe << " [gtest_options] [options]\n"
@@ -110,6 +109,10 @@ static void PrintUsage(const char* exe)
               << "  --log-file <path>       Consolidated text log file\n"
               << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
+              << "  --perf-min-mb <N>       Minimum .zst file size (MB) required for perf tests (default: 4).\n"
+              << "                          Smaller files skip perf; individually-compressed textures are not representative of throughput.\n"
+              << "  --gbv-sample-count <N>  Number of files the GBV scenarios run on, sampled by an even stride\n"
+              << "                          across the sorted corpus (default: 10). A value <= 0 runs GBV on all files.\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -170,6 +173,18 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         else if (std::strcmp(argv[i], "--adversarial-manifest") == 0 && i + 1 < argc)
         {
             config.adversarialManifestPath = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "--perf-min-mb") == 0 && i + 1 < argc)
+        {
+            config.perfMinMB = std::atoi(argv[++i]);
+            if (config.perfMinMB < 0)
+                config.perfMinMB = 0;   // <= 0 disables the perf-size skip (all files eligible for perf)
+        }
+        else if (std::strcmp(argv[i], "--gbv-sample-count") == 0 && i + 1 < argc)
+        {
+            config.gbvSampleCount = std::atoi(argv[++i]);
+            if (config.gbvSampleCount < 0)
+                config.gbvSampleCount = 0;   // <= 0 = no cap; GBV runs on every file
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
