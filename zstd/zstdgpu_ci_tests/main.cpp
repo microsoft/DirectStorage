@@ -178,7 +178,7 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         {
             config.perfMinMB = std::atoi(argv[++i]);
             if (config.perfMinMB < 0)
-                config.perfMinMB = 0;   // 0 = disable perf-size skip; sub-1MB files still skip via > 0 check
+                config.perfMinMB = 0;   // <= 0 disables the perf-size skip (all files eligible for perf)
         }
         else if (std::strcmp(argv[i], "--gbv-sample-count") == 0 && i + 1 < argc)
         {

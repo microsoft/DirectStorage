@@ -443,7 +443,7 @@ TEST_P(ZstdGpuDemoTests, SimulationCheckSeq)
 TEST_P(ZstdGpuDemoTests, Gbv)
 {
 #if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
-    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+    GTEST_SKIP() << "GBV tests are skipped on ARM platforms.";
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
@@ -458,7 +458,7 @@ TEST_P(ZstdGpuDemoTests, Gbv)
 TEST_P(ZstdGpuDemoTests, GbvSeq)
 {
 #if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
-    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+    GTEST_SKIP() << "GBV tests are skipped on ARM platforms.";
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
