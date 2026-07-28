@@ -180,20 +180,38 @@ static const std::unordered_set<std::string>& GbvSampledFiles()
     static const std::unordered_set<std::string> selected = []
     {
         std::unordered_set<std::string> s;
-        const auto& files = g_testConfig.discoveredFiles;   // sorted full paths
-        const size_t n = files.size();
+        std::vector<std::string> smallFiles;
+        {
+            const auto& files = g_testConfig.discoveredFiles; // sorted full paths
+            std::copy_if(
+                files.begin(),
+                files.end(),
+                std::back_inserter(smallFiles),
+                [](const std::string& filename)
+                {
+                    try
+                    {
+                        return std::filesystem::file_size(filename) < g_testConfig.gbvMaxMB * (1024 * 1024);
+                    }
+                    catch (const std::filesystem::filesystem_error&)
+                    {
+                        return false; // skip missing/inaccessible files
+                    }
+                });
+        }
+        const size_t n = smallFiles.size();
         if (n == 0)
             return s;
         const int target = g_testConfig.gbvSampleCount;
         if (target <= 0 || n <= static_cast<size_t>(target))
         {
             // count <= 0, or corpus no larger than the count: select every file.
-            s.insert(files.begin(), files.end());
+            s.insert(smallFiles.begin(), smallFiles.end());
             return s;
         }
         if (target == 1)
         {
-            s.insert(files.front());
+            s.insert(smallFiles.front());
             return s;
         }
         const size_t t = static_cast<size_t>(target);
@@ -202,7 +220,7 @@ static const std::unordered_set<std::string>& GbvSampledFiles()
         for (size_t i = 0; i < t; ++i)
         {
             const size_t idx = (i * (n - 1)) / (t - 1);
-            s.insert(files[idx]);
+            s.insert(smallFiles[idx]);
         }
         return s;
     }();

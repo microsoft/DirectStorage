@@ -113,6 +113,7 @@ static void PrintUsage(const char* exe)
               << "                          Smaller files skip perf; individually-compressed textures are not representative of throughput.\n"
               << "  --gbv-sample-count <N>  Number of files the GBV scenarios run on, sampled by an even stride\n"
               << "                          across the sorted corpus (default: 10). A value <= 0 runs GBV on all files.\n"
+              << "  --gbv-max-mb <N>        Max size of file to use for GBV tests in MB (default: 1)\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -185,6 +186,12 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.gbvSampleCount = std::atoi(argv[++i]);
             if (config.gbvSampleCount < 0)
                 config.gbvSampleCount = 0;   // <= 0 = no cap; GBV runs on every file
+        }
+        else if (std::strcmp(argv[i], "--gbv-max-mb") == 0 && i + 1 < argc)
+        {
+            config.gbvMaxMB = std::atoi(argv[++i]);
+            if (config.gbvMaxMB< 0)
+                config.gbvMaxMB = INT_MAX / (1024*1024); // <= 0 = no cap; GBV runs on any file size
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {

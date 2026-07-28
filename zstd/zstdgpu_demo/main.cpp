@@ -1437,12 +1437,16 @@ static int demoRun(void *demoCtx)
         zstdReferenceUncompressedDataSize = (uint32_t)ZSTD_get_decompressed_size(zstdData, zstdDataSize);
         zstdReferenceUncompressedData = malloc(zstdReferenceUncompressedDataSize);
 
+        // Clear the buffer to a known zero state in case ZSTD_decompress writes less data than the frame header claims (this matches the GPU)
+        memset(zstdReferenceUncompressedData, 0x00, zstdReferenceUncompressedDataSize);
+
         // TODO: consider "per-file" or "per-frame" state (not just state internal) for validation layer
         zstdgpu_ReferenceStore_Report_ChunkBase(zstdData);
         zstdgpu_ReferenceStore_AllocateMemory();
 
         // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth data.
-        ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
+        int r = ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
+        debugPrint(L"[INFO] ZSTD_decompress  input size: %d  output size: %d   result: %d\n", zstdDataSize, zstdReferenceUncompressedDataSize, r); 
     }
 
     if (chkCpu)
