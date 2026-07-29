@@ -45,6 +45,7 @@ struct ScenarioSkip
 {
     std::string scenarioGlob;                      // Glob over the GTest scenario name (JSON key "scenario_glob")
     std::string gpuNameGlob;                       // Glob over the --gpu-name value (JSON key "gpu_name_glob")
+    std::string pathGlob;                          // Optional glob over the file path relative to --content-path (JSON key "path_glob"); empty matches every file in the scenario
     std::string reason;                            // Explanation shown in the skip message (JSON key "reason")
     std::string trackingBug;                       // Reference for the skip, e.g. a bug ID (JSON key "tracking_bug")
 };
@@ -68,11 +69,15 @@ public:
     const AdversarialEntry* Match(const std::string& zstFullPath,
                                   const std::filesystem::path& contentPath) const;
 
-    // Returns the first scenario_skip whose scenario_glob matches scenarioName
-    // and whose gpu_name_glob matches gpuName, or nullptr. Also returns nullptr
-    // when the manifest isn't loaded or either argument is empty.
+    // Returns the first scenario_skip whose scenario_glob matches scenarioName,
+    // gpu_name_glob matches gpuName, and (when set) path_glob matches the file
+    // path relative to contentPath. Returns nullptr on no match, when the
+    // manifest isn't loaded, or when scenarioName/gpuName is empty. A skip with
+    // an empty path_glob matches every file in the scenario.
     const ScenarioSkip* MatchScenarioSkip(const std::string& scenarioName,
-                                          const std::string& gpuName) const;
+                                          const std::string& gpuName,
+                                          const std::string& zstFullPath,
+                                          const std::filesystem::path& contentPath) const;
 
     size_t Size() const { return m_entries.size(); }
     size_t ScenarioSkipCount() const { return m_scenarioSkips.size(); }

@@ -273,10 +273,10 @@ static std::string CurrentScenarioName()
 // --gpu-name, returns the message to pass to GTEST_SKIP; otherwise returns
 // empty. GTEST_SKIP must stay in the caller (the Run*Test helpers) so control
 // returns from the test after the skip is recorded.
-static std::string ScenarioSkipReason()
+static std::string ScenarioSkipReason(const std::string& zstFile)
 {
     const ScenarioSkip* s = g_testConfig.adversarialManifest.MatchScenarioSkip(
-        CurrentScenarioName(), g_testConfig.gpuName);
+        CurrentScenarioName(), g_testConfig.gpuName, zstFile, g_testConfig.contentPath);
     if (!s)
         return {};
     std::string msg = "Scenario '" + CurrentScenarioName() + "' skipped on GPU '" +
@@ -295,7 +295,7 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 {
     // If the manifest marks this scenario as skipped for this GPU, skip before
     // spawning the demo.
-    if (std::string skip = ScenarioSkipReason(); !skip.empty())
+    if (std::string skip = ScenarioSkipReason(zstFile); !skip.empty())
     {
         GTEST_SKIP() << skip;
         return;
@@ -351,7 +351,7 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
 {
     // Skip if the manifest marks this scenario as skipped for this GPU; this
     // takes precedence over the fuzz/size skips below.
-    if (std::string skip = ScenarioSkipReason(); !skip.empty())
+    if (std::string skip = ScenarioSkipReason(zstFile); !skip.empty())
     {
         GTEST_SKIP() << skip;
         return;

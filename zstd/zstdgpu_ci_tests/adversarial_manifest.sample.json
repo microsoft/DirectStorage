@@ -32,6 +32,13 @@
       "gpu_name_glob": "*Fabrikam GPU 9000*",
       "reason": "Example: quarantine a single named scenario on one specific device model.",
       "tracking_bug": "Replace with a tracking reference."
+    },
+    {
+      "scenario_glob": "Gbv*",
+      "gpu_name_glob": "*Contoso*",
+      "path_glob": "<path>/example_single_file.zst",
+      "reason": "Example: optional path_glob narrows the skip to one file (or a glob subtree) within the scenario/GPU match. Omit path_glob to skip every file in the scenario.",
+      "tracking_bug": "Replace with a tracking reference."
     }
   ]
 }

@@ -261,7 +261,8 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
 }
 
 // Parses one scenario_skip object. scenario_glob and gpu_name_glob are
-// required; reason and tracking_bug are optional; unknown fields are skipped.
+// required; path_glob, reason, and tracking_bug are optional; unknown fields
+// are skipped.
 static bool ParseScenarioSkip(Parser& p, ScenarioSkip& skip, std::string& errorOut)
 {
     if (!p.SkipWs() || !p.Expect('{')) { errorOut = p.error; return false; }
@@ -285,6 +286,10 @@ static bool ParseScenarioSkip(Parser& p, ScenarioSkip& skip, std::string& errorO
         {
             skip.gpuNameGlob = p.ReadString();
             haveGpu = true;
+        }
+        else if (key == "path_glob")
+        {
+            skip.pathGlob = p.ReadString();
         }
         else if (key == "reason")
         {
@@ -534,19 +539,36 @@ const AdversarialEntry* AdversarialManifest::Match(const std::string& zstFullPat
 }
 
 const ScenarioSkip* AdversarialManifest::MatchScenarioSkip(const std::string& scenarioName,
-                                                           const std::string& gpuName) const
+                                                           const std::string& gpuName,
+                                                           const std::string& zstFullPath,
+                                                           const std::filesystem::path& contentPath) const
 {
     // Returns nullptr unless the manifest is loaded and both names are
     // non-empty. scenario_glob and gpu_name_glob use the same anchored glob
-    // syntax as path globs.
+    // syntax as path globs. An empty path_glob matches every file; a non-empty
+    // path_glob is matched against the file path relative to contentPath so a
+    // skip can target a single file (or subtree) within the scenario.
     if (!m_loaded || scenarioName.empty() || gpuName.empty())
         return nullptr;
+    std::string rel;
+    bool haveRel = false;
     for (const auto& s : m_scenarioSkips)
     {
         if (s.scenarioGlob.empty() || s.gpuNameGlob.empty())
             continue;
-        if (GlobMatch(s.scenarioGlob, scenarioName) && GlobMatch(s.gpuNameGlob, gpuName))
-            return &s;
+        if (!GlobMatch(s.scenarioGlob, scenarioName) || !GlobMatch(s.gpuNameGlob, gpuName))
+            continue;
+        if (!s.pathGlob.empty())
+        {
+            if (!haveRel)
+            {
+                rel = RelativeAndNormalize(zstFullPath, contentPath);
+                haveRel = true;
+            }
+            if (!GlobMatchSuffix(s.pathGlob, rel))
+                continue;
+        }
+        return &s;
     }
     return nullptr;
 }
