@@ -11,13 +11,18 @@
 // demo exit code. When a matching file is exercised by the wrapper, the
 // correctness test expects exit_code == manifest value rather than success.
 //
-// Perf tests do NOT consult the manifest; they skip fuzz content by path (see
-// IsFuzzContent in zstdgpu_ci_tests.cpp).
+// The manifest also carries an optional "scenario_skips" list. Each entry
+// matches a scenario by name and the machine by --gpu-name, causing matching
+// scenarios to GTEST_SKIP before the demo runs.
+//
+// Perf tests do NOT consult the per-file entries; they skip fuzz content by
+// path (see IsFuzzContent in zstdgpu_ci_tests.cpp). Scenario skips apply to any
+// matching scenario, correctness or performance.
 //
 // If the manifest is not loaded (--adversarial-manifest not passed OR file
 // missing), the wrapper falls back to legacy behavior: every file expected to
-// succeed. This is intentionally additive — no test starts failing just
-// because the manifest isn't wired up yet.
+// succeed and no scenario skips. This is intentionally additive — no test
+// starts failing just because the manifest isn't wired up yet.
 
 #pragma once
 
@@ -26,13 +31,22 @@
 #include <vector>
 
 // One entry describes an expected outcome for a set of files matched by
-// path_glob (relative to --content-path). See adversarial_manifest.json for
-// the shipping schema and field semantics.
+// path_glob (relative to --content-path).
 struct AdversarialEntry
 {
     std::string pathGlob;                          // e.g. "public/fuzz/generated/gen_bitflip_off0[0-3]_*.zst"
     std::string reason;                            // Human-readable description of what's wrong with the file(s) (JSON key "reason")
     int expectedExitCode = 1;                      // Expected demo process exit code (always 1 today; field exists for future flexibility)
+};
+
+// One scenario skip. Matches a GTest scenario by name and the machine by
+// --gpu-name; matching scenarios GTEST_SKIP before the demo is spawned.
+struct ScenarioSkip
+{
+    std::string scenarioGlob;                      // Glob over the GTest scenario name (JSON key "scenario_glob")
+    std::string gpuNameGlob;                       // Glob over the --gpu-name value (JSON key "gpu_name_glob")
+    std::string reason;                            // Explanation shown in the skip message (JSON key "reason")
+    std::string trackingBug;                       // Reference for the skip, e.g. a bug ID (JSON key "tracking_bug")
 };
 
 // Loads and matches the manifest. Loaded once at startup, then read-only from
@@ -54,7 +68,14 @@ public:
     const AdversarialEntry* Match(const std::string& zstFullPath,
                                   const std::filesystem::path& contentPath) const;
 
+    // Returns the first scenario_skip whose scenario_glob matches scenarioName
+    // and whose gpu_name_glob matches gpuName, or nullptr. Also returns nullptr
+    // when the manifest isn't loaded or either argument is empty.
+    const ScenarioSkip* MatchScenarioSkip(const std::string& scenarioName,
+                                          const std::string& gpuName) const;
+
     size_t Size() const { return m_entries.size(); }
+    size_t ScenarioSkipCount() const { return m_scenarioSkips.size(); }
     bool Loaded() const { return m_loaded; }
     const std::filesystem::path& SourcePath() const { return m_sourcePath; }
 
@@ -67,6 +88,7 @@ public:
 
 private:
     std::vector<AdversarialEntry> m_entries;
+    std::vector<ScenarioSkip> m_scenarioSkips;
     std::filesystem::path m_sourcePath;
     bool m_loaded = false;
 };

@@ -256,6 +256,36 @@ static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResul
     return true;
 }
 
+// Returns the current GTest scenario (test method) name. For parameterized
+// tests current_test_info()->name() is "<Scenario>/<param>", so we take the
+// portion before the first '/'. Returns empty outside a test.
+static std::string CurrentScenarioName()
+{
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    if (!info || !info->name())
+        return {};
+    std::string name = info->name();
+    const size_t slash = name.find('/');
+    return slash == std::string::npos ? name : name.substr(0, slash);
+}
+
+// If the manifest marks the current scenario as skipped for this machine's
+// --gpu-name, returns the message to pass to GTEST_SKIP; otherwise returns
+// empty. GTEST_SKIP must stay in the caller (the Run*Test helpers) so control
+// returns from the test after the skip is recorded.
+static std::string ScenarioSkipReason()
+{
+    const ScenarioSkip* s = g_testConfig.adversarialManifest.MatchScenarioSkip(
+        CurrentScenarioName(), g_testConfig.gpuName);
+    if (!s)
+        return {};
+    std::string msg = "Scenario '" + CurrentScenarioName() + "' skipped on GPU '" +
+                      g_testConfig.gpuName + "': " + s->reason;
+    if (!s->trackingBug.empty())
+        msg += " (tracking: " + s->trackingBug + ")";
+    return msg;
+}
+
 // Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
 // main() has already validated the demo path exists, so we don't re-check here.
 // stdout is printed via the unconditional [DEMO OUT] block below and does NOT
@@ -263,6 +293,14 @@ static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResul
 // the same text in the log.
 static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std::string>& scenarioFlags)
 {
+    // If the manifest marks this scenario as skipped for this GPU, skip before
+    // spawning the demo.
+    if (std::string skip = ScenarioSkipReason(); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
+
     auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
@@ -311,6 +349,14 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
                                 const std::vector<std::string>& extraFlags)
 {
+    // Skip if the manifest marks this scenario as skipped for this GPU; this
+    // takes precedence over the fuzz/size skips below.
+    if (std::string skip = ScenarioSkipReason(); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
+
     // Fuzzing content mixes clean and corrupt inputs with varying code paths,
     // so its timing isn't meaningful perf data — skip it before running the demo.
     if (IsFuzzContent(zstFile))

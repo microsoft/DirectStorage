@@ -113,6 +113,8 @@ static void PrintUsage(const char* exe)
               << "                          Smaller files skip perf; individually-compressed textures are not representative of throughput.\n"
               << "  --gbv-sample-count <N>  Number of files the GBV scenarios run on, sampled by an even stride\n"
               << "                          across the sorted corpus (default: 10). A value <= 0 runs GBV on all files.\n"
+              << "  --gpu-name <name>       Adapter name of this machine. Consumed only by the manifest's\n"
+              << "                          scenario_skips; if omitted, no scenario is skipped by GPU name.\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -173,6 +175,10 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         else if (std::strcmp(argv[i], "--adversarial-manifest") == 0 && i + 1 < argc)
         {
             config.adversarialManifestPath = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "--gpu-name") == 0 && i + 1 < argc)
+        {
+            config.gpuName = argv[++i];
         }
         else if (std::strcmp(argv[i], "--perf-min-mb") == 0 && i + 1 < argc)
         {

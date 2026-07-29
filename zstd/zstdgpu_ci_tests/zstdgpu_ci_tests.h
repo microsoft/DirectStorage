@@ -29,6 +29,8 @@ struct TestConfig
     std::string logDir;                         // Directory for logs, CSVs, and GTest XML output
     std::string logFile;                        // Consolidated text log file path (--log-file)
     std::string adversarialManifestPath;        // Optional path to adversarial_manifest.json (--adversarial-manifest)
+    std::string gpuName;                        // Adapter name of the machine under test (--gpu-name). Used only for the
+                                                // manifest's scenario skips.
     int runCount = 40;                          // Number of iterations for performance tests
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
     int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).
