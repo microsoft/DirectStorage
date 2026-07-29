@@ -18,7 +18,7 @@
 //
 // If the content path is missing, unreadable, or contains no .zst files, or
 // if the demo executable is missing, the process exits non-zero before any
-// test runs. This intentionally prevents a "green" run with zero coverage.
+// test runs. This intentionally prevents a "green" run with zero coverage
 //
 // This file also owns the g_testConfig storage and the file discovery
 // implementation declared in zstdgpu_ci_tests.h.
@@ -115,6 +115,7 @@ static void PrintUsage(const char* exe)
               << "                          across the sorted corpus (default: 10). A value <= 0 runs GBV on all files.\n"
               << "  --gpu-name <name>       Adapter name of this machine. Consumed only by the manifest's\n"
               << "                          scenario_skips; if omitted, no scenario is skipped by GPU name.\n"
+              << "  --gbv-max-mb <N>        Max size of file to use for GBV tests in MB (default: 1)\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -191,6 +192,12 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.gbvSampleCount = std::atoi(argv[++i]);
             if (config.gbvSampleCount < 0)
                 config.gbvSampleCount = 0;   // <= 0 = no cap; GBV runs on every file
+        }
+        else if (std::strcmp(argv[i], "--gbv-max-mb") == 0 && i + 1 < argc)
+        {
+            config.gbvMaxMB = std::atoi(argv[++i]);
+            if (config.gbvMaxMB< 0)
+                config.gbvMaxMB = INT_MAX / (1024*1024); // <= 0 = no cap; GBV runs on any file size
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {

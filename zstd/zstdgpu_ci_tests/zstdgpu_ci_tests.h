@@ -35,6 +35,7 @@ struct TestConfig
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
     int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).
     int gbvSampleCount = 10;                    // Number of files the Gbv/GbvSeq scenarios run on, chosen by an even stride across the sorted corpus. <= 0 = no cap (run GBV on all files).
+    int gbvMaxMB = 1;                           // Max .zst size (MB) for Gbv tests.  Larger files are skipped to avoid TDRs.
 
     // Cached list of .zst files discovered under contentPath. Populated once
     // in main() after validation; consumed by GetTestFiles() at fixture
