@@ -1,0 +1,44 @@
+{
+  "$schema_version": 1,
+  "notes": "SAMPLE / REFERENCE manifest for the Zstd GPU CI wrapper. The entries below are placeholders that exist only to document the schema — do not ship it as-is. At runtime the wrapper loads a real manifest either from --adversarial-manifest <path> or, if that flag is absent, by auto-discovering <content-path>/adversarial_manifest.json.",
+
+  "entries": [
+    {
+      "path_glob": "<path>/example_single_file.zst",
+      "reason": "A single named file the demo must reject; replace <path> and the file name with your own.",
+      "expected_exit_code": 1
+    },
+    {
+      "path_glob": "<path>/example_family_[0-9][0-9][0-9].zst",
+      "reason": "A family of files matched with a bracket range. '[0-9]' matches one digit.",
+      "expected_exit_code": 1
+    },
+    {
+      "path_glob": "<path>/example_dir/*.zst",
+      "reason": "Every .zst directly under a directory. '*' matches any characters within a path segment.",
+      "expected_exit_code": 1
+    }
+  ],
+
+  "scenario_skips": [
+    {
+      "scenario_glob": "Gbv*",
+      "gpu_name_glob": "*Contoso*",
+      "reason": "Example: quarantine every GBV scenario (Gbv, GbvSeq) on any adapter whose --gpu-name contains 'Contoso'.",
+      "tracking_bug": "Replace with a bug ID, driver note, or TSG link describing why the scenario is disabled on this device class."
+    },
+    {
+      "scenario_glob": "PerStageTiming",
+      "gpu_name_glob": "*Fabrikam GPU 9000*",
+      "reason": "Example: quarantine a single named scenario on one specific device model.",
+      "tracking_bug": "Replace with a tracking reference."
+    },
+    {
+      "scenario_glob": "Gbv*",
+      "gpu_name_glob": "*Contoso*",
+      "path_glob": "<path>/example_single_file.zst",
+      "reason": "Example: optional path_glob narrows the skip to one file (or a glob subtree) within the scenario/GPU match. Omit path_glob to skip every file in the scenario.",
+      "tracking_bug": "Replace with a tracking reference."
+    }
+  ]
+}

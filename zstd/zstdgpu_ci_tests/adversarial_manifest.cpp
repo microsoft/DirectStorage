@@ -9,15 +9,15 @@
 
 // AdversarialManifest implementation.
 //
-// This file contains a minimal, purpose-built JSON parser scoped to the schema
-// documented in adversarial_manifest.json — NOT a general-purpose JSON parser.
-// It handles the subset our manifest uses: top-level object with a "notes"
-// string field and an "entries" array of objects. Each entry has string /
-// integer / boolean / string-array fields. Basic backslash escapes in strings
-// (\", \\, \/, \n, \r, \t) are supported. Unicode escapes and nested objects
-// are NOT supported (the manifest schema doesn't use them). Any deviation from
-// the expected shape produces a clear error via the errorOut parameter and
-// leaves the manifest empty rather than throwing.
+// This file contains a minimal, purpose-built JSON parser scoped to this
+// manifest's schema — NOT a general-purpose JSON parser. It handles a top-level
+// object with a "notes" string field, an "entries" array of file objects, and
+// an optional "scenario_skips" array of scenario objects. Each object has
+// string / integer / boolean / string-array fields. Basic backslash escapes in
+// strings (\", \\, \/, \n, \r, \t) are supported. Unicode escapes and nested
+// objects are NOT supported. Any deviation from the expected shape produces a
+// clear error via the errorOut parameter and leaves the manifest empty rather
+// than throwing.
 //
 // A hand-rolled parser avoids adding a third-party JSON dependency for what is
 // a small, controlled data file. If the schema grows to need general JSON
@@ -260,6 +260,61 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
     return true;
 }
 
+// Parses one scenario_skip object. scenario_glob and gpu_name_glob are
+// required; path_glob, reason, and tracking_bug are optional; unknown fields
+// are skipped.
+static bool ParseScenarioSkip(Parser& p, ScenarioSkip& skip, std::string& errorOut)
+{
+    if (!p.SkipWs() || !p.Expect('{')) { errorOut = p.error; return false; }
+
+    bool haveScenario = false, haveGpu = false;
+    while (true)
+    {
+        if (!p.SkipWs()) { p.Fail("unexpected eof in scenario_skip"); errorOut = p.error; return false; }
+        if (p.text[p.pos] == '}') { ++p.pos; break; }
+
+        std::string key = p.ReadString();
+        if (p.Failed()) { errorOut = p.error; return false; }
+        if (!p.SkipWs() || !p.Expect(':')) { errorOut = p.error; return false; }
+
+        if (key == "scenario_glob")
+        {
+            skip.scenarioGlob = p.ReadString();
+            haveScenario = true;
+        }
+        else if (key == "gpu_name_glob")
+        {
+            skip.gpuNameGlob = p.ReadString();
+            haveGpu = true;
+        }
+        else if (key == "path_glob")
+        {
+            skip.pathGlob = p.ReadString();
+        }
+        else if (key == "reason")
+        {
+            skip.reason = p.ReadString();
+        }
+        else if (key == "tracking_bug")
+        {
+            skip.trackingBug = p.ReadString();
+        }
+        else
+        {
+            p.SkipValue();
+        }
+        if (p.Failed()) { errorOut = p.error; return false; }
+
+        if (!p.SkipWs()) { p.Fail("unexpected eof in scenario_skip"); errorOut = p.error; return false; }
+        if (p.text[p.pos] == ',') { ++p.pos; continue; }
+        if (p.text[p.pos] == '}') { ++p.pos; break; }
+        p.Fail("expected ',' or '}' in scenario_skip"); errorOut = p.error; return false;
+    }
+    if (!haveScenario) { errorOut = "scenario_skip missing required 'scenario_glob' field"; return false; }
+    if (!haveGpu)      { errorOut = "scenario_skip missing required 'gpu_name_glob' field"; return false; }
+    return true;
+}
+
 // Glob matcher supporting '*' wildcards and '[a-b]' character ranges.
 // Case-sensitive. Not general-purpose — no '?', no '**', no negation.
 // Fully anchored: the pattern must consume the entire `path`. O(N*M) worst case
@@ -434,6 +489,25 @@ bool AdversarialManifest::LoadFromFile(const std::filesystem::path& jsonPath, st
                 }
             }
         }
+        else if (key == "scenario_skips")
+        {
+            if (!p.SkipWs() || !p.Expect('[')) { errorOut = p.error; return false; }
+            if (!p.SkipWs()) { p.Fail("unexpected eof in scenario_skips"); errorOut = p.error; return false; }
+            if (p.text[p.pos] == ']') { ++p.pos; }
+            else
+            {
+                while (true)
+                {
+                    ScenarioSkip skip;
+                    if (!ParseScenarioSkip(p, skip, errorOut)) return false;
+                    m_scenarioSkips.push_back(std::move(skip));
+                    if (!p.SkipWs()) { p.Fail("unexpected eof in scenario_skips"); errorOut = p.error; return false; }
+                    if (p.text[p.pos] == ',') { ++p.pos; continue; }
+                    if (p.text[p.pos] == ']') { ++p.pos; break; }
+                    p.Fail("expected ',' or ']' in scenario_skips"); errorOut = p.error; return false;
+                }
+            }
+        }
         else
         {
             // Unknown top-level field — skip for forward compat.
@@ -460,6 +534,41 @@ const AdversarialEntry* AdversarialManifest::Match(const std::string& zstFullPat
     {
         if (GlobMatchSuffix(e.pathGlob, rel))
             return &e;
+    }
+    return nullptr;
+}
+
+const ScenarioSkip* AdversarialManifest::MatchScenarioSkip(const std::string& scenarioName,
+                                                           const std::string& gpuName,
+                                                           const std::string& zstFullPath,
+                                                           const std::filesystem::path& contentPath) const
+{
+    // Returns nullptr unless the manifest is loaded and both names are
+    // non-empty. scenario_glob and gpu_name_glob use the same anchored glob
+    // syntax as path globs. An empty path_glob matches every file; a non-empty
+    // path_glob is matched against the file path relative to contentPath so a
+    // skip can target a single file (or subtree) within the scenario.
+    if (!m_loaded || scenarioName.empty() || gpuName.empty())
+        return nullptr;
+    std::string rel;
+    bool haveRel = false;
+    for (const auto& s : m_scenarioSkips)
+    {
+        if (s.scenarioGlob.empty() || s.gpuNameGlob.empty())
+            continue;
+        if (!GlobMatch(s.scenarioGlob, scenarioName) || !GlobMatch(s.gpuNameGlob, gpuName))
+            continue;
+        if (!s.pathGlob.empty())
+        {
+            if (!haveRel)
+            {
+                rel = RelativeAndNormalize(zstFullPath, contentPath);
+                haveRel = true;
+            }
+            if (!GlobMatchSuffix(s.pathGlob, rel))
+                continue;
+        }
+        return &s;
     }
     return nullptr;
 }
