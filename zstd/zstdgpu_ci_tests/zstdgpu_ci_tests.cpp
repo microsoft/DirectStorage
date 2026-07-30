@@ -31,6 +31,7 @@
 //     - PerStageTiming     : --prf-lvl 2 --d3d-gfx --seq-cnt → results/stages_<stem>.csv
 
 #include "zstdgpu_ci_tests.h"
+#include "zstd_frame_size.h"
 #include <gtest/gtest.h>
 #include <array>
 #include <filesystem>
@@ -245,6 +246,30 @@ static bool IsSmallForPerf(const std::string& zstFile)
     return size < static_cast<uintmax_t>(g_testConfig.perfMinMB) * 1024ULL * 1024ULL;
 }
 
+// Returns a GTEST_SKIP message when --max-frame-mb is set (> 0) and the file's
+// largest on-disk zstd frame exceeds it; empty otherwise. A disabled limit
+// (<= 0) or an unreadable frame size does not skip.
+static std::string FrameSizeSkipReason(const std::string& zstFile)
+{
+    if (g_testConfig.maxFrameMB <= 0)
+        return {};
+
+    std::string err;
+    uint64_t largest = zstdframe::GetLargestFrameCompressedSizeFromFile(zstFile, &err);
+    if (largest == 0)
+        return {};
+
+    const uint64_t limitBytes = static_cast<uint64_t>(g_testConfig.maxFrameMB) * 1024ULL * 1024ULL;
+    if (largest <= limitBytes)
+        return {};
+
+    std::ostringstream msg;
+    msg << "Skipped: largest on-disk zstd frame (" << largest
+        << " bytes) exceeds --max-frame-mb (" << g_testConfig.maxFrameMB
+        << " MB = " << limitBytes << " bytes).\nFile: " << zstFile;
+    return msg.str();
+}
+
 // If the adversarial manifest lists this file, verify that the demo rejected it
 // with the expected exit code. Returns true iff the outcome is a correct
 // rejection, or false if the file isn't in the manifest (in which case the
@@ -320,6 +345,11 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
     }
 
     auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
+    if (std::string skip = FrameSizeSkipReason(zstFile); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
     // Write to log file before assertions so logs are captured even if an ASSERT aborts early.
@@ -405,6 +435,11 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
     std::string csvPath = (resultsDir / ("stages_" + stem + ".csv")).string();
 
     auto args = BuildPerformanceArgs(zstFile, profilingLevel, g_testConfig.runCount, csvPath, extraFlags);
+    if (std::string skip = FrameSizeSkipReason(zstFile); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
 
     // Write to log file before assertions so logs are captured even if a check fails.
@@ -695,6 +730,11 @@ std::vector<std::string> BuildCorrectnessArgs(
     args.push_back(zstFile);
     args.push_back("--run-cnt");
     args.push_back("1");
+    if (g_testConfig.idxMax >= 0)
+    {
+        args.push_back("--idx-max");
+        args.push_back(std::to_string(g_testConfig.idxMax));
+    }
     for (const auto& flag : scenarioFlags)
     {
         args.push_back(flag);
@@ -723,6 +763,11 @@ std::vector<std::string> BuildPerformanceArgs(
     {
         args.push_back("--out-csv");
         args.push_back(csvOutputPath);
+    }
+    if (g_testConfig.idxMax >= 0)
+    {
+        args.push_back("--idx-max");
+        args.push_back(std::to_string(g_testConfig.idxMax));
     }
     for (const auto& flag : extraFlags)
     {

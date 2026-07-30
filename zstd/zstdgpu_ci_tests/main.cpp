@@ -116,6 +116,11 @@ static void PrintUsage(const char* exe)
               << "  --gpu-name <name>       Adapter name of this machine. Consumed only by the manifest's\n"
               << "                          scenario_skips; if omitted, no scenario is skipped by GPU name.\n"
               << "  --gbv-max-mb <N>        Max size of file to use for GBV tests in MB (default: 1)\n"
+              << "  --max-frame-mb <N>      Skip any .zst file whose largest single on-disk zstd frame exceeds N MB,\n"
+              << "                          across all scenarios (default: 0 = disabled, run every file). A file whose\n"
+              << "                          frame size cannot be read is never skipped.\n"
+              << "  --idx-max <N>           Forward --idx-max N to the demo to cap the last decoded frame index\n"
+              << "                          (inclusive). Omit or use a negative value to run all frames (default).\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -196,8 +201,20 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         else if (std::strcmp(argv[i], "--gbv-max-mb") == 0 && i + 1 < argc)
         {
             config.gbvMaxMB = std::atoi(argv[++i]);
-            if (config.gbvMaxMB< 0)
+            if (config.gbvMaxMB <= 0)
                 config.gbvMaxMB = INT_MAX / (1024*1024); // <= 0 = no cap; GBV runs on any file size
+        }
+        else if (std::strcmp(argv[i], "--max-frame-mb") == 0 && i + 1 < argc)
+        {
+            config.maxFrameMB = std::atoi(argv[++i]);
+            if (config.maxFrameMB < 0)
+                config.maxFrameMB = 0;   // <= 0 disables the skip; every file runs
+        }
+        else if (std::strcmp(argv[i], "--idx-max") == 0 && i + 1 < argc)
+        {
+            config.idxMax = std::atoi(argv[++i]);
+            if (config.idxMax < 0)
+                config.idxMax = -1;   // < 0 = unset; not forwarded, demo runs all frames
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
