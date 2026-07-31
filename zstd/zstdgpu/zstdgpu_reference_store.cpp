@@ -1110,8 +1110,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
             // NOTE: dst.offs can't be the same due to non-deterministic allocation
             //izstdgpu_ReferenceStore_Validate_OffsetAndSize(&refSeqRefs[refSeqSteamIndex].dst, &tstSeqRefs[tstSeqSteamIndex].dst);
             {
-                const uint32_t refSeqOffsNext = (i == GBlockCountCMP - 1u) ? GSequenceCount                                                     : refData->PerSeqStreamSeqStart[refSeqSteamIndex + 1];
-                const uint32_t tstSeqOffsNext = (i == GBlockCountCMP - 1u) ? tstData->Counters->Seq_Streams_DecodedItems  : tstData->PerSeqStreamSeqStart[tstSeqSteamIndex + 1];
+                const uint32_t refSeqOffsNext = (refSeqSteamIndex + 1u == GSequenceStreamCount)           ? GSequenceCount                                    : refData->PerSeqStreamSeqStart[refSeqSteamIndex + 1];
+                const uint32_t tstSeqOffsNext = (tstSeqSteamIndex + 1u == tstData->Counters->Seq_Streams) ? tstData->Counters->Seq_Streams_DecodedItems       : tstData->PerSeqStreamSeqStart[tstSeqSteamIndex + 1];
                 const uint32_t refSeqCount = refSeqOffsNext - refSeqOffs;
                 const uint32_t tstSeqCount = tstSeqOffsNext - tstSeqOffs;
 
