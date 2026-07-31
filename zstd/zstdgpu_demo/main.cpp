@@ -1090,7 +1090,7 @@ static int demoRun(void *demoCtx)
     wchar_t  **argv = ctx->argv;
 #endif
 
-    void                  *&zstdData                       = ctx->zstdData;
+    void                  *&zstdDataBase                   = ctx->zstdData;
     zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
     zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
     zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
@@ -1114,6 +1114,8 @@ static int demoRun(void *demoCtx)
     zstdgpu_ResourceDataCpu    &zstdCpu                      = ctx->zstdCpu;
     uint64_t                   &freqGpuClocks                = ctx->freqGpuClocks;
     FILE                      *&csvFile                      = ctx->csvFile;
+
+    void *zstdData = NULL;
 
     bool extMem = false;
     bool blkCnt = false;
@@ -1322,7 +1324,10 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
+    // Load into zstdDataBase which is the base pointer that will be freed.  Copy into the working pointer zstdData (which may move) 
+    loadFileAligned(&zstdDataBase, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
+    zstdData = zstdDataBase;
+
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
@@ -1342,11 +1347,12 @@ static int demoRun(void *demoCtx)
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
-    // An invalid file can parse to 0 frames; clamp to 0 to avoid unsigned underflow of endFrame.
+    // Ensure that the user-specified frame range (--idx-min/max) is clamped to the available frames
     const uint32_t endFrame = fbInfo.frameCount == 0 ? 0 : fbInfo.frameCount - 1;
+    const uint32_t startFrame = minFrame < endFrame ? minFrame : endFrame;
 
     // NOTE(pamartis): Support the option to choose a range of frame in the input package/data
-    if (minFrame > 0 || maxFrame < endFrame)
+    if (startFrame > 0 || maxFrame < endFrame)
     {
         maxFrame = maxFrame < endFrame
                  ? maxFrame : endFrame;
