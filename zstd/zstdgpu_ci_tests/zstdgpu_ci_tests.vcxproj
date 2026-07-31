@@ -223,10 +223,12 @@
   <ItemGroup>
     <ClCompile Include="adversarial_manifest.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="zstd_frame_size.cpp" />
     <ClCompile Include="zstdgpu_ci_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="adversarial_manifest.h" />
+    <ClInclude Include="zstd_frame_size.h" />
     <ClInclude Include="zstdgpu_ci_tests.h" />
   </ItemGroup>
   <!-- Project references: only googletest -->

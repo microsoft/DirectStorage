@@ -36,6 +36,8 @@ struct TestConfig
     int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).
     int gbvSampleCount = 10;                    // Number of files the Gbv/GbvSeq scenarios run on, chosen by an even stride across the sorted corpus. <= 0 = no cap (run GBV on all files).
     int gbvMaxMB = 1;                           // Max .zst size (MB) for Gbv tests.  Larger files are skipped to avoid TDRs.
+    int maxFrameMB = 0;                          // Skip any file whose largest on-disk zstd frame exceeds this (MB). <= 0 = disabled (run every file).
+    int idxMax = -1;                             // Forwarded to the demo as --idx-max (inclusive last frame index). < 0 = unset (demo runs all frames).
 
     // Cached list of .zst files discovered under contentPath. Populated once
     // in main() after validation; consumed by GetTestFiles() at fixture
