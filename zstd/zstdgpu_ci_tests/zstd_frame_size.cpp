@@ -15,6 +15,7 @@
 
 #include "zstd_frame_size.h"
 
+#include <cstdint>
 #include <fstream>
 #include <vector>
 
@@ -326,9 +327,17 @@ namespace zstdframe
             return 0;
         }
 
-        std::vector<uint8_t> buffer(static_cast<size_t>(size));
+        // Reject sizes that don't fit in size_t.
+        if (static_cast<uint64_t>(size) > static_cast<uint64_t>(SIZE_MAX))
+        {
+            if (error) *error = "file '" + path + "' is too large to read";
+            return 0;
+        }
+
+        const size_t byteCount = static_cast<size_t>(size);
+        std::vector<uint8_t> buffer(byteCount);
         file.seekg(0, std::ios::beg);
-        if (!file.read(reinterpret_cast<char*>(buffer.data()), size))
+        if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(byteCount)))
         {
             if (error) *error = "failed to read file '" + path + "'";
             return 0;
