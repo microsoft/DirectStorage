@@ -7,8 +7,9 @@
  * PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
  */
 
-// Reports the compressed (on-disk) size of the largest zstd frame in a buffer
-// or file by walking frame and block headers, without decompressing.
+// Reports zstd frame sizes by walking frame and block headers, without
+// decompressing: the compressed (on-disk) size of the largest frame, and the
+// total decompressed (content) size of the whole stream.
 //
 // Frame-walking logic derived from the reference zstd implementation
 // (github.com/facebook/zstd, lib/decompress).
@@ -29,4 +30,16 @@ namespace zstdframe
     // Returns 0 and sets *error (if non-null) if the file cannot be read or is
     // not a valid zstd stream.
     uint64_t GetLargestFrameCompressedSizeFromFile(const std::string& path, std::string* error);
+
+    // Returns the total decompressed (content) size of every zstd frame in
+    // [src, src+srcSize), summed. Skippable frames contribute nothing. Returns 0
+    // and sets *error (if non-null) on malformed/truncated input, or if any
+    // frame omits its content size (so the decompressed size is unknowable
+    // without decompressing).
+    uint64_t GetTotalDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error);
+
+    // Reads the file at `path` and returns its total decompressed size.
+    // Returns 0 and sets *error (if non-null) if the file cannot be read, is not
+    // a valid zstd stream, or omits a frame content size.
+    uint64_t GetTotalDecompressedSizeFromFile(const std::string& path, std::string* error);
 }
