@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <fstream>
 #include <vector>
+#include <filesystem>
+#include <system_error>
 
 namespace zstdframe
 {
@@ -276,31 +278,31 @@ namespace zstdframe
         // *error (if non-null) on failure.
         bool ReadFileToBuffer(const std::string& path, std::vector<uint8_t>& buffer, std::string* error)
         {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file)
-            {
-                if (error) *error = "could not open file '" + path + "'";
-                return false;
-            }
-
-            const std::streamoff size = file.tellg();
-            if (size <= 0)
+            std::error_code ec;
+            uintmax_t size = std::filesystem::file_size(path, ec);
+            if (ec || size == 0)
             {
                 if (error) *error = "file '" + path + "' is empty or unreadable";
                 return false;
             }
 
-            // Reject sizes that don't fit in size_t.
-            if (static_cast<uint64_t>(size) > static_cast<uint64_t>(SIZE_MAX))
+            // Reject files that are too large to decompress
+            if (size > 1024ULL * 1024 * 1024)
             {
                 if (error) *error = "file '" + path + "' is too large to read";
                 return false;
             }
 
-            const size_t byteCount = static_cast<size_t>(size);
-            buffer.resize(byteCount);
-            file.seekg(0, std::ios::beg);
-            if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(byteCount)))
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+            {
+                if (error)
+                    *error = "could not open file '" + path + "'";
+                return false;
+            }
+
+            buffer.resize(size);
+            if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size)))
             {
                 if (error) *error = "failed to read file '" + path + "'";
                 return false;
@@ -349,11 +351,20 @@ namespace zstdframe
         return largest;
     }
 
+    uint64_t GetLargestFrameCompressedSizeFromFile(const std::string& path, std::string* error)
+    {
+        std::vector<uint8_t> buffer;
+        if (!ReadFileToBuffer(path, buffer, error))
+            return 0;
+        return GetLargestFrameCompressedSize(buffer.data(), buffer.size(), error);
+    }
+
     uint64_t GetTotalDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error)
     {
         auto fail = [&](const char* msg) -> uint64_t
         {
-            if (error) *error = msg;
+            if (error)
+                *error = msg;
             return 0;
         };
 
@@ -374,8 +385,10 @@ namespace zstdframe
             FrameHeader zfh;
             {
                 const size_t ret = GetFrameHeader(&zfh, src + offset, remaining);
-                if (IsError(ret)) return fail("invalid or truncated zstd frame header while scanning the stream");
-                if (ret > 0) return fail("incomplete zstd frame header while scanning the stream");
+                if (IsError(ret))
+                    return fail("invalid or truncated zstd frame header while scanning the stream");
+                if (ret > 0)
+                    return fail("incomplete zstd frame header while scanning the stream");
             }
 
             const size_t frameSize = FindFrameCompressedSize(src + offset, remaining);
@@ -396,16 +409,9 @@ namespace zstdframe
             offset += frameSize;
         }
 
-        if (error) error->clear();
+        if (error)
+            error->clear();
         return total;
-    }
-
-    uint64_t GetLargestFrameCompressedSizeFromFile(const std::string& path, std::string* error)
-    {
-        std::vector<uint8_t> buffer;
-        if (!ReadFileToBuffer(path, buffer, error))
-            return 0;
-        return GetLargestFrameCompressedSize(buffer.data(), buffer.size(), error);
     }
 
     uint64_t GetTotalDecompressedSizeFromFile(const std::string& path, std::string* error)
