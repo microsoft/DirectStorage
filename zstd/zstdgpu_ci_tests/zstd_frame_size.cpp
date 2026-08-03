@@ -18,8 +18,6 @@
 #include <cstdint>
 #include <fstream>
 #include <vector>
-#include <filesystem>
-#include <system_error>
 
 namespace zstdframe
 {
@@ -271,44 +269,6 @@ namespace zstdframe
 
             return static_cast<size_t>(ip - ipstart);
         }
-
-        // ---- file reader -------------------------------------------------------
-
-        // Reads the entire file at `path` into `buffer`. Returns false and sets
-        // *error (if non-null) on failure.
-        bool ReadFileToBuffer(const std::string& path, std::vector<uint8_t>& buffer, std::string* error)
-        {
-            std::error_code ec;
-            uintmax_t size = std::filesystem::file_size(path, ec);
-            if (ec || size == 0)
-            {
-                if (error) *error = "file '" + path + "' is empty or unreadable";
-                return false;
-            }
-
-            // Reject files that are too large to decompress
-            if (size > 1024ULL * 1024 * 1024)
-            {
-                if (error) *error = "file '" + path + "' is too large to read";
-                return false;
-            }
-
-            std::ifstream file(path, std::ios::binary);
-            if (!file)
-            {
-                if (error)
-                    *error = "could not open file '" + path + "'";
-                return false;
-            }
-
-            buffer.resize(size);
-            if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size)))
-            {
-                if (error) *error = "failed to read file '" + path + "'";
-                return false;
-            }
-            return true;
-        }
     }  // namespace
 
     uint64_t GetLargestFrameCompressedSize(const uint8_t* src, size_t srcSize, std::string* error)
@@ -353,29 +313,55 @@ namespace zstdframe
 
     uint64_t GetLargestFrameCompressedSizeFromFile(const std::string& path, std::string* error)
     {
-        std::vector<uint8_t> buffer;
-        if (!ReadFileToBuffer(path, buffer, error))
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file)
+        {
+            if (error) *error = "could not open file '" + path + "'";
             return 0;
+        }
+
+        const std::streamoff size = file.tellg();
+        if (size <= 0)
+        {
+            if (error) *error = "file '" + path + "' is empty or unreadable";
+            return 0;
+        }
+
+        // Reject sizes that don't fit in size_t.
+        if (static_cast<uint64_t>(size) > static_cast<uint64_t>(SIZE_MAX))
+        {
+            if (error) *error = "file '" + path + "' is too large to read";
+            return 0;
+        }
+
+        const size_t byteCount = static_cast<size_t>(size);
+        std::vector<uint8_t> buffer(byteCount);
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(byteCount)))
+        {
+            if (error) *error = "failed to read file '" + path + "'";
+            return 0;
+        }
+
         return GetLargestFrameCompressedSize(buffer.data(), buffer.size(), error);
     }
 
-    uint64_t GetTotalDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error)
+    uint64_t GetLargestFrameDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error)
     {
         auto fail = [&](const char* msg) -> uint64_t
         {
-            if (error)
-                *error = msg;
+            if (error) *error = msg;
             return 0;
         };
 
         if (src == nullptr || srcSize == 0)
             return fail("empty input");
 
-        uint64_t total = 0;
+        uint64_t largest = 0;
         size_t offset = 0;
 
-        // Walk each frame, summing the decompressed (content) size of every zstd
-        // frame. Skippable frames carry no decompressed output and are ignored.
+        // Walk each frame, tracking the single largest frame's decompressed
+        // (content) size. The size comes from frame headers.
         while (offset < srcSize)
         {
             const size_t remaining = srcSize - offset;
@@ -401,24 +387,52 @@ namespace zstdframe
             {
                 if (zfh.frameContentSize == kContentSizeUnknown)
                     return fail("zstd frame omits its content size; decompressed size is unknowable");
-                if (total > UINT64_MAX - zfh.frameContentSize)
-                    return fail("decompressed size overflow while scanning the stream");
-                total += zfh.frameContentSize;
+                if (zfh.frameContentSize > largest)
+                    largest = zfh.frameContentSize;
             }
 
             offset += frameSize;
         }
 
-        if (error)
-            error->clear();
-        return total;
+        if (largest == 0)
+            return fail("no zstd frames with a known content size found");
+
+        if (error) error->clear();
+        return largest;
     }
 
-    uint64_t GetTotalDecompressedSizeFromFile(const std::string& path, std::string* error)
+    uint64_t GetLargestFrameDecompressedSizeFromFile(const std::string& path, std::string* error)
     {
-        std::vector<uint8_t> buffer;
-        if (!ReadFileToBuffer(path, buffer, error))
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file)
+        {
+            if (error) *error = "could not open file '" + path + "'";
             return 0;
-        return GetTotalDecompressedSize(buffer.data(), buffer.size(), error);
+        }
+
+        const std::streamoff size = file.tellg();
+        if (size <= 0)
+        {
+            if (error) *error = "file '" + path + "' is empty or unreadable";
+            return 0;
+        }
+
+        // Reject sizes that don't fit in size_t.
+        if (static_cast<uint64_t>(size) > static_cast<uint64_t>(SIZE_MAX))
+        {
+            if (error) *error = "file '" + path + "' is too large to read";
+            return 0;
+        }
+
+        const size_t byteCount = static_cast<size_t>(size);
+        std::vector<uint8_t> buffer(byteCount);
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(byteCount)))
+        {
+            if (error) *error = "failed to read file '" + path + "'";
+            return 0;
+        }
+
+        return GetLargestFrameDecompressedSize(buffer.data(), buffer.size(), error);
     }
 }  // namespace zstdframe

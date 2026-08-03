@@ -22,8 +22,8 @@
 //     - SimulationCheck    : --chk-gpu --chk-cpu --sim-gpu
 //     - SimulationCheckSeq : --chk-gpu --chk-cpu --sim-gpu --seq-cnt
 //
-//   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose total
-//   decompressed size is under --gbv-max-mb, optionally further reduced by an
+//   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose largest
+//   decompressed frame is under --gbv-max-mb, optionally further reduced by an
 //   even stride via --gbv-sample-count):
 //     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
 //     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
@@ -193,19 +193,21 @@ static const std::unordered_set<std::string>& GbvSampledFiles()
                 std::back_inserter(smallFiles),
                 [](const std::string& filename)
                 {
-                    // Gate GBV by the total *decompressed* size of the stream:
-                    // GBV massively slows GPU execution, so TDR risk scales with
-                    // how much data the GPU actually decodes and writes, not the
-                    // compressed size on disk. Files whose decompressed size
-                    // can't be determined are excluded (fail-safe).
+                    // Gate GBV by the single largest frame's *decompressed* size.
+                    // GBV massively slows GPU execution and the TDR risk tracks
+                    // the work of the largest per-frame dispatch (how much one
+                    // frame decodes and writes), not the whole-file total. The
+                    // size is read from frame headers alone (no decompression).
+                    // Files whose decompressed size can't be determined are
+                    // excluded (fail-safe).
                     std::string err;
-                    const uint64_t uncompressed =
-                        zstdframe::GetTotalDecompressedSizeFromFile(filename, &err);
-                    if (uncompressed == 0)
+                    const uint64_t largestFrame =
+                        zstdframe::GetLargestFrameDecompressedSizeFromFile(filename, &err);
+                    if (largestFrame == 0)
                         return false;
                     const uint64_t limitBytes =
                         static_cast<uint64_t>(g_testConfig.gbvMaxMB) * 1024ULL * 1024ULL;
-                    return uncompressed < limitBytes;
+                    return largestFrame < limitBytes;
                 });
         }
         const size_t n = smallFiles.size();
@@ -554,7 +556,7 @@ TEST_P(ZstdGpuDemoTests, Gbv)
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
-        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (total decompressed size >= "
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
                      << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
                      << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
         return;
@@ -570,7 +572,7 @@ TEST_P(ZstdGpuDemoTests, GbvSeq)
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
-        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (total decompressed size >= "
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
                      << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
                      << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
         return;

@@ -116,7 +116,7 @@ static void PrintUsage(const char* exe)
               << "                          within --gbv-max-mb). A positive N samples that many files by stride.\n"
               << "  --gpu-name <name>       Adapter name of this machine. Consumed only by the manifest's\n"
               << "                          scenario_skips; if omitted, no scenario is skipped by GPU name.\n"
-              << "  --gbv-max-mb <N>        Max total *decompressed* size of a file for GBV tests in MB (default: 4).\n"
+              << "  --gbv-max-mb <N>        Max largest single frame decompressed size for GBV tests in MB (default: 4).\n"
               << "                          A value <= 0 disables the cap and runs GBV on files of any size.\n"
               << "  --max-frame-mb <N>      Skip any .zst file whose largest single on-disk zstd frame exceeds N MB,\n"
               << "                          across all scenarios (default: 0 = disabled, run every file). A file whose\n"
