@@ -174,7 +174,7 @@ static bool IsFuzzContent(const std::string& zstFile)
 }
 
 // Returns the set of files the Gbv/GbvSeq scenarios run on. Files are first
-// filtered to those whose total *decompressed* size is below --gbv-max-mb, then
+// filtered to those whose largest single frame's decompressed (content) size is below --gbv-max-mb, then
 // (when g_testConfig.gbvSampleCount > 0) reduced to an even, endpoint-inclusive
 // stride of that many files across the sorted list. A count <= 0, or a corpus
 // no larger than the count, selects every file under the size cap; a count of 1
