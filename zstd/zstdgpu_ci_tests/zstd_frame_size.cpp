@@ -345,4 +345,94 @@ namespace zstdframe
 
         return GetLargestFrameCompressedSize(buffer.data(), buffer.size(), error);
     }
+
+    uint64_t GetLargestFrameDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error)
+    {
+        auto fail = [&](const char* msg) -> uint64_t
+        {
+            if (error) *error = msg;
+            return 0;
+        };
+
+        if (src == nullptr || srcSize == 0)
+            return fail("empty input");
+
+        uint64_t largest = 0;
+        size_t offset = 0;
+
+        // Walk each frame, tracking the single largest frame's decompressed
+        // (content) size. The size comes from frame headers.
+        while (offset < srcSize)
+        {
+            const size_t remaining = srcSize - offset;
+            if (remaining < kStartingInputLength)
+                return fail("trailing bytes are too short to form a valid zstd frame");
+
+            FrameHeader zfh;
+            {
+                const size_t ret = GetFrameHeader(&zfh, src + offset, remaining);
+                if (IsError(ret))
+                    return fail("invalid or truncated zstd frame header while scanning the stream");
+                if (ret > 0)
+                    return fail("incomplete zstd frame header while scanning the stream");
+            }
+
+            const size_t frameSize = FindFrameCompressedSize(src + offset, remaining);
+            if (IsError(frameSize))
+                return fail("invalid or truncated zstd frame while scanning the stream");
+            if (frameSize == 0 || frameSize > remaining)
+                return fail("frame size out of range while scanning the stream");
+
+            if (zfh.frameType == FrameType::Zstd)
+            {
+                if (zfh.frameContentSize == kContentSizeUnknown)
+                    return fail("zstd frame omits its content size; decompressed size is unknowable");
+                if (zfh.frameContentSize > largest)
+                    largest = zfh.frameContentSize;
+            }
+
+            offset += frameSize;
+        }
+
+        if (largest == 0)
+            return fail("no zstd frames with a known content size found");
+
+        if (error) error->clear();
+        return largest;
+    }
+
+    uint64_t GetLargestFrameDecompressedSizeFromFile(const std::string& path, std::string* error)
+    {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file)
+        {
+            if (error) *error = "could not open file '" + path + "'";
+            return 0;
+        }
+
+        const std::streamoff size = file.tellg();
+        if (size <= 0)
+        {
+            if (error) *error = "file '" + path + "' is empty or unreadable";
+            return 0;
+        }
+
+        // Reject sizes that don't fit in size_t.
+        if (static_cast<uint64_t>(size) > static_cast<uint64_t>(SIZE_MAX))
+        {
+            if (error) *error = "file '" + path + "' is too large to read";
+            return 0;
+        }
+
+        const size_t byteCount = static_cast<size_t>(size);
+        std::vector<uint8_t> buffer(byteCount);
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(byteCount)))
+        {
+            if (error) *error = "failed to read file '" + path + "'";
+            return 0;
+        }
+
+        return GetLargestFrameDecompressedSize(buffer.data(), buffer.size(), error);
+    }
 }  // namespace zstdframe

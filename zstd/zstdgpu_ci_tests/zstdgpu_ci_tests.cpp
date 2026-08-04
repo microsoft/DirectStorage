@@ -22,8 +22,9 @@
 //     - SimulationCheck    : --chk-gpu --chk-cpu --sim-gpu
 //     - SimulationCheckSeq : --chk-gpu --chk-cpu --sim-gpu --seq-cnt
 //
-//   Correctness — GBV (ASSERT; skipped on ARM; run only on the stride-selected
-//   subset of files chosen by --gbv-sample-count):
+//   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose largest
+//   decompressed frame is under --gbv-max-mb, optionally further reduced by an
+//   even stride via --gbv-sample-count):
 //     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
 //     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
 //
@@ -172,10 +173,12 @@ static bool IsFuzzContent(const std::string& zstFile)
     return false;
 }
 
-// Returns the set of files the Gbv/GbvSeq scenarios run on: an even, endpoint-
-// inclusive stride of g_testConfig.gbvSampleCount files across the sorted
-// discovered-file list. A count <= 0, or a corpus no larger than the count,
-// selects every file; a count of 1 selects the first file. Computed once.
+// Returns the set of files the Gbv/GbvSeq scenarios run on. Files are first
+// filtered to those whose largest single frame's decompressed (content) size is below --gbv-max-mb, then
+// (when g_testConfig.gbvSampleCount > 0) reduced to an even, endpoint-inclusive
+// stride of that many files across the sorted list. A count <= 0, or a corpus
+// no larger than the count, selects every file under the size cap; a count of 1
+// selects the first file. Computed once.
 static const std::unordered_set<std::string>& GbvSampledFiles()
 {
     static const std::unordered_set<std::string> selected = []
@@ -190,14 +193,21 @@ static const std::unordered_set<std::string>& GbvSampledFiles()
                 std::back_inserter(smallFiles),
                 [](const std::string& filename)
                 {
-                    try
-                    {
-                        return std::filesystem::file_size(filename) < g_testConfig.gbvMaxMB * (1024 * 1024);
-                    }
-                    catch (const std::filesystem::filesystem_error&)
-                    {
-                        return false; // skip missing/inaccessible files
-                    }
+                    // Gate GBV by the single largest frame's *decompressed* size.
+                    // GBV massively slows GPU execution and the TDR risk tracks
+                    // the work of the largest per-frame dispatch (how much one
+                    // frame decodes and writes), not the whole-file total. The
+                    // size is read from frame headers alone (no decompression).
+                    // Files whose decompressed size can't be determined are
+                    // excluded (fail-safe).
+                    std::string err;
+                    const uint64_t largestFrame =
+                        zstdframe::GetLargestFrameDecompressedSizeFromFile(filename, &err);
+                    if (largestFrame == 0)
+                        return false;
+                    const uint64_t limitBytes =
+                        static_cast<uint64_t>(g_testConfig.gbvMaxMB) * 1024ULL * 1024ULL;
+                    return largestFrame < limitBytes;
                 });
         }
         const size_t n = smallFiles.size();
@@ -546,8 +556,9 @@ TEST_P(ZstdGpuDemoTests, Gbv)
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
-        GTEST_SKIP() << "GBV skipped: file is not in the stride-selected GBV sample ("
-                     << g_testConfig.gbvSampleCount << " files).";
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
+                     << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
+                     << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
         return;
     }
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv"});
@@ -561,8 +572,9 @@ TEST_P(ZstdGpuDemoTests, GbvSeq)
 #else
     if (!IsSelectedForGbv(GetParam()))
     {
-        GTEST_SKIP() << "GBV skipped: file is not in the stride-selected GBV sample ("
-                     << g_testConfig.gbvSampleCount << " files).";
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
+                     << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
+                     << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
         return;
     }
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv", "--seq-cnt"});
