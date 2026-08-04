@@ -1341,6 +1341,13 @@ static int demoRun(void *demoCtx)
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
     zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
+    if (fbInfo.frameCount == 0)
+    {
+        debugPrint(L"[FAIL] No valid ZSTD frames was discovered in '%s'. Early Out.\n", zstFilePath);
+        ctx->retv = 1;
+        return 0;
+    }
+
     zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
     zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
