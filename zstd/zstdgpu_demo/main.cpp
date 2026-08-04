@@ -1090,7 +1090,7 @@ static int demoRun(void *demoCtx)
     wchar_t  **argv = ctx->argv;
 #endif
 
-    void                  *&zstdDataBase                   = ctx->zstdData;
+    void                  *&zstdDataMemory                 = ctx->zstdData;
     zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
     zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
     zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
@@ -1322,7 +1322,11 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
+    loadFileAligned(&zstdDataMemory, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
+    // NOTE(pamartis): `zstdDataMemory` is the reference to a pointer to a memory block that is going to be freed.
+    // `zstdData` pointer can hold an address of the start of ANY frame. See `if (minFrame > 0 || maxFrame < endFrame)` branch.
+    void *zstdData = zstdDataMemory;
+
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
