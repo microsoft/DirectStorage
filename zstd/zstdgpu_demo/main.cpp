@@ -1090,7 +1090,7 @@ static int demoRun(void *demoCtx)
     wchar_t  **argv = ctx->argv;
 #endif
 
-    void                  *&zstdDataBase                   = ctx->zstdData;
+    void                  *&zstdDataMemory                 = ctx->zstdData;
     zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
     zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
     zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
@@ -1114,8 +1114,6 @@ static int demoRun(void *demoCtx)
     zstdgpu_ResourceDataCpu    &zstdCpu                      = ctx->zstdCpu;
     uint64_t                   &freqGpuClocks                = ctx->freqGpuClocks;
     FILE                      *&csvFile                      = ctx->csvFile;
-
-    void *zstdData = NULL;
 
     bool extMem = false;
     bool blkCnt = false;
@@ -1324,9 +1322,10 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    // Load into zstdDataBase which is the base pointer that will be freed.  Copy into the working pointer zstdData (which may move) 
-    loadFileAligned(&zstdDataBase, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
-    zstdData = zstdDataBase;
+    loadFileAligned(&zstdDataMemory, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
+    // NOTE(pamartis): `zstdDataMemory` is the reference to a pointer to a memory block that is going to be freed.
+    // `zstdData` pointer can hold an address of the start of ANY frame. See `if (minFrame > 0 || maxFrame < endFrame)` branch.
+    void *zstdData = zstdDataMemory;
 
     if (NULL == zstdData)
     {
@@ -1342,17 +1341,22 @@ static int demoRun(void *demoCtx)
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
     zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
+    if (fbInfo.frameCount == 0)
+    {
+        debugPrint(L"[FAIL] No valid ZSTD frames was discovered in '%s'. Early Out.\n", zstFilePath);
+        ctx->retv = 1;
+        return 0;
+    }
+
     zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
     zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
-    // Ensure that the user-specified frame range (--idx-min/max) is clamped to the available frames
-    const uint32_t endFrame = fbInfo.frameCount == 0 ? 0 : fbInfo.frameCount - 1;
-    const uint32_t startFrame = minFrame < endFrame ? minFrame : endFrame;
+    const uint32_t endFrame = fbInfo.frameCount - 1;
 
     // NOTE(pamartis): Support the option to choose a range of frame in the input package/data
-    if (startFrame > 0 || maxFrame < endFrame)
+    if (minFrame > 0 || maxFrame < endFrame)
     {
         maxFrame = maxFrame < endFrame
                  ? maxFrame : endFrame;
