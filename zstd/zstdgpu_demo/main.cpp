@@ -1346,8 +1346,7 @@ static int demoRun(void *demoCtx)
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
 
-    // An invalid file can parse to 0 frames; clamp to 0 to avoid unsigned underflow of endFrame.
-    const uint32_t endFrame = fbInfo.frameCount == 0 ? 0 : fbInfo.frameCount - 1;
+    const uint32_t endFrame = fbInfo.frameCount - 1;
 
     // NOTE(pamartis): Support the option to choose a range of frame in the input package/data
     if (minFrame > 0 || maxFrame < endFrame)
