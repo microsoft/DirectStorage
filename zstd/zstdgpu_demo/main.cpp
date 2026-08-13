@@ -91,10 +91,12 @@ static void debugPrint(const wchar_t *format, ...)
     va_end(args);
 }
 
-static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, const wchar_t* fileName)
+static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, uint32_t bufferOffs, const wchar_t* fileName)
 {
-    size_t dataSize = 0;
-    size_t bufferSize = 0;
+    bufferOffs = zstdgpu_AlignUp(bufferOffs, 4); // NOTE(pamartis): align to 4 bytes at least for now.
+
+    uint32_t dataSize = 0;
+    uint32_t bufferSize = 0;
 
     void* data = NULL;
     FILE* file = NULL;
@@ -106,24 +108,31 @@ static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *out
         fseek(file, 0, SEEK_SET);
         if (-1 != dataSize)
         {
-            bufferSize = zstdgpu_AlignUp((uint32_t)dataSize, 1u << alignmentLog2);
+            bufferSize = zstdgpu_AlignUp(bufferOffs + dataSize, 1u << alignmentLog2);
             data = malloc(bufferSize);
             ZSTDGPU_ASSERT(NULL != data);
             if (NULL != data)
             {
-                size_t readSize = fread(data, 1, dataSize, file);
-                ZSTDGPU_ASSERT(readSize == dataSize);
-                if(bufferSize > dataSize)
+                // NOTE(pamarits): populate random data in the buffer with zeros for now.
+                if (bufferOffs > 0)
                 {
-                    memset((char*)data + dataSize, 0, bufferSize - dataSize);
+                    memset((char*)data, 0, bufferOffs);
+                }
+
+                size_t readSize = fread((char *)data + bufferOffs, 1, dataSize, file);
+                ZSTDGPU_ASSERT(readSize == dataSize);
+
+                if (bufferSize > bufferOffs + dataSize)
+                {
+                    memset((char*)data + bufferOffs + dataSize, 0, bufferSize - dataSize - bufferOffs);
                 }
             }
         }
         fclose(file);
     }
     *outData = data;
-    *outDataSize = (uint32_t)dataSize;
-    *outBufferSize = (uint32_t)bufferSize;
+    *outDataSize = dataSize;
+    *outBufferSize = bufferSize;
 }
 
 static void saveFile(const wchar_t *fileName, const void *data, uint32_t dataSize)
@@ -1090,7 +1099,7 @@ static int demoRun(void *demoCtx)
     wchar_t  **argv = ctx->argv;
 #endif
 
-    void                  *&zstdDataMemory                 = ctx->zstdData;
+    void                  *&zstdData                       = ctx->zstdData;
     zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
     zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
     zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
@@ -1135,6 +1144,7 @@ static int demoRun(void *demoCtx)
     uint32_t prfLevel = 0;
     uint32_t minFrame = 0;
     uint32_t maxFrame = ~0u;
+    uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
     {
@@ -1148,6 +1158,7 @@ static int demoRun(void *demoCtx)
             bool nextPrfLevel = false;
             bool nextMinFrame = false;
             bool nextMaxFrame = false;
+            bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
             {
@@ -1178,7 +1189,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextZstdOffs)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1193,12 +1204,15 @@ static int demoRun(void *demoCtx)
                             minFrame = value;
                         else if (nextMaxFrame)
                             maxFrame = value;
+                        else if (nextZstdOffs)
+                            zstdOffs = value;
                     }
 
                     nextRepCount = false;
                     nextPrfLevel = false;
                     nextMinFrame = false;
                     nextMaxFrame = false;
+                    nextZstdOffs = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -1270,6 +1284,10 @@ static int demoRun(void *demoCtx)
                 {
                     nextMaxFrame = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
+                {
+                    nextZstdOffs = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--out-frm"))
                 {
                     outFrm = true;
@@ -1302,6 +1320,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
+                debugPrint(L"\t--zst-ofs <byte count>    [Optional] When loading .zst file is appended to a buffer with <byte count> bytes. (Useful for testing large buffer sizes)  \n");
                 debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
                 debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
@@ -1322,11 +1341,7 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    loadFileAligned(&zstdDataMemory, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
-    // NOTE(pamartis): `zstdDataMemory` is the reference to a pointer to a memory block that is going to be freed.
-    // `zstdData` pointer can hold an address of the start of ANY frame. See `if (minFrame > 0 || maxFrame < endFrame)` branch.
-    void *zstdData = zstdDataMemory;
-
+    loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstdOffs, zstFilePath);
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
@@ -1338,8 +1353,10 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Loaded '%s' -- %u bytes.\n", zstFilePath, zstdDataSize);
     }
 
+    ZSTDGPU_ASSERT(zstdCompressedFramesMemorySizeInBytes >= zstdOffs);
+
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
-    zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+    zstdgpu_CountFramesAndBlocks(&fbInfo, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
 
     if (fbInfo.frameCount == 0)
     {
@@ -1351,7 +1368,7 @@ static int demoRun(void *demoCtx)
     zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
     zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
-    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
 
     const uint32_t endFrame = fbInfo.frameCount - 1;
 
@@ -1363,13 +1380,18 @@ static int demoRun(void *demoCtx)
         minFrame = minFrame < maxFrame
                  ? minFrame : maxFrame;
 
-        zstdData = (char*)zstdData + zstdInFrameRefs[minFrame].offs;
+        zstdOffs += zstdInFrameRefs[minFrame].offs;
         zstdDataSize = zstdInFrameRefs[maxFrame].offs - zstdInFrameRefs[minFrame].offs + zstdInFrameRefs[maxFrame].size;
-        zstdCompressedFramesMemorySizeInBytes = (zstdDataSize + 3) & ~3u;
+        zstdCompressedFramesMemorySizeInBytes = zstdgpu_AlignUp(zstdOffs + zstdDataSize, 4);
 
-        // NOTE(pamartis): update all structures because 'zstdData' and 'zstdDataSize' has changed
-        zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
-        zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+        // NOTE(pamartis): update all structures because 'zstdOffs' has changed
+        zstdgpu_CountFramesAndBlocks(&fbInfo, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+        zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+    }
+
+    for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
+    {
+        zstdInFrameRefs[i].offs += zstdOffs;
     }
 
     // NOTE(pamartis): compute offsets of frame in the output data using the decompressed frame sizes.
@@ -1445,7 +1467,7 @@ static int demoRun(void *demoCtx)
     {
         debugPrint(L"[INFO] Running Reference Decompression and building Reference Uncompressed data ('--chk-cpu' or '--chk-gpu' was set).\n");
 
-        zstdReferenceUncompressedDataSize = (uint32_t)ZSTD_get_decompressed_size(zstdData, zstdDataSize);
+        zstdReferenceUncompressedDataSize = (uint32_t)ZSTD_get_decompressed_size((char *)zstdData + zstdOffs, zstdDataSize);
         zstdReferenceUncompressedData = malloc(zstdReferenceUncompressedDataSize);
 
         // Clear the buffer to a known zero state in case ZSTD_decompress writes less data than the frame header claims (this matches the GPU)
@@ -1465,7 +1487,7 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
 
         // NOTE(pamartis): We run GPU Decompression pipeline on CPU to catch possible errors/assert early
-        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
+        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData /** intentionally without zstdOffs */, zstdInFrameRefs, fbInfo.frameCount, zstdCompressedFramesMemorySizeInBytes, fbInfo.frameByteCount);
         ctx->zstdCpuInit = true;
 
         if (!simGpu)
@@ -1500,14 +1522,12 @@ static int demoRun(void *demoCtx)
     void* defaultUploadCallbackUserData[2];
     if (testSourceInGpuMemory > 0)
     {
-        zstdCompressedFramesMemorySizeInBytes = zstdgpu_AlignUp(zstdDataSize, 4u);
-
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesMemory, device, 1u, zstdCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1u, zstdUnCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_READBACK);
 
-        d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdDataSize);
+        d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdOffs + zstdDataSize);
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesRefs, 0, (void *)zstdInFrameRefs, zstdFramesRefsSizeInBytes);
         d3d12aid_MappedBuffer_Append(&zstdUnCompressedFramesRefs, 0, (void *)zstdOutFrameRefs, zstdFramesRefsSizeInBytes);
 
@@ -1522,7 +1542,7 @@ static int demoRun(void *demoCtx)
 
         defaultUploadCallbackUserData[0] = (void *)zstdData;
         defaultUploadCallbackUserData[1] = (void *)zstdInFrameRefs;
-        zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
+        zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdOffs + zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
     }
     if (ssm)
     {
