@@ -630,7 +630,6 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
             srt.inoutCounters[0].BlocksBytes_RLE                             = 0;
             srt.inoutCounters[0].Frames                                      = 0;
             srt.inoutCounters[0].Frames_UncompressedByteSize                 = 0;
-            srt.inoutCounters[0].Frames_ExecuteSequences                     = 0;
         }
         return;
     }
@@ -4036,9 +4035,9 @@ static void zstdgpu_ExecuteSequences_Lit(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequ
 
 static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequences_SRT) srt, uint32_t groupId)
 {
-    const uint32_t seqStreamCnt = srt.inoutCounters[0].Seq_Streams;
+    const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
 
-    const uint32_t frameCnt = srt.inoutCounters[0].Frames;
+    const uint32_t frameCnt = srt.inCounters[0].Frames;
 
     // NOTE: ExecuteSequences is dispatched with one threadgroup per frame so groupId is a unique frame index in [0, frameCount).
     const uint32_t frameIdx = groupId;
@@ -4049,7 +4048,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
     const uint32_t cmpBlockBeg = srt.inPerFrameBlockCountCMP[frameIdx];
     const uint32_t cmpBlockEnd = (frameIdx + 1u < frameCnt)
                                ? srt.inPerFrameBlockCountCMP[frameIdx + 1u]
-                               : srt.inoutCounters[0].Blocks_CMP;
+                               : srt.inCounters[0].Blocks_CMP;
 
     for (uint32_t cmpBlockIdx = cmpBlockBeg; cmpBlockIdx < cmpBlockEnd; ++cmpBlockIdx)
     {
@@ -4090,7 +4089,7 @@ static void zstdgpu_ShaderEntry_ExecuteSequences(ZSTDGPU_PARAM_INOUT(zstdgpu_Exe
 
             ZSTDGPU_BRANCH if (seqStreamIdx + 1u == seqStreamCnt)
             {
-                seqEnd = srt.inoutCounters[0].Seq_Streams_DecodedItems;
+                seqEnd = srt.inCounters[0].Seq_Streams_DecodedItems;
             }
             else
             {

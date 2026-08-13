@@ -3375,7 +3375,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Execute Sequences]");
-        D3D12_RESOURCE_BARRIER barriers[2];
+        D3D12_RESOURCE_BARRIER barriers[1];
         uint32_t bc = 0;
         {
             // in case if the number of RAW+RLE blocks > 0, [Memcpy RAW blocks, Memset RLE blocks] has written to 'UnCompressedFramesData'
@@ -3383,9 +3383,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             setResourceUavSync(barriers, bc + 0, req->resData.gpuOnly.UnCompressedFramesData);
             bc += 1;
         }
-        // next written by [Execute Sequences] when allocating
-        setResourceSrvCopyIndirectToUavSync(barriers, bc + 0, req->resData.gpuOnly.Counters);
-        bc += 1;
+        // Counters is only read by [Execute Sequences] (bound as an SRV), so it stays in its read state - no UAV transition needed.
 
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
@@ -3400,13 +3398,6 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         );
         PIXEndEvent(cmdList);
     }
-    {
-        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Readback Counters :: After Block Decompression]");
-        D3D12_RESOURCE_BARRIER barriers[1];
-        setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.Counters);
-        cmdList->ResourceBarrier(_countof(barriers), barriers);
-        PIXEndEvent(cmdList);
-    }
     if (0) /** IMPORTANT: requires DecompressedSequencesMLen to contain inclusive prefix of total sequence sizes */
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute Dest Sequence Offsets]");
@@ -3416,7 +3407,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
-    /* It's needed because Counters are updated during Seqeunce Execution */
+    /* Read back the final Counters accumulated by the block-parse and decompression passes */
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Readback Counters :: After Block Decompression]");
         zstdgpu_PushReadback(Counters);
