@@ -628,6 +628,7 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
 
 static void zstdgpu_CreateByteAddressBufferSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpuDest, ID3D12Device* device, ID3D12Resource* resource, uint32_t byteSize)
 {
+    ZSTDGPU_ASSERT(0 == byteSize % sizeof(uint32_t));
     D3D12_SHADER_RESOURCE_VIEW_DESC desc =
     {
         DXGI_FORMAT_R32_TYPELESS,
@@ -654,15 +655,17 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
     //const DXGI_FORMAT DXGI_FORMAT_uint16_t = DXGI_FORMAT_R16_UINT;
     const DXGI_FORMAT DXGI_FORMAT_int16_t = DXGI_FORMAT_R16_SINT;
 
-    #define ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, viewType) \
+    #define ZSTDGPU_PUSH_STRUCT_BUFFER(type, name, viewType)                                                \
+        ZSTDGPU_ASSERT(0 == resInfo.name##_ByteSize % sizeof(type));                                        \
         d3d12aid_##viewType##_Create(cpuDest, device,                                                       \
             gpuResData.gpuOnly.name,                                                                        \
-            d3d12aid_##viewType##_InitAsStructBuffer(&viewType, resInfo.name##_ByteSize - resInfo.name##_ByteSize % sizeof(type), sizeof(type))      \
+            d3d12aid_##viewType##_InitAsStructBuffer(&viewType, resInfo.name##_ByteSize, sizeof(type))      \
         );                                                                                                  \
         cpuDest.ptr += descSize;                                                                            \
         gpuDest.ptr += descSize;
 
-    #define ZSTDGPU_PUSH_TYPED_BUFFER(type, name, viewType)                                                \
+    #define ZSTDGPU_PUSH_TYPED_BUFFER(type, name, viewType)                                                 \
+        ZSTDGPU_ASSERT(0 == resInfo.name##_ByteSize % sizeof(type));                                        \
         d3d12aid_##viewType##_Create(cpuDest, device,                                                       \
             gpuResData.gpuOnly.name,                                                                        \
             d3d12aid_##viewType##_InitAsTypedBuffer(&viewType, resInfo.name##_ByteSize, DXGI_FORMAT_##type, sizeof(type))\
@@ -671,9 +674,9 @@ static void zstdgpu_ReCreate_SRTs(zstdgpu_SRTs & srts, ID3D12Device *device, con
         gpuDest.ptr += descSize;
 
 
-    #define ZSTDGPU_PUSH_RAW_BUFFER(name)                                                                           \
-        (zstdgpu_CreateByteAddressBufferSrv(cpuDest, device, gpuResData.gpuOnly.name, resInfo.name##_ByteSize),     \
-         cpuDest.ptr += descSize,                                                                                   \
+    #define ZSTDGPU_PUSH_RAW_BUFFER(name)                                                                       \
+        (zstdgpu_CreateByteAddressBufferSrv(cpuDest, device, gpuResData.gpuOnly.name, resInfo.name##_ByteSize), \
+         cpuDest.ptr += descSize,                                                                               \
          gpuDest.ptr += descSize);
 
     #define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                               ZSTDGPU_PUSH_RAW_BUFFER(name)
