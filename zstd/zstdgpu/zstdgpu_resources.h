@@ -344,7 +344,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
 
 static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
-    const uint32_t DecompressedLiterals_Count       = literalCount;
+    const uint32_t DecompressedLiterals_Count       = zstdgpu_AlignUp(literalCount, sizeof(uint32_t)); // align to a dword because this buffer is aliased with a view that access dwords
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
