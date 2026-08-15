@@ -840,26 +840,18 @@ static uint32_t zstdgpu_UpdatePreviousAndRecomputeIncoming(ZSTDGPU_PARAM_INOUT(u
                                                            uint32_t llen)
 {
     ZSTDGPU_ASSERT_MSG(offset < 0x20000000, "Incoming 'offset'(0x%08x) overflow into 'repeat' offset bit", offset);
-    uint32_t encodedOffset = offset;
-    if (offset <= 3u)
-    {
-        offset += llen == 0u ? 1u : 0u;
-#if 0
-        if (offset == 4u)
-        {
-            encodedOffset = zstdgpu_SubtractByteFromSeqOffset(offset1);
-        }
-        else
-        {
-            encodedOffset = (offset == 3u) ? offset3 : ((offset == 2u) ? offset2 : offset1);
-        }
-#else
-        encodedOffset = (offset < 3u) ? (offset < 2u ? offset1 : offset2) : (offset < 4u ? offset3 : zstdgpu_SubtractByteFromSeqOffset(offset1));
-#endif
-    }
 
-    offset3 = offset >= 3u ? offset2 : offset3;
-    offset2 = offset >= 2u ? offset1 : offset2;
+    // NOTE: use predicated computation for repcode resolution to avoid divergent branches since
+    // repcode offsets are common and can cause divergence across active lanes.
+    
+    const bool     isRep     = offset <= 3u;
+    const uint32_t offsetAdj = offset + ((isRep && llen == 0u) ? 1u : 0u);
+    const uint32_t repOffset = (offsetAdj < 3u) ? (offsetAdj < 2u ? offset1 : offset2)
+                                                : (offsetAdj < 4u ? offset3 : zstdgpu_SubtractByteFromSeqOffset(offset1));
+    const uint32_t encodedOffset = isRep ? repOffset : offset;
+
+    offset3 = offsetAdj >= 3u ? offset2 : offset3;
+    offset2 = offsetAdj >= 2u ? offset1 : offset2;
     offset1 = encodedOffset;
     return encodedOffset;
 }
