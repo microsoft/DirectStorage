@@ -3248,7 +3248,8 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
                                              ZSTDGPU_PARAM_IN(uint32_t) symbolMLen,
                                              ZSTDGPU_PARAM_INOUT(uint32_t) outLLen,
                                              ZSTDGPU_PARAM_INOUT(uint32_t) outOffs,
-                                             ZSTDGPU_PARAM_INOUT(uint32_t) outMLen)
+                                             ZSTDGPU_PARAM_INOUT(uint32_t) outMLen,
+                                             bool skipOffsRefill)
 {
     // Extra bits are low 5 bits, rest are baseline.
     // It could be better/simpler to not bitpack (use uint32_t2), but the LLVM-SROA pass in DXC might split that up; a single load is desired.
@@ -3283,7 +3284,15 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
     const uint32_t bitcntOffs = symbolOffs_Clamped;
     const uint32_t bitcntMLen = mlenInfo & 31;
 
-    const uint32_t bitsOffs = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntOffs);
+    uint32_t bitsOffs;
+    if (skipOffsRefill)
+    {
+        bitsOffs = zstdgpu_Backward_BitBuffer_V0_GetNoRefill(bitBuffer, bitcntOffs);
+    }
+    else
+    {
+        bitsOffs = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntOffs);
+    }
 
     // MLen and LLen value extra bits are each <= 16 and can be read in a single packed Get()
     // Offs can need up to 28 extra bits, so it must remain a separate read.
@@ -3380,23 +3389,27 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
         uint32_t stateOffs = ZSTDGPU_BACKWARD_BITBUF(GetNoRefill)(bitBuffer, initBitcntOffs);
         uint32_t stateMLen = ZSTDGPU_BACKWARD_BITBUF(GetNoRefill)(bitBuffer, initBitcntMLen);
 
-        for (uint32_t i = outputStart; i < outputEnd; ++i)
+        // Preload the first sequence's FSE elements and prepare the bit buffer for the initial reads.
+        uint32_t fseElemLLen = srt.inFseElems[stateLLen + startLLen];
+        uint32_t fseElemOffs = srt.inFseElems[stateOffs + startOffs];
+        uint32_t fseElemMLen = srt.inFseElems[stateMLen + startMLen];
+
+        if (!bitBuffer.hadlastrefill)
         {
-            stateLLen += startLLen;
-            stateOffs += startOffs;
-            stateMLen += startMLen;
+            ZSTDGPU_BACKWARD_BITBUF(Refill)(bitBuffer, 32u);
+        }
 
-            const uint32_t fseElemLLen = srt.inFseElems[stateLLen];
-            const uint32_t fseElemOffs = srt.inFseElems[stateOffs];
-            const uint32_t fseElemMLen = srt.inFseElems[stateMLen];
-
+        // Loop over all sequences (except the final one) while prefetching the subsequent one.
+        uint32_t i = outputStart;
+        for (; i + 1u < outputEnd; ++i)
+        {
             uint32_t llen = 0, offs = 0, mlen = 0;
             zstdgpu_ReadSeqBitsAndDecompress(
                 bitBuffer,
                 zstdgpu_FseElem_Symbol(fseElemLLen),
                 zstdgpu_FseElem_Symbol(fseElemOffs),
                 zstdgpu_FseElem_Symbol(fseElemMLen),
-                llen, offs, mlen
+                llen, offs, mlen, true
             );
             offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
@@ -3404,16 +3417,42 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
             totalSize += llen + mlen;
             totalMLen += mlen;
 
+            // There is always a next sequence here: advance the states and prefetch the next symbol's
+            // FSE elements and bit-buffer refill to overlap with the scattered sequence stores below.
+            zstdgpu_ReadExtraBitsAndUpdateState(bitBuffer, fseElemLLen, fseElemOffs, fseElemMLen, stateLLen, stateOffs, stateMLen);
+            fseElemLLen = srt.inFseElems[stateLLen + startLLen];
+            fseElemOffs = srt.inFseElems[stateOffs + startOffs];
+            fseElemMLen = srt.inFseElems[stateMLen + startMLen];
+
+            if (!bitBuffer.hadlastrefill)
+            {
+                ZSTDGPU_BACKWARD_BITBUF(Refill)(bitBuffer, 32u);
+            }
+
             srt.inoutDecompressedSequenceLLen[i] = llen;
             srt.inoutDecompressedSequenceMLen[i] = mlen;
             srt.inoutDecompressedSequenceOffs[i] = offs;
+        }
 
-            if (i == outputEnd - 1u)
-            {
-                break;
-            }
+        // Now handle the final (or only) sequence in the current block.
+        if (i < outputEnd)
+        {
+            uint32_t llen = 0, offs = 0, mlen = 0;
+            zstdgpu_ReadSeqBitsAndDecompress(
+                bitBuffer,
+                zstdgpu_FseElem_Symbol(fseElemLLen),
+                zstdgpu_FseElem_Symbol(fseElemOffs),
+                zstdgpu_FseElem_Symbol(fseElemMLen),
+                llen, offs, mlen, true
+            );
+            offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
-            zstdgpu_ReadExtraBitsAndUpdateState(bitBuffer, fseElemLLen, fseElemOffs, fseElemMLen, stateLLen, stateOffs, stateMLen);
+            totalSize += llen + mlen;
+            totalMLen += mlen;
+
+            srt.inoutDecompressedSequenceLLen[i] = llen;
+            srt.inoutDecompressedSequenceMLen[i] = mlen;
+            srt.inoutDecompressedSequenceOffs[i] = offs;
         }
     }
 
@@ -3553,7 +3592,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
             zstdgpu_FseElem_Symbol(packedFseElemLLen),
             zstdgpu_FseElem_Symbol(packedFseElemOffs),
             zstdgpu_FseElem_Symbol(packedFseElemMLen),
-            llen, offs, mlen);
+            llen, offs, mlen, false);
         offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
         /*totalSize += llen + mlen;*/
@@ -3729,7 +3768,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
                     zstdgpu_FseElem_Symbol(fseElemLLen),
                     zstdgpu_FseElem_Symbol(fseElemOffs),
                     zstdgpu_FseElem_Symbol(fseElemMLen),
-                    llen, offs, mlen
+                    llen, offs, mlen, false
                 );
                 offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
