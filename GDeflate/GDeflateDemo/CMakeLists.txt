@@ -10,7 +10,7 @@ set(sources
     "pch.h"
 )
 
-set(libs GDeflate)
+set(libs GDeflate windowsapp.lib dxcompiler.lib)
 
 if (WIN32)
     set(sources ${sources} 
