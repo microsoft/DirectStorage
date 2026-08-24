@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,7 @@ struct TestConfig
     std::string adversarialManifestPath;        // Optional path to adversarial_manifest.json (--adversarial-manifest)
     std::string gpuName;                        // Adapter name of the machine under test (--gpu-name). Used only for the
                                                 // manifest's scenario skips.
+    uint32_t gpuVendorId = 0;                    // PCI vendor ID forwarded to zstdgpu_demo. 0 = unset.
     int runCount = 40;                          // Number of iterations for performance tests
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
     int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).

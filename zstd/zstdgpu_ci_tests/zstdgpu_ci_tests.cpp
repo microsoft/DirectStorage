@@ -31,6 +31,7 @@
 //   Performance (EXPECT — soft fail, also verify CSV output was written):
 //     - PerStageTiming     : --prf-lvl 2 --d3d-gfx --seq-cnt → results/stages_<stem>.csv
 
+#include "gpu_vendor_args.h"
 #include "zstdgpu_ci_tests.h"
 #include "zstd_frame_size.h"
 #include <gtest/gtest.h>
@@ -747,6 +748,7 @@ std::vector<std::string> BuildCorrectnessArgs(
         args.push_back("--idx-max");
         args.push_back(std::to_string(g_testConfig.idxMax));
     }
+    AppendGpuVendorArgs(args, g_testConfig.gpuVendorId);
     for (const auto& flag : scenarioFlags)
     {
         args.push_back(flag);
@@ -781,11 +783,40 @@ std::vector<std::string> BuildPerformanceArgs(
         args.push_back("--idx-max");
         args.push_back(std::to_string(g_testConfig.idxMax));
     }
+    AppendGpuVendorArgs(args, g_testConfig.gpuVendorId);
     for (const auto& flag : extraFlags)
     {
         args.push_back(flag);
     }
     return args;
+}
+
+TEST(GpuVendorForwardingTests, CorrectnessArgsIncludeConfiguredVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0x10de;
+
+    const auto args = BuildCorrectnessArgs("content.zst", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    const auto option = std::find(args.begin(), args.end(), "--gpu-ven-id");
+    ASSERT_NE(option, args.end());
+    ASSERT_NE(std::next(option), args.end());
+    EXPECT_EQ(*std::next(option), "10de");
+}
+
+TEST(GpuVendorForwardingTests, PerformanceArgsIncludeConfiguredVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0x10de;
+
+    const auto args = BuildPerformanceArgs("content.zst", 1, 2, "results.csv", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    const auto option = std::find(args.begin(), args.end(), "--gpu-ven-id");
+    ASSERT_NE(option, args.end());
+    ASSERT_NE(std::next(option), args.end());
+    EXPECT_EQ(*std::next(option), "10de");
 }
 
 } // namespace
