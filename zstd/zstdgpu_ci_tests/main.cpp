@@ -23,7 +23,6 @@
 // This file also owns the g_testConfig storage and the file discovery
 // implementation declared in zstdgpu_ci_tests.h.
 
-#include "gpu_vendor_args.h"
 #include "zstdgpu_ci_tests.h"
 #include <gtest/gtest.h>
 #include <algorithm>

@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "adversarial_manifest.h"
@@ -56,6 +57,14 @@ struct TestConfig
 // Global config, set once in main() before RUN_ALL_TESTS(), then read-only
 // from test bodies.
 extern TestConfig g_testConfig;
+
+// Parses a nonzero PCI vendor ID written in hexadecimal. An optional 0x prefix
+// is accepted. On failure, returns false and describes the invalid value.
+bool ParseGpuVendorId(std::string_view value, uint32_t& vendorId, std::string& error);
+
+// Appends the zstdgpu_demo adapter selector when an explicit vendor was set.
+// A zero ID means "use the demo's normal adapter selection".
+void AppendGpuVendorArgs(std::vector<std::string>& args, uint32_t vendorId);
 
 // File discovery — scans a directory for *.zst files. Returns sorted full paths.
 // Called by main() during startup.
