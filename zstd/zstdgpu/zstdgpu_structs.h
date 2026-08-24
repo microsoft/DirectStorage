@@ -943,7 +943,7 @@ static inline void zstdgpu_Forward_BitBuffer_Refill(ZSTDGPU_PARAM_INOUT(zstdgpu_
 
     if (inoutBuffer.bitcnt < bitcnt)
     {
-        ZSTDGPU_ASSERT(inoutBuffer.offset <= (inoutBuffer.bytesz >> 2) - 1);
+        ZSTDGPU_ASSERT_MSG(inoutBuffer.offset < (inoutBuffer.bytesz >> 2), "Refill: fetch dword %u from %u-byte (%u-dwords) buffer", inoutBuffer.offset, inoutBuffer.bytesz, inoutBuffer.bytesz >> 2);
 
         inoutBuffer.bitbuf |= (uint64_t)inoutBuffer.buffer[inoutBuffer.offset] << inoutBuffer.bitcnt;
 #if 0
@@ -992,22 +992,26 @@ static inline void zstdgpu_Forward_BitBuffer_Skip(ZSTDGPU_PARAM_INOUT(zstdgpu_Fo
     ZSTDGPU_ASSERT(inoutBuffer.datasz >= zstdgpu_Forward_BitBuffer_GetByteOffset(inoutBuffer) + bytecnt);
 
 #if 1
-    const uint32_t leftbytecnt = inoutBuffer.bitcnt >> 3;
-    ZSTDGPU_BRANCH if (leftbytecnt < bytecnt)
+    const uint32_t leftcnt = inoutBuffer.bitcnt >> 3;
+    const uint32_t skipcnt = zstdgpu_MinU32(leftcnt, bytecnt);
+    zstdgpu_Forward_BitBuffer_Pop(inoutBuffer, skipcnt << 3u);
+    ZSTDGPU_BRANCH if (bytecnt > skipcnt)
     {
-        bytecnt -= leftbytecnt;
-        zstdgpu_Forward_BitBuffer_Pop(inoutBuffer, inoutBuffer.bitcnt);
+        bytecnt -= skipcnt;
 
         inoutBuffer.offset += bytecnt >> 2;
-        inoutBuffer.bitcnt = (bytecnt & 3) << 3;
-        inoutBuffer.bitbuf = (uint64_t)inoutBuffer.buffer[inoutBuffer.offset] >> inoutBuffer.bitcnt;
-        inoutBuffer.offset += 1;
-        inoutBuffer.bitcnt = 32 - inoutBuffer.bitcnt;
+        inoutBuffer.bitcnt = 0;
 
-    }
-    else
-    {
-        zstdgpu_Forward_BitBuffer_Pop(inoutBuffer, bytecnt << 3);
+        const uint32_t reqbits = (bytecnt & 3u) << 3u;
+
+        ZSTDGPU_BRANCH if (reqbits > 0)
+        {
+            ZSTDGPU_ASSERT_MSG(inoutBuffer.offset < (inoutBuffer.bytesz >> 2), "Skip: fetch dword %u from %u-byte (%u-dwords) buffer", inoutBuffer.offset, inoutBuffer.bytesz, inoutBuffer.bytesz >> 2);
+
+            inoutBuffer.bitbuf = (uint64_t)inoutBuffer.buffer[inoutBuffer.offset] >> reqbits;
+            inoutBuffer.offset += 1;
+            inoutBuffer.bitcnt = 32 - reqbits;
+        }
     }
 #else
     zstdgpu_Forward_BitBuffer_Refill(inoutBuffer, (bytecnt & 3) * 8);
