@@ -16,14 +16,11 @@
  */
 
 #include "../zstdgpu_shaders.h"
+#include "../.generated/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
 
 #if !defined(__HLSL_VERSION) || (__HLSL_VERSION < 2021)
 #pragma dxc diagnostic ignored "-Wfor-redefinition"
 #endif
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
 
 // WARN(pamartis): Wasteful, need only uint8_t but HLSL doesn't support it
 groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTableAndDecompressLiterals_LdsSize];
@@ -34,15 +31,13 @@ groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTableAndDecompressLiterals_LdsSi
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=8), UAV(u0, numDescriptors=1))")]
+[RootSignature(ZSTDGPU_SRT_RS_InitHuffmanTableAndDecompressLiterals)]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals, 1, 1)]
-void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
+void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
-    zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
-
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT srt;
+    zstdgpu_Srt_Fill(srt);
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
     if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;

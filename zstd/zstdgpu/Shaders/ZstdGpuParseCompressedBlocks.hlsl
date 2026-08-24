@@ -20,38 +20,22 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t compressedBufferSizeInBytes;
-    uint32_t frameCount;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_ParseCompressedBlocks.h"
 
 #ifdef __XBOX_SCARLETT
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=4), UAV(u0, numDescriptors=25)), RootConstants(b0, num32BitConstants=4)")]
+[RootSignature(ZSTDGPU_SRT_RS_ParseCompressedBlocks)]
 [numthreads(kzstdgpu_TgSizeX_ParseCompressedBlocks, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_ParseCompressedBlocks + threadId;
     zstdgpu_ParseCompressedBlocks_SRT srt;
+    zstdgpu_Srt_Fill(srt);
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_ParseCompressedBlocks + threadId;
 
-    srt.compressedBlockCount        = Constants.workItemCount;
-    srt.compressedBufferSizeInBytes = Constants.compressedBufferSizeInBytes;
-    srt.frameCount                  = Constants.frameCount;
+    zstdgpu_Srt_FillInline(srt, srt.workItemCount);
 
     zstdgpu_ShaderEntry_ParseCompressedBlocks(srt, i);
 }

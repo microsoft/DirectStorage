@@ -22,33 +22,25 @@
  */
 
 #include "../zstdgpu_shaders.h"
-
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-};
-
-ConstantBuffer<Consts>                          Constants                       : register(b0);
-
-RWStructuredBuffer<uint32_t>                    ZstdFseIds                      : register(u0);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>                    ZstdFseIndexLookback            : register(u1);
+#include "../.generated/ZstdGpuSrt_PropagateFseIndex.h"
 
 #ifdef __XBOX_SCARLETT
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("RootConstants(b0, num32BitConstants=2), UAV(u0), UAV(u1)")]
+[RootSignature(ZSTDGPU_SRT_RS_PropagateFseIndex)]
 [numthreads(kzstdgpu_TgSizeX_PropagateFseIndex, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PropagateFseIndex + threadId;
+    zstdgpu_PropagateFseIndex_SRT srt;
 
-    if (i >= Constants.workItemCount)
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_PropagateFseIndex + threadId;
+
+    if (i >= srt.workItemCount)
     {
         return;
     }
-    ZstdFseIds[i] = zstdgpu_PropagateFseTableIndex(ZstdFseIndexLookback, ZstdFseIds[i], i);
+    srt.inoutFseIds[i] = zstdgpu_PropagateFseTableIndex(srt.inoutFseIndexLookback, srt.inoutFseIds[i], i);
 }
