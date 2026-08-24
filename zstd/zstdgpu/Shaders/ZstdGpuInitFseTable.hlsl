@@ -42,18 +42,8 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t tableType; // 0=HufW, 1=LLen, 2=Offs, 3=MLen
-};
 
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_INIT_FSE_TABLE_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_InitFseTable.h"
 
 #if ZSTD_BITCNT_NSTATE_METHOD == ZSTD_BITCNT_NSTATE_METHOD_DEFAULT
 groupshared uint32_t Lds[kzstdgpu_InitFseTable_Default_LdsSize];
@@ -64,42 +54,32 @@ groupshared uint32_t Lds[kzstdgpu_InitFseTable_Experimental_LdsSize];
 #define ZSTDGPU_LDS Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors = 3), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_InitFseTable)]
 [numthreads(kzstdgpu_TgSizeX_InitFseTable, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint32_t i : SV_GroupThreadId)
 {
-    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
-
     zstdgpu_InitFseTable_SRT srt;
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_INIT_FSE_TABLE_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
     const uint32_t cmpBlockCount = srt.inCounters[0].Blocks_CMP;
-    if (Constants.tableType == 1u) // LLen
+    if (srt.tableType == 1u) // LLen
     {
-        srt.tableStartIndex = cmpBlockCount;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartLLen(0, cmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_LLen;
+        zstdgpu_Srt_FillInline(srt, cmpBlockCount, zstdgpu_ComputeFseDataStartLLen(0, cmpBlockCount), kzstdgpu_FseElemMaxCount_LLen);
     }
-    else if (Constants.tableType == 2u) // Offs
+    else if (srt.tableType == 2u) // Offs
     {
-        srt.tableStartIndex = 2u * cmpBlockCount + 1u;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartOffs(0, cmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_Offs;
+        zstdgpu_Srt_FillInline(srt, 2u * cmpBlockCount + 1u, zstdgpu_ComputeFseDataStartOffs(0, cmpBlockCount), kzstdgpu_FseElemMaxCount_Offs);
     }
-    else if (Constants.tableType == 3u) // MLen
+    else if (srt.tableType == 3u) // MLen
     {
-        srt.tableStartIndex = 3u * cmpBlockCount + 2u;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartMLen(0, cmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_MLen;
+        zstdgpu_Srt_FillInline(srt, 3u * cmpBlockCount + 2u, zstdgpu_ComputeFseDataStartMLen(0, cmpBlockCount), kzstdgpu_FseElemMaxCount_MLen);
     }
     else // 0 == HufW
     {
-        srt.tableStartIndex = 0u;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartHufW(0, cmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_HufW;
+        zstdgpu_Srt_FillInline(srt, 0u, zstdgpu_ComputeFseDataStartHufW(0, cmpBlockCount), kzstdgpu_FseElemMaxCount_HufW);
     }
     zstdgpu_ShaderEntry_InitFseTable(srt, groupId, i);
 }

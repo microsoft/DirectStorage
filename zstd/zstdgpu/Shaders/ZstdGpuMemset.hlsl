@@ -15,23 +15,19 @@
  */
 
 #include "../zstdgpu_shaders.h"
+#include "../.generated/ZstdGpuSrt_Memset.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t value;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-RWStructuredBuffer<uint32_t> ZstdBuffer : register(u0);
-
-[RootSignature("UAV(u0), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_Memset)]
 [numthreads(kzstdgpu_TgSizeX_Memset, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_Memset + threadId;
-    if (i < Constants.workItemCount)
-        ZstdBuffer[i] = Constants.value;
+    zstdgpu_Memset_SRT srt;
+
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_Memset + threadId;
+    if (i < srt.workItemCount)
+    {
+        srt.inoutDest[i] = srt.value;
+    }
 }

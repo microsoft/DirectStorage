@@ -21,27 +21,14 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t initResourcesStage;
-};
+#include "../.generated/ZstdGpuSrt_InitResources.h"
 
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_INIT_RESOURCES_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
-
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=1), UAV(u0, numDescriptors=4)), RootConstants(b0, num32BitConstants=1)")]
+[RootSignature(ZSTDGPU_SRT_RS_InitResources)]
 [numthreads(kzstdgpu_TgSizeX_InitCounters, 1, 1)]
 void main(uint i : SV_DispatchThreadId)
 {
     zstdgpu_InitResources_SRT srt;
+    zstdgpu_Srt_Fill(srt);
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_INIT_RESOURCES_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
-
-    srt.initResourcesStage = Constants.initResourcesStage;
     zstdgpu_ShaderEntry_InitResources(srt, i);
 }

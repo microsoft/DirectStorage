@@ -16,37 +16,19 @@
  */
 
 #include "../zstdgpu_shaders.h"
-
-struct Consts
-{
-    uint32_t frameCount;
-    uint32_t compressedBufferSizeInBytes;
-    uint32_t countBlocksOnly;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_PARSE_FRAMES_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_ParseFrames.h"
 
 #ifdef __XBOX_SCARLETT
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=2), UAV(u0, numDescriptors=14)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_ParseFrames)]
 [numthreads(kzstdgpu_TgSizeX_ParseCompressedBlocks, 1, 1)]
 void main(uint i : SV_DispatchThreadId)
 {
     zstdgpu_ParseFrames_SRT srt;
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_PARSE_FRAMES_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
-
-    srt.frameCount                  = Constants.frameCount;
-    srt.compressedBufferSizeInBytes = Constants.compressedBufferSizeInBytes;
-    srt.countBlocksOnly             = Constants.countBlocksOnly;
+    zstdgpu_Srt_Fill(srt);
 
     zstdgpu_ShaderEntry_ParseFrames(srt, i);
 }

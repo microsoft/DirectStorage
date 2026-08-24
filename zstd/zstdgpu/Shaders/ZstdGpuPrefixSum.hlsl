@@ -15,37 +15,27 @@
  */
 
 #include "../zstdgpu_shaders.h"
+#include "../.generated/ZstdGpuSrt_PrefixSum.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t outputInclusive;
-};
-
-ConstantBuffer<Consts>          Constants                           : register(b0);
-
-RWStructuredBuffer<uint32_t>    ZstdInCountsOutPrefix               : register(u0);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdInCountsOutPrefixLookback       : register(u1);
-
-
-[RootSignature("UAV(u0), UAV(u1), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_PrefixSum)]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSum + threadId;
-    if (i >= Constants.workItemCount)
+    zstdgpu_PrefixSum_SRT srt;
+
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_PrefixSum + threadId;
+    if (i >= srt.workItemCount)
         return;
 
-    const uint32_t count = ZstdInCountsOutPrefix[i];
+    const uint32_t count = srt.inoutInCountsOutPrefix[i];
 
     // NOTE(pamartis): can increase threadgroup size and do threadgroup-wide prefix sum to save memory
     // but we don't do this currently to increase parallelism
     const uint32_t countExclusiveBlockPrefix = WavePrefixSum(count);
 
-    const uint32_t exclusivePrefixSum = zstdgpu_GlobalExclusivePrefixSum(ZstdInCountsOutPrefixLookback, countExclusiveBlockPrefix, count, i, kzstdgpu_TgSizeX_PrefixSum);
+    const uint32_t exclusivePrefixSum = zstdgpu_GlobalExclusivePrefixSum(srt.inoutInCountsOutPrefixLookback, countExclusiveBlockPrefix, count, i, kzstdgpu_TgSizeX_PrefixSum);
 
-    ZstdInCountsOutPrefix[i] = exclusivePrefixSum + (Constants.outputInclusive > 0 ? count : 0);
+    srt.inoutInCountsOutPrefix[i] = exclusivePrefixSum + (srt.outputInclusive > 0 ? count : 0);
 }

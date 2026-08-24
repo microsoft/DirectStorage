@@ -16,36 +16,24 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t frameCount;
-};
 
-ConstantBuffer<Consts> Constants : register(b0);
+#include "../.generated/ZstdGpuSrt_ComputeDestBlockOffsets.h"
 
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_COMPUTE_DEST_BLOCK_OFFSETS_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
-
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=3), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_ComputeDestBlockOffsets)]
 [numthreads(kzstdgpu_TgSizeX_ComputeDestBlockOffset, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t blockIdx = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_ComputeDestBlockOffset + threadId;
-    if (blockIdx >= Constants.workItemCount)
+    zstdgpu_ComputeDestBlockOffsets_SRT srt;
+
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t blockIdx = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_ComputeDestBlockOffset + threadId;
+    if (blockIdx >= srt.workItemCount)
     {
         return;
     }
 
-    zstdgpu_ComputeDestBlockOffsets_SRT srt;
-
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_COMPUTE_DEST_BLOCK_OFFSETS_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
-
-    const uint32_t frameIdx = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, Constants.frameCount, blockIdx);
+    const uint32_t frameIdx = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, srt.frameCount, blockIdx);
     const uint32_t firstFrameBlockIdx = srt.inPerFrameBlockCountAll[frameIdx];
 
     uint32_t firstFrameBlockOffset = 0;
