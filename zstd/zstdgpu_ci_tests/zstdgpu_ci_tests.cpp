@@ -35,10 +35,12 @@
 #include "zstdgpu_ci_tests.h"
 #include "zstd_frame_size.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
@@ -789,6 +791,17 @@ std::vector<std::string> BuildPerformanceArgs(
         args.push_back(flag);
     }
     return args;
+}
+
+TEST(GpuVendorForwardingTests, CorrectnessArgsOmitUnsetVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0;
+
+    const auto args = BuildCorrectnessArgs("content.zst", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    EXPECT_EQ(std::find(args.begin(), args.end(), "--gpu-ven-id"), args.end());
 }
 
 TEST(GpuVendorForwardingTests, CorrectnessArgsIncludeConfiguredVendor)
