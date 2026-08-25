@@ -41,6 +41,7 @@
 #endif
 
 #include "../zstdgpu_shaders.h"
+#include "../.generated/ZstdGpuSrt_DecompressLiterals.h"
 
 // LDS layout for the LdsStoreCache variant: Huffman table + per-stream store cache.
 // Cache size per stream equals the threadgroup size (kzstdgpu_TgSizeX_DecompressLiterals_LdsStoreCache).
@@ -54,33 +55,17 @@
 ZSTDGPU_DECOMPRESS_LITERALS_LDS_STORE_CACHE(0, DecompressLiterals_LdsStoreCache);
 #include "../zstdgpu_lds_decl_undef.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_DECOMPRESS_LITERALS_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
-
 groupshared uint32_t GS_Lds[kzstdgpu_DecompressLiterals_LdsStoreCache_LdsSize];
 #define ZSTDGPU_LDS GS_Lds
 #include "../zstdgpu_lds_hlsl.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=9), UAV(u0, numDescriptors=2)), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature(ZSTDGPU_SRT_RS_DecompressLiterals)]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals_LdsStoreCache, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
-    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
-
     zstdgpu_DecompressLiterals_SRT srt;
-
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_DECOMPRESS_LITERALS_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
     if (groupId >= srt.inCounters[0].DecompressLiteralsGroups)
         return;

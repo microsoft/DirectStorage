@@ -16,11 +16,9 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_EXECUTE_SEQUENCES_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_ExecuteSequences.h"
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=12), UAV(u0, numDescriptors=1))")]
+[RootSignature(ZSTDGPU_SRT_RS_ExecuteSequences)]
 [numthreads(MAX_COPY_SIZE, 1, 1)]
 void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
@@ -29,10 +27,7 @@ void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
         return;
 
     zstdgpu_ExecuteSequences_SRT srt;
-
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_EXECUTE_SEQUENCES_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
 
     zstdgpu_ShaderEntry_ExecuteSequences(srt, groupId);
 }

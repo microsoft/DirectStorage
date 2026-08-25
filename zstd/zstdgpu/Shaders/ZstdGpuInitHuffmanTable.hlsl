@@ -16,20 +16,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t fseCompressed; // 1 - means FSE-compressed weights (at the start of the buffer),
-                            // 0 - means uncompressed weight (at the end of buffer)
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_INIT_HUFFMAN_TABLE_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_InitHuffmanTable.h"
 
 // WARN(pamartis): Wasteful, need only uint8_t but HLSL doesn't support it
 groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTable_LdsSize];
@@ -40,19 +27,17 @@ groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTable_LdsSize];
 #define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=3), UAV(u0, numDescriptors=3)), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_InitHuffmanTable)]
 [numthreads(kzstdgpu_TgSizeX_DecompressLiterals, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_InitHuffmanTable_SRT srt;
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_INIT_HUFFMAN_TABLE_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
 
-    uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
+    uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
-    groupId = (Constants.fseCompressed == 0u) ? (srt.inCounters[0].Blocks_CMP - 1u - groupId) : groupId;
+    groupId = (srt.fseCompressed == 0u) ? (srt.inCounters[0].Blocks_CMP - 1u - groupId) : groupId;
 
     zstdgpu_ShaderEntry_InitHuffmanTable(srt, groupId, i, kzstdgpu_TgSizeX_DecompressLiterals);
 }

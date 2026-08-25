@@ -18,68 +18,54 @@
  */
 
 #include "../zstdgpu_shaders.h"
+#include "../.generated/ZstdGpuSrt_ComputePrefixSum.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t literalsPerGroup;
-};
-
-ConstantBuffer<Consts>          Constants                           : register(b0);
-
-StructuredBuffer<uint32_t>      ZstdHufWIdToHufLitId                : register(t0);
-StructuredBuffer<uint32_t>      ZstdHufLitIdToLitStreamId           : register(t1);
-
-RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefix           : register(u0);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdLitGroupCountToPrefixLookback   : register(u1);
-
-RWStructuredBuffer<zstdgpu_Counters>  ZstdCounters                  : register(u2);
-
-[RootSignature("SRV(t0), SRV(t1), UAV(u0), UAV(u1), UAV(u2), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_ComputePrefixSum)]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSum_LiteralCount + threadId;
+    zstdgpu_ComputePrefixSum_SRT srt;
+
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_PrefixSum_LiteralCount + threadId;
     const uint32_t blockSize = min(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, WaveGetLaneCount());
     const uint32_t thisBlockIndex = WaveReadLaneFirst(i / blockSize);
     const uint32_t thisLocalIndex = i % blockSize;
 
-    if (i >= Constants.workItemCount)
+    if (i >= srt.workItemCount)
         return;
 
     const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
 
-    const uint32_t hufLitId = ZstdHufWIdToHufLitId[i];
+    const uint32_t hufLitId = srt.inHufWIdToHufLitId[i];
     uint32_t hufLitStreamCount = 0;
 
     // NOTE(pamartis): ~0u marks unused Huffman table indices (no actual Huffman table exist for this index, no literal streams using such table exist)
     ZSTDGPU_BRANCH if (~0u != hufLitId)
     {
-        const uint32_t hufLitStreamStart = ZstdHufLitIdToLitStreamId[hufLitId];
+        const uint32_t hufLitStreamStart = srt.inHufLitIdToLitStreamId[hufLitId];
 
         // NOTE(pamartis): recompute the number of Huffman-compressed literal streams from prefix.
-        ZSTDGPU_BRANCH if (hufLitId + 1u < ZstdCounters[0].HufLit)
+        ZSTDGPU_BRANCH if (hufLitId + 1u < srt.inoutCounters[0].HufLit)
         {
-            hufLitStreamCount = ZstdHufLitIdToLitStreamId[hufLitId + 1u] - hufLitStreamStart;
+            hufLitStreamCount = srt.inHufLitIdToLitStreamId[hufLitId + 1u] - hufLitStreamStart;
         }
         else
         {
-            hufLitStreamCount = ZstdCounters[0].HUF_Streams - hufLitStreamStart;
+            hufLitStreamCount = srt.inoutCounters[0].HUF_Streams - hufLitStreamStart;
         }
     }
-    const uint32_t groupCount = ZSTDGPU_TG_COUNT(hufLitStreamCount, Constants.literalsPerGroup);
+    const uint32_t groupCount = ZSTDGPU_TG_COUNT(hufLitStreamCount, srt.literalsPerGroup);
     const uint32_t waveExclusiveGroupPrefix = WavePrefixSum(groupCount);
-    const uint32_t globalExclusiveGroupPrefix = zstdgpu_GlobalExclusivePrefixSum(ZstdLitGroupCountToPrefixLookback, waveExclusiveGroupPrefix, groupCount, i, kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
+    const uint32_t globalExclusiveGroupPrefix = zstdgpu_GlobalExclusivePrefixSum(srt.inoutLitGroupEndPerHuffmanTableLookback, waveExclusiveGroupPrefix, groupCount, i, kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
 
-    ZstdLitGroupCountToPrefix[i] = globalExclusiveGroupPrefix + groupCount;
+    srt.inoutLitGroupEndPerHuffmanTable[i] = globalExclusiveGroupPrefix + groupCount;
 
     // NOTE(pamartis): the last thread writes its inclusive prefix -- the total number of threadgroups
     // to dispatch for literal decompression.
-    if (i == Constants.workItemCount - 1)
+    if (i == srt.workItemCount - 1)
     {
-        ZstdCounters[0].DecompressLiteralsGroups = ZstdLitGroupCountToPrefix[i];
+        srt.inoutCounters[0].DecompressLiteralsGroups = srt.inoutLitGroupEndPerHuffmanTable[i];
     }
 }

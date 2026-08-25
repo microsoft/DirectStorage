@@ -91,10 +91,12 @@ static void debugPrint(const wchar_t *format, ...)
     va_end(args);
 }
 
-static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, const wchar_t* fileName)
+static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, uint32_t bufferOffs, const wchar_t* fileName)
 {
-    size_t dataSize = 0;
-    size_t bufferSize = 0;
+    bufferOffs = zstdgpu_AlignUp(bufferOffs, 4); // NOTE(pamartis): align to 4 bytes at least for now.
+
+    uint32_t dataSize = 0;
+    uint32_t bufferSize = 0;
 
     void* data = NULL;
     FILE* file = NULL;
@@ -106,24 +108,31 @@ static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *out
         fseek(file, 0, SEEK_SET);
         if (-1 != dataSize)
         {
-            bufferSize = zstdgpu_AlignUp((uint32_t)dataSize, 1u << alignmentLog2);
+            bufferSize = zstdgpu_AlignUp(bufferOffs + dataSize, 1u << alignmentLog2);
             data = malloc(bufferSize);
             ZSTDGPU_ASSERT(NULL != data);
             if (NULL != data)
             {
-                size_t readSize = fread(data, 1, dataSize, file);
-                ZSTDGPU_ASSERT(readSize == dataSize);
-                if(bufferSize > dataSize)
+                // NOTE(pamarits): populate random data in the buffer with zeros for now.
+                if (bufferOffs > 0)
                 {
-                    memset((char*)data + dataSize, 0, bufferSize - dataSize);
+                    memset((char*)data, 0, bufferOffs);
+                }
+
+                size_t readSize = fread((char *)data + bufferOffs, 1, dataSize, file);
+                ZSTDGPU_ASSERT(readSize == dataSize);
+
+                if (bufferSize > bufferOffs + dataSize)
+                {
+                    memset((char*)data + bufferOffs + dataSize, 0, bufferSize - dataSize - bufferOffs);
                 }
             }
         }
         fclose(file);
     }
     *outData = data;
-    *outDataSize = (uint32_t)dataSize;
-    *outBufferSize = (uint32_t)bufferSize;
+    *outDataSize = dataSize;
+    *outBufferSize = bufferSize;
 }
 
 static void saveFile(const wchar_t *fileName, const void *data, uint32_t dataSize)
@@ -171,71 +180,15 @@ static const int16_t kzstdgpuFseProbsDefault[] =
 };
 
 #include "zstdgpu_resources.h"
-
-#define ZSTDGPU_RO_RAW_BUFFER_DECL(type, name, index)                               srt.in##name                = resources.name;
-
-#define ZSTDGPU_RO_BUFFER_DECL(type, name, index)                                   srt.in##name                = resources.name;
-#define ZSTDGPU_RW_BUFFER_DECL(type, name, index)                                   srt.inout##name             = resources.name;
-#define ZSTDGPU_RW_BUFFER_DECL_GLC(type, name, index)                               srt.inout##name             = resources.name;
-
-#define ZSTDGPU_RO_TYPED_BUFFER_DECL(hlsl_type, type, name, index)                  srt.in##name                = resources.name;
-#define ZSTDGPU_RW_TYPED_BUFFER_DECL(hlsl_type, type, name, index)                  srt.inout##name             = resources.name;
-#define ZSTDGPU_RW_TYPED_BUFFER_DECL_GLC(hlsl_type, type, name, index)              srt.inout##name             = resources.name;
-
-#define ZSTDGPU_RO_BUFFER_ALIAS_DECL(type, name, alias, index)                      srt.in##name##_##alias      = resources.name;
-#define ZSTDGPU_RW_BUFFER_ALIAS_DECL(type, name, alias, index)                      srt.inout##name##_##alias   = resources.name;
-#define ZSTDGPU_RW_BUFFER_ALIAS_DECL_GLC(type, name, alias, index)                  srt.inout##name##_##alias   = resources.name;
-
-#define ZSTDGPU_RO_TYPED_BUFFER_ALIAS_DECL(hlsl_type, type, name, alias, index)     srt.in##name##_##alias      = resources.name;
-#define ZSTDGPU_RW_TYPED_BUFFER_ALIAS_DECL(hlsl_type, type, name, alias, index)     srt.inout##name##_##alias   = resources.name;
-#define ZSTDGPU_RW_TYPED_BUFFER_ALIAS_DECL_GLC(hlsl_type, type, name, alias, index) srt.inout##name##_##alias   = resources.name;
-
-static void zstdgpu_Init_InitResources_SRT(zstdgpu_InitResources_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_INIT_RESOURCES_SRT();
-}
-
-static void zstdgpu_Init_ParseFrames_SRT(zstdgpu_ParseFrames_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_PARSE_FRAMES_SRT()
-}
-
-static void zstdgpu_Init_ParseCompressedBlocks_SRT(zstdgpu_ParseCompressedBlocks_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_PARSE_COMPRESSED_BLOCKS_SRT()
-}
-
-static void zstdgpu_Init_InitFseTable_SRT(zstdgpu_InitFseTable_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_INIT_FSE_TABLE_SRT()
-}
-
-static void zstdgpu_Init_DecompressHuffmanWeights_SRT(zstdgpu_DecompressHuffmanWeights_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_DECOMPRESS_HUFFMAN_WEIGHTS_SRT()
-}
-
-static void zstdgpu_Init_DecodeHuffmanWeights_SRT(zstdgpu_DecodeHuffmanWeights_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_DECODE_HUFFMAN_WEIGHTS_SRT()
-}
-
-static void zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_SRT()
-}
-
-static void zstdgpu_Init_DecompressSequences_SRT(zstdgpu_DecompressSequences_SRT & srt, zstdgpu_ResourceDataCpu & resources)
-{
-    ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()
-}
-
-static void zstdgpu_Init_FinaliseSequenceOffsets_SRT(zstdgpu_FinaliseSequenceOffsets_SRT & srt, zstdgpu_ResourceDataCpu& resources)
-{
-    ZSTDGPU_FINALISE_SEQUENCE_OFFSETS_SRT()
-}
-
-#include "zstdgpu_srt_decl_undef.h"
+#include ".generated/ZstdGpuSrt_InitResources.h"
+#include ".generated/ZstdGpuSrt_ParseFrames.h"
+#include ".generated/ZstdGpuSrt_ParseCompressedBlocks.h"
+#include ".generated/ZstdGpuSrt_InitFseTable.h"
+#include ".generated/ZstdGpuSrt_DecompressHuffmanWeights.h"
+#include ".generated/ZstdGpuSrt_DecodeHuffmanWeights.h"
+#include ".generated/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
+#include ".generated/ZstdGpuSrt_DecompressSequences.h"
+#include ".generated/ZstdGpuSrt_FinaliseSequenceOffsets.h"
 
 #define VALIDATE(name, data) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(data))
 
@@ -260,7 +213,7 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
     if (simGpu)
     {
         zstdgpu_DecompressHuffmanWeights_SRT srt = {};
-        zstdgpu_Init_DecompressHuffmanWeights_SRT(srt, gpuReadbackRes);
+        zstdgpu_Srt_Fill(srt, gpuReadbackRes, 0 /* tgOffset */, gpuReadbackRes.Counters->FseHufW /* workItemCount */);
         srt.inCompressedData                    = cpuRes.CompressedData;
         srt.inoutDecompressedHuffmanWeights     = cpuRes.DecompressedHuffmanWeights;
         srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
@@ -290,13 +243,12 @@ static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuR
     if (simGpu)
     {
         zstdgpu_DecodeHuffmanWeights_SRT srt = {};
-        zstdgpu_Init_DecodeHuffmanWeights_SRT(srt, gpuReadbackRes);
+        zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */ 0, /* workItemCount */gpuReadbackRes.Counters->HUF_WgtStreams, /* compressedBufferSizeInBytes */zstdDataBufferSize);
         srt.inCompressedData                    = cpuRes.CompressedData;
         srt.inoutDecompressedHuffmanWeights     = cpuRes.DecompressedHuffmanWeights;
         // NOTE(pamartis): We don't need to set CPU-side Huffman Weight Counts because they're not computed within kernel
         // like in the "Decompress" case, and only read instead. And therefore we want to use GPU data
         //srt.inoutDecompressedHuffmanWeightCount = cpuRes.DecompressedHuffmanWeightCount;
-        srt.compressedBufferSizeInBytes         = zstdDataBufferSize;
         for (uint32_t i = 0; i < gpuReadbackRes.Counters->HUF_WgtStreams; ++i)
         {
             zstdgpu_ShaderEntry_DecodeHuffmanWeights(srt, i);
@@ -359,8 +311,8 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
     if (simGpu)
     {
         // NOTE(pamartis): When GPU output data is potentially broken, compute it on CPU (to debug) using same inputs as on GPU
-        zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
-        zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, gpuReadbackRes);
+        zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT srt;
+        zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
         const uint32_t htSlotCount = gpuReadbackRes.Counters->Blocks_CMP;
@@ -420,7 +372,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
         // NOTE(pamartis): When GPU output data is potentially broken, compute it on CPU (to debug) using same inputs as on GPU
         {
             zstdgpu_DecompressSequences_SRT srt;
-            zstdgpu_Init_DecompressSequences_SRT(srt, gpuReadbackRes);
+            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0);
             srt.inCompressedData                = cpuRes.CompressedData;
             srt.inoutDecompressedSequenceLLen   = cpuRes.DecompressedSequenceLLen;
             srt.inoutDecompressedSequenceMLen   = cpuRes.DecompressedSequenceMLen;
@@ -473,7 +425,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 
         {
             zstdgpu_FinaliseSequenceOffsets_SRT srt;
-            zstdgpu_Init_FinaliseSequenceOffsets_SRT(srt, gpuReadbackRes);
+            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ gpuReadbackRes.Counters->Seq_Streams_DecodedItems);
             srt.inoutDecompressedSequenceOffs = cpuRes.DecompressedSequenceOffs;
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams_DecodedItems; ++i)
             {
@@ -600,17 +552,13 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     #define CNTRS(name) zstdCpu.Counters->name
     {
         zstdgpu_InitResources_SRT srt = {};
-        zstdgpu_Init_InitResources_SRT(srt, zstdCpu);
-        srt.initResourcesStage  = 0;    // 0 means -- right before 1st "parse frames" (for counting)
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* initResourcesStage, 0 means -- right before 1st "parse frames" (for counting) */0);
         zstdgpu_ShaderEntry_InitResources(srt, 0);
     }
 
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Init_ParseFrames_SRT(srt, zstdCpu);
-        srt.frameCount                  = zstdFrameCount;
-        srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
-        srt.countBlocksOnly             = 1; // 1 - means we are going to count blocks only
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -668,10 +616,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     }
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Init_ParseFrames_SRT(srt, zstdCpu);
-        srt.frameCount                  = zstdFrameCount;
-        srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
-        srt.countBlocksOnly             = 0; // 0 - means we are going to output per-block information
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -682,8 +627,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_InitResources_SRT srt = {};
-        zstdgpu_Init_InitResources_SRT(srt, zstdCpu);
-        srt.initResourcesStage  = 1; // 1 means -- right before "parse compressed blocks"
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* initResourcesStage, 1 - means right before "parse compressed blocks" */1);
         zstdgpu_ShaderEntry_InitResources(srt, 0);
 
     }
@@ -702,11 +646,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     // Parse Compressed Blocks on CPU with the same code we use on GPU
     {
         zstdgpu_ParseCompressedBlocks_SRT srt;
-        zstdgpu_Init_ParseCompressedBlocks_SRT(srt, zstdCpu);
-
-        srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
-        srt.compressedBlockCount        = zstdCmpBlockCount;
-        srt.frameCount                  = zstdFrameCount;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */zstdCmpBlockCount, zstdInfo.CompressedData_ByteSize, zstdFrameCount);
+        zstdgpu_Srt_FillInline(srt, srt.workItemCount);
 
         for (uint32_t i = 0; i < zstdCmpBlockCount; ++i)
         {
@@ -742,34 +683,33 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_InitFseTable_SRT srt;
-        zstdgpu_Init_InitFseTable_SRT(srt, zstdCpu);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseHufW), /* tableType */0);
 
-        srt.tableStartIndex = 0;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartHufW(0, zstdCmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_HufW;
+        uint32_t tableStartIndex = 0;
+        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartHufW(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_HufW);
         for (uint32_t i = 0; i < CNTRS(FseHufW); ++i)
         {
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
         }
 
-        srt.tableStartIndex += zstdCmpBlockCount;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartLLen(0, zstdCmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_LLen;
+        tableStartIndex += zstdCmpBlockCount;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseLLen), /* tableType */1);
+        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartLLen(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_LLen);
         for (uint32_t i = 0; i < CNTRS(FseLLen); ++i)
         {
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
         }
 
-        srt.tableStartIndex += zstdCmpBlockCount + 1;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartOffs(0, zstdCmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_Offs;
+        tableStartIndex += zstdCmpBlockCount + 1 /* + 1 accounts for default table */;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseOffs), /* tableType */2);
+        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartOffs(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_Offs);
         for (uint32_t i = 0; i < CNTRS(FseOffs); ++i)
         {
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
         }
-        srt.tableStartIndex += zstdCmpBlockCount + 1;
-        srt.tableDataStart  = zstdgpu_ComputeFseDataStartMLen(0, zstdCmpBlockCount);
-        srt.tableDataCount  = kzstdgpu_FseElemMaxCount_MLen;
+        tableStartIndex += zstdCmpBlockCount + 1 /* + 1 accounts for default table */;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseMLen), /* tableType */3);
+        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartMLen(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_MLen);
         for (uint32_t i = 0; i < CNTRS(FseMLen); ++i)
         {
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
@@ -779,7 +719,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_DecompressHuffmanWeights_SRT srt;
-        zstdgpu_Init_DecompressHuffmanWeights_SRT(srt, zstdCpu);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseHufW));
         for (uint32_t i = 0; i < CNTRS(FseHufW); ++i)
         {
             zstdgpu_ShaderEntry_DecompressHuffmanWeights(srt, i);
@@ -790,8 +730,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_DecodeHuffmanWeights_SRT srt;
-        zstdgpu_Init_DecodeHuffmanWeights_SRT(srt, zstdCpu);
-        srt.compressedBufferSizeInBytes = zstdInfo.CompressedData_ByteSize;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(HUF_WgtStreams), zstdInfo.CompressedData_ByteSize);
         for (uint32_t i = 0; i < CNTRS(HUF_WgtStreams); ++i)
         {
             zstdgpu_ShaderEntry_DecodeHuffmanWeights(srt, i);
@@ -812,8 +751,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
         }
 
         // Run Literal Decompression
-        zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT srt;
-        zstdgpu_Init_InitHuffmanTable_And_DecompressLiterals_SRT(srt, zstdCpu);
+        zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT srt;
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */groupPrefix);
         for (uint32_t groupId = 0; groupId < groupPrefix; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);
@@ -823,7 +762,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_DecompressSequences_SRT srt;
-        zstdgpu_Init_DecompressSequences_SRT(srt, zstdCpu);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams));
         for (uint32_t i = 0; i < CNTRS(Seq_Streams); ++i)
         {
             zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(srt, /* groupId */ i, /* threadId */ 0, /* tgSize */ 1, /* streamsPerGroup */ 1, /* cacheDwordsPerStream */ 64);
@@ -897,7 +836,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     // so we "decode" them into "absolute"
     {
         zstdgpu_FinaliseSequenceOffsets_SRT srt;
-        zstdgpu_Init_FinaliseSequenceOffsets_SRT(srt, zstdCpu);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams_DecodedItems));
         for (uint32_t i = 0; i < CNTRS(Seq_Streams_DecodedItems); ++i)
         {
             zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
@@ -1090,7 +1029,7 @@ static int demoRun(void *demoCtx)
     wchar_t  **argv = ctx->argv;
 #endif
 
-    void                  *&zstdDataMemory                 = ctx->zstdData;
+    void                  *&zstdData                       = ctx->zstdData;
     zstdgpu_FrameInfo     *&zstdFrameInfo                  = ctx->zstdFrameInfo;
     zstdgpu_OffsetAndSize *&zstdInFrameRefs                = ctx->zstdInFrameRefs;
     zstdgpu_OffsetAndSize *&zstdOutFrameRefs               = ctx->zstdOutFrameRefs;
@@ -1135,6 +1074,7 @@ static int demoRun(void *demoCtx)
     uint32_t prfLevel = 0;
     uint32_t minFrame = 0;
     uint32_t maxFrame = ~0u;
+    uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
     {
@@ -1148,6 +1088,7 @@ static int demoRun(void *demoCtx)
             bool nextPrfLevel = false;
             bool nextMinFrame = false;
             bool nextMaxFrame = false;
+            bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
             {
@@ -1178,7 +1119,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextZstdOffs)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1193,12 +1134,15 @@ static int demoRun(void *demoCtx)
                             minFrame = value;
                         else if (nextMaxFrame)
                             maxFrame = value;
+                        else if (nextZstdOffs)
+                            zstdOffs = value;
                     }
 
                     nextRepCount = false;
                     nextPrfLevel = false;
                     nextMinFrame = false;
                     nextMaxFrame = false;
+                    nextZstdOffs = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -1270,6 +1214,10 @@ static int demoRun(void *demoCtx)
                 {
                     nextMaxFrame = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
+                {
+                    nextZstdOffs = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--out-frm"))
                 {
                     outFrm = true;
@@ -1302,6 +1250,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
+                debugPrint(L"\t--zst-ofs <byte count>    [Optional] When loading .zst file is appended to a buffer with <byte count> bytes. (Useful for testing large buffer sizes)  \n");
                 debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
                 debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
@@ -1322,11 +1271,7 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    loadFileAligned(&zstdDataMemory, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstFilePath);
-    // NOTE(pamartis): `zstdDataMemory` is the reference to a pointer to a memory block that is going to be freed.
-    // `zstdData` pointer can hold an address of the start of ANY frame. See `if (minFrame > 0 || maxFrame < endFrame)` branch.
-    void *zstdData = zstdDataMemory;
-
+    loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstdOffs, zstFilePath);
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
@@ -1338,8 +1283,10 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Loaded '%s' -- %u bytes.\n", zstFilePath, zstdDataSize);
     }
 
+    ZSTDGPU_ASSERT(zstdCompressedFramesMemorySizeInBytes >= zstdOffs);
+
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
-    zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+    zstdgpu_CountFramesAndBlocks(&fbInfo, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
 
     if (fbInfo.frameCount == 0)
     {
@@ -1351,7 +1298,7 @@ static int demoRun(void *demoCtx)
     zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
     zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
     zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
-    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
 
     const uint32_t endFrame = fbInfo.frameCount - 1;
 
@@ -1363,13 +1310,18 @@ static int demoRun(void *demoCtx)
         minFrame = minFrame < maxFrame
                  ? minFrame : maxFrame;
 
-        zstdData = (char*)zstdData + zstdInFrameRefs[minFrame].offs;
+        zstdOffs += zstdInFrameRefs[minFrame].offs;
         zstdDataSize = zstdInFrameRefs[maxFrame].offs - zstdInFrameRefs[minFrame].offs + zstdInFrameRefs[maxFrame].size;
-        zstdCompressedFramesMemorySizeInBytes = (zstdDataSize + 3) & ~3u;
+        zstdCompressedFramesMemorySizeInBytes = zstdgpu_AlignUp(zstdOffs + zstdDataSize, 4);
 
-        // NOTE(pamartis): update all structures because 'zstdData' and 'zstdDataSize' has changed
-        zstdgpu_CountFramesAndBlocks(&fbInfo, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
-        zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, zstdData, zstdCompressedFramesMemorySizeInBytes, zstdDataSize);
+        // NOTE(pamartis): update all structures because 'zstdOffs' has changed
+        zstdgpu_CountFramesAndBlocks(&fbInfo, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+        zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+    }
+
+    for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
+    {
+        zstdInFrameRefs[i].offs += zstdOffs;
     }
 
     // NOTE(pamartis): compute offsets of frame in the output data using the decompressed frame sizes.
@@ -1445,7 +1397,7 @@ static int demoRun(void *demoCtx)
     {
         debugPrint(L"[INFO] Running Reference Decompression and building Reference Uncompressed data ('--chk-cpu' or '--chk-gpu' was set).\n");
 
-        zstdReferenceUncompressedDataSize = (uint32_t)ZSTD_get_decompressed_size(zstdData, zstdDataSize);
+        zstdReferenceUncompressedDataSize = (uint32_t)ZSTD_get_decompressed_size((char *)zstdData + zstdOffs, zstdDataSize);
         zstdReferenceUncompressedData = malloc(zstdReferenceUncompressedDataSize);
 
         // Clear the buffer to a known zero state in case ZSTD_decompress writes less data than the frame header claims (this matches the GPU)
@@ -1465,7 +1417,7 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
 
         // NOTE(pamartis): We run GPU Decompression pipeline on CPU to catch possible errors/assert early
-        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData, zstdInFrameRefs, fbInfo.frameCount, zstdDataSize, fbInfo.frameByteCount);
+        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData /** intentionally without zstdOffs */, zstdInFrameRefs, fbInfo.frameCount, zstdCompressedFramesMemorySizeInBytes, fbInfo.frameByteCount);
         ctx->zstdCpuInit = true;
 
         if (!simGpu)
@@ -1500,14 +1452,12 @@ static int demoRun(void *demoCtx)
     void* defaultUploadCallbackUserData[2];
     if (testSourceInGpuMemory > 0)
     {
-        zstdCompressedFramesMemorySizeInBytes = zstdgpu_AlignUp(zstdDataSize, 4u);
-
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesMemory, device, 1u, zstdCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1u, zstdUnCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_READBACK);
 
-        d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdDataSize);
+        d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdOffs + zstdDataSize);
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesRefs, 0, (void *)zstdInFrameRefs, zstdFramesRefsSizeInBytes);
         d3d12aid_MappedBuffer_Append(&zstdUnCompressedFramesRefs, 0, (void *)zstdOutFrameRefs, zstdFramesRefsSizeInBytes);
 
@@ -1522,7 +1472,7 @@ static int demoRun(void *demoCtx)
 
         defaultUploadCallbackUserData[0] = (void *)zstdData;
         defaultUploadCallbackUserData[1] = (void *)zstdInFrameRefs;
-        zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
+        zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, fbInfo.frameCount, zstdOffs + zstdDataSize, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
     }
     if (ssm)
     {

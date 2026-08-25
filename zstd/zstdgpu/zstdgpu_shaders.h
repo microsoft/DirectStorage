@@ -2852,7 +2852,7 @@ static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_D
 ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_LDS(0, InitHuffmanTableAndDecompressLiterals);
 #include "zstdgpu_lds_decl_undef.h"
 
-static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTable_And_DecompressLiterals_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t tgSize)
+static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t tgSize)
 {
     uint32_t htIndex = 0;
     uint32_t htGroupStart = 0;

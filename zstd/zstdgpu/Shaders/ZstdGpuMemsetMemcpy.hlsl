@@ -16,37 +16,20 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t flags;
-};
+#include "../.generated/ZstdGpuSrt_MemsetMemcpy.h"
 
-ConstantBuffer<Consts>                  Constants                           : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_MEMSET_MEMCPY_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
-
-StructuredBuffer<uint32_t>              ZstdInBlockSizePrefixTyped          : register(t3);
-
-StructuredBuffer<zstdgpu_OffsetAndSize> ZstdInBlocksRefsTyped               : register(t4);
-
-StructuredBuffer<uint32_t>              ZstdInGlobalBlockIndexTyped         : register(t5);
-
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=3), UAV(u0, numDescriptors=1)), SRV(t3), SRV(t4), SRV(t5), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_MemsetMemcpy)]
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
-    i += zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
+    i += zstdgpu_ConvertTo32BitGroupId(groupId, ZstdConstants_MemsetMemcpy.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
 
-    if (i >= Constants.workItemCount)
+    if (i >= ZstdConstants_MemsetMemcpy.workItemCount)
     {
         return;
     }
 
-    const uint32_t blockCnt = (Constants.flags & 0x1u) ? ZstdInCounters[0].Blocks_RAW : ZstdInCounters[0].Blocks_RLE;
+    const uint32_t blockCnt = (ZstdConstants_MemsetMemcpy.flags & 0x1u) ? ZstdInCounters[0].Blocks_RAW : ZstdInCounters[0].Blocks_RLE;
     const uint32_t blockIdx = zstdgpu_BinarySearch(ZstdInBlockSizePrefixTyped, 0, blockCnt, i);
 
     const zstdgpu_OffsetAndSize blockRef = ZstdInBlocksRefsTyped[blockIdx];
@@ -62,7 +45,7 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
         return;
     }
 
-    [branch] if (Constants.flags & 0x1u)
+    [branch] if (ZstdConstants_MemsetMemcpy.flags & 0x1u)
     {
         const uint32_t byteOfs = blockRef.offs + byteIdx;
 

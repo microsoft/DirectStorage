@@ -16,51 +16,26 @@
  */
 
 #include "../zstdgpu_shaders.h"
-
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-    uint32_t frameCount;
-};
-
-ConstantBuffer<Consts>          Constants                           : register(b0);
-
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset1        : register(u0);
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset2        : register(u1);
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset3        : register(u2);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset1Lookback :register(u3);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset2Lookback :register(u4);
-
-globallycoherent
-RWStructuredBuffer<uint32_t>    ZstdPerSeqStreamFinalOffset3Lookback :register(u5);
-
-StructuredBuffer<uint32_t>      ZstdPerFrameSeqStreamMinIdx         : register(t0);
-
-StructuredBuffer<uint32_t>      ZstdFrameBlockCountAll              : register(t1);
-
-StructuredBuffer<uint32_t>      ZstdSeqStreamToBlockId              : register(t2);
-
-StructuredBuffer<zstdgpu_Counters>     ZstdCounters                 : register(t3);
+#include "../.generated/ZstdGpuSrt_PrefixSequenceOffsets.h"
 
 #if defined(__XBOX_SCARLETT)
 #   define __XBOX_ENABLE_WAVE32 1
 #endif
 
-[RootSignature("UAV(u0), UAV(u1), UAV(u2), UAV(u3), UAV(u4), UAV(u5), SRV(t0), SRV(t1), SRV(t2), SRV(t3), RootConstants(b0, num32BitConstants=3)")]
+[RootSignature(ZSTDGPU_SRT_RS_PrefixSequenceOffsets)]
 [numthreads(kzstdgpu_TgSizeX_PrefixSequenceOffsets, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 {
-    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, Constants.tgOffset) * kzstdgpu_TgSizeX_PrefixSequenceOffsets + threadId;
+    zstdgpu_PrefixSequenceOffsets_SRT srt;
+
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_PrefixSequenceOffsets + threadId;
     const uint32_t blockSize = min(kzstdgpu_TgSizeX_PrefixSequenceOffsets, WaveGetLaneCount());
     const uint32_t thisBlockIndex = WaveReadLaneFirst(i / blockSize);
     const uint32_t thisLocalIndex = i % blockSize;
 
-    if (i >= ZstdCounters[0].Seq_Streams)
+    if (i >= srt.inCounters[0].Seq_Streams)
         return;
 
     // NOTE(pamartis): Given an exclusive prefix sum of compressed block counts per block (ZstdFrameBlockCountCMP)
@@ -68,15 +43,15 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     // Then, when frame index is known each block fetches the index of the first compressed block in that frame
     // with non-zero sequence count and if current compressed block's index (threadId) matches that index --
     // it resolves its "repeat" offsets (if any) using "default" start offsets per frame.
-    const uint32_t blockId = ZstdSeqStreamToBlockId[i];
-    const uint32_t frameId = zstdgpu_BinarySearch(ZstdFrameBlockCountAll, 0, Constants.frameCount, blockId);
+    const uint32_t blockId = srt.inSeqStreamToBlockId[i];
+    const uint32_t frameId = zstdgpu_BinarySearch(srt.inPerFrameBlockCountAll, 0, srt.frameCount, blockId);
 
-    const uint32_t seqStreamIdxFirstInFrame = ZstdPerFrameSeqStreamMinIdx[frameId];
+    const uint32_t seqStreamIdxFirstInFrame = srt.inPerFrameSeqStreamMinIdx[frameId];
 
     uint32_t3 o = uint32_t3(
-        ZstdPerSeqStreamFinalOffset1[i],
-        ZstdPerSeqStreamFinalOffset2[i],
-        ZstdPerSeqStreamFinalOffset3[i]
+        srt.inoutPerSeqStreamFinalOffset1[i],
+        srt.inoutPerSeqStreamFinalOffset2[i],
+        srt.inoutPerSeqStreamFinalOffset3[i]
     );
 
     bool needsPropagationAfterLookback = false;
@@ -97,9 +72,9 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     const uint32_t lastLocalIndex = WaveActiveCountBits(true) - 1u;
 
     #if 0
-        #define LOOKBACK_STORE(name, prev, value) Zstd##name##Lookback[thisBlockIndex] = (value); DeviceMemoryBarrier();
+        #define LOOKBACK_STORE(name, prev, value) srt.inout##name##Lookback[thisBlockIndex] = (value); DeviceMemoryBarrier();
     #else
-        #define LOOKBACK_STORE(name, prev, value) InterlockedCompareStore(Zstd##name##Lookback[thisBlockIndex], prev, (value))
+        #define LOOKBACK_STORE(name, prev, value) InterlockedCompareStore(srt.inout##name##Lookback[thisBlockIndex], prev, (value))
     #endif
 
 
@@ -172,9 +147,9 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
         // if no lanes need propagation after reedback -- it means this propagation was successful, so we store actual block offsets
         if (WaveActiveAnyTrue(needsPropagationAfterLookback) == false)
         {
-            ZstdPerSeqStreamFinalOffset1[i] = p.x;
-            ZstdPerSeqStreamFinalOffset2[i] = p.y;
-            ZstdPerSeqStreamFinalOffset3[i] = p.z;
+            srt.inoutPerSeqStreamFinalOffset1[i] = p.x;
+            srt.inoutPerSeqStreamFinalOffset2[i] = p.y;
+            srt.inoutPerSeqStreamFinalOffset3[i] = p.z;
         }
 
         // NOTE (pamartis): it's important the last lane does the store, because only its VGPR lane contain valid value for the block
@@ -207,11 +182,11 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
             // BUG(pamartis): this varaint of code reads incorrect values on some HW, so it looks like `globallycoherent`
             // keyword doesn't work for reads
             #define LOOKBACK_READ(name)     \
-                const uint32_t prev_##name = Zstd##name##Lookback[prevBlockIndex]
+                const uint32_t prev_##name = srt.inout##name##Lookback[prevBlockIndex]
         #else
             #define LOOKBACK_READ(name)     \
                 uint32_t prev_##name;       \
-                InterlockedAdd(Zstd##name##Lookback[prevBlockIndex], 0, prev_##name)
+                InterlockedAdd(srt.inout##name##Lookback[prevBlockIndex], 0, prev_##name)
         #endif
 
         if (WaveIsFirstLane())
@@ -285,9 +260,9 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
         // which don't use use sequences, which may lead to "redundant" writes.
         // However, we choose to do this to simplify CPU-side validation which "propagates" valid absolute offset into block
         // which don't require sequences
-        ZstdPerSeqStreamFinalOffset1[i] = p.x;
-        ZstdPerSeqStreamFinalOffset2[i] = p.y;
-        ZstdPerSeqStreamFinalOffset3[i] = p.z;
+        srt.inoutPerSeqStreamFinalOffset1[i] = p.x;
+        srt.inoutPerSeqStreamFinalOffset2[i] = p.y;
+        srt.inoutPerSeqStreamFinalOffset3[i] = p.z;
     }
     // NOTE(pamartis): Added this condition to make sure the first sequence stream ('i') in the frame
     // always updates its "final" offsets even if 'needsPropagationAfterLookback' is set to 'false'.
@@ -296,8 +271,8 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     // in the frame could have been modified from "encoded" to "non-encoded", so they have to be stored back
     else if (isFirstSequenceStreamInFrame)
     {
-        ZstdPerSeqStreamFinalOffset1[i] = o.x;
-        ZstdPerSeqStreamFinalOffset2[i] = o.y;
-        ZstdPerSeqStreamFinalOffset3[i] = o.z;
+        srt.inoutPerSeqStreamFinalOffset1[i] = o.x;
+        srt.inoutPerSeqStreamFinalOffset2[i] = o.y;
+        srt.inoutPerSeqStreamFinalOffset3[i] = o.z;
     }
 }

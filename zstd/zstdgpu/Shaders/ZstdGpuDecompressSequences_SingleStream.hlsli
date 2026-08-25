@@ -34,17 +34,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-};
-
-ConstantBuffer<Consts> Constants : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_DecompressSequences.h"
 
 #if !kzstdgpu_DecompressSequences_SingleStream_NoLdsFseCache
 groupshared uint32_t Lds[kzstdgpu_DecompressSequences_SingleStream_LdsFseCache_LdsSize];
@@ -56,16 +46,13 @@ groupshared uint32_t Lds[kzstdgpu_DecompressSequences_SingleStream_LdsFseCache_L
 #   error 'kzstdgpu_TgSizeX_DecompressSequences_SingleStream' must be defined before including this '.hlsli'
 #endif
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=10), UAV(u0, numDescriptors=7)), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature(ZSTDGPU_SRT_RS_DecompressSequences)]
 [numthreads(kzstdgpu_TgSizeX_DecompressSequences_SingleStream, 1, 1)]
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
-    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, Constants.tgOffset);
     zstdgpu_DecompressSequences_SRT srt;
-
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_DECOMPRESS_SEQUENCES_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
     zstdgpu_ShaderEntry_DecompressSequences_SingleStream(srt, groupId, i, kzstdgpu_TgSizeX_DecompressSequences_SingleStream);
 }

@@ -15,37 +15,20 @@
  */
 
 #include "../zstdgpu_shaders.h"
-
-struct Consts
-{
-    uint32_t tgOffset;
-    uint32_t workItemCount;
-};
-
-ConstantBuffer<Consts>          Constants                           : register(b0);
-
-#include "../zstdgpu_srt_decl_bind.h"
-ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT()
-#include "../zstdgpu_srt_decl_undef.h"
+#include "../.generated/ZstdGpuSrt_ComputeDestSequenceOffsets.h"
 
 #define NUM_THREADS 256
 
-[RootSignature("DescriptorTable(SRV(t0, numDescriptors=5), UAV(u0, numDescriptors=1)), RootConstants(b0, num32BitConstants=2)")]
+[RootSignature(ZSTDGPU_SRT_RS_ComputeDestSequenceOffsets)]
 [numthreads(NUM_THREADS, 1, 1)]
 void main(uint2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
-#if defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-    const uint32_t groupId = groupId2.x;
-#else
-    const uint32_t groupId = (Constants.tgOffset + groupId2.y * 65535 + groupId2.x);
-#endif
-    i += groupId * NUM_THREADS;
-
     zstdgpu_ComputeDestSequenceOffsets_SRT srt;
 
-    #include "../zstdgpu_srt_decl_copy.h"
-    ZSTDGPU_COMPUTE_DEST_SEQUENCE_OFFSETS_SRT()
-    #include "../zstdgpu_srt_decl_undef.h"
+    zstdgpu_Srt_Fill(srt);
+
+    const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
+    i += groupId * NUM_THREADS;
 
     const uint32_t seqIdx = i;
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;

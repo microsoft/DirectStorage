@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    Compiles and runs zstdgpu_srt_tool before any shader or C++ compilation.
+
+    zstdgpu.vcxproj imports this file after Microsoft.Cpp.props, so that the IncludePath
+    property groups below the import can reference $(ZstdGpuSrtIncludeDir).
+  -->
+  <PropertyGroup>
+    <ZstdGpuSrtRoot>$(MSBuildThisFileDirectory)</ZstdGpuSrtRoot>
+    <!--
+      No trailing backslash: a trailing '\' immediately before the closing quote of a
+      command-line argument escapes that quote.
+    -->
+    <ZstdGpuSrtIncludeDir>$(ZstdGpuSrtRoot).generated</ZstdGpuSrtIncludeDir>
+  </PropertyGroup>
+  <Target Name="ZstdGpuSrtGenerate"
+          BeforeTargets="CompileShaders;ClCompile"
+          Inputs="$(ZstdGpuSrtRoot)zstdgpu_srt_tool.c;$(ZstdGpuSrtRoot)zstdgpu_srt_decl.h;$(ZstdGpuSrtRoot)..\ThirdParty\stb_ds.h"
+          Outputs="$(ZstdGpuSrtIncludeDir)\zstdgpu_srt_bind.h;$(ZstdGpuSrtIncludeDir)\zstdgpu_srt_structs.h">
+    <!-- $(VCInstallDir) is not set yet at import time, so resolve vcvars when the target runs. -->
+    <PropertyGroup>
+      <ZstdGpuSrtVcVars>$(VCInstallDir)Auxiliary\Build\vcvars64.bat</ZstdGpuSrtVcVars>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(ZstdGpuSrtVcVars)')"
+           Text="zstdgpu_srt_tool: host compiler environment not found at '$(ZstdGpuSrtVcVars)'." />
+    <!--
+      This target runs before PrepareForBuild creates $(IntDir), and zstdgpu_srt_tool.exe does
+      not create its own output directory, so both have to be made here.
+    -->
+    <MakeDir Directories="$(ZstdGpuSrtIncludeDir);$(IntDir)" />
+    <Message Text="Building and running zstdgpu_srt_tool -&gt; $(ZstdGpuSrtIncludeDir)" Importance="high" />
+    <Exec WorkingDirectory="$(ZstdGpuSrtRoot)"
+          Command="call &quot;$(ZstdGpuSrtVcVars)&quot; &gt;nul &amp;&amp; cl.exe /nologo /Zc:preprocessor /W4 /WX /I &quot;$(ZstdGpuSrtRoot)..\ThirdParty&quot; &quot;$(ZstdGpuSrtRoot)zstdgpu_srt_tool.c&quot; /Fe:&quot;$(IntDir)zstdgpu_srt_tool.exe&quot; /Fo:&quot;$(IntDir)zstdgpu_srt_tool.obj&quot;" />
+    <Exec WorkingDirectory="$(ZstdGpuSrtRoot)"
+          Command="&quot;$(IntDir)zstdgpu_srt_tool.exe&quot; .generated" />
+  </Target>
+</Project>
