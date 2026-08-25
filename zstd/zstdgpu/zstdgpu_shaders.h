@@ -3286,7 +3286,7 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
     const uint32_t bitsOffs = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntOffs);
 
     // MLen and LLen value extra bits are each <= 16 and can be read in a single packed Get()
-    // Offs can need up to 31 extra bits, so it must remain a separate read.
+    // Offs can need up to 28 extra bits, so it must remain a separate read.
     const uint32_t bitsMLenLLen = zstdgpu_Backward_BitBuffer_V0_Get(bitBuffer, bitcntMLen + bitcntLLen);
     const uint32_t bitsLLen = bitsMLenLLen & ((1u << bitcntLLen) - 1u);
     const uint32_t bitsMLen = bitsMLenLLen >> bitcntLLen;
