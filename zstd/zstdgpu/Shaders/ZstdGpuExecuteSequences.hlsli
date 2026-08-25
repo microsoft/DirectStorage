@@ -22,8 +22,12 @@
 [numthreads(MAX_COPY_SIZE, 1, 1)]
 void main(uint groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
+    // Retire redundant waves (just recomputing the same result) when the GPU wave is narrower than the group.
+    if (i >= WaveGetLaneCount())
+        return;
+
     zstdgpu_ExecuteSequences_SRT srt;
     zstdgpu_Srt_Fill(srt);
 
-    zstdgpu_ShaderEntry_ExecuteSequences(srt);
+    zstdgpu_ShaderEntry_ExecuteSequences(srt, groupId);
 }

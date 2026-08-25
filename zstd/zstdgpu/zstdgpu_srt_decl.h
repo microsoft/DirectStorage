@@ -354,7 +354,7 @@ ZSTDGPU_SRT_BEGIN(ExecuteSequences, Direct)
     ZSTDGPU_SRT_USE_BIND_GROUP(LiteralBytes)
     ZSTDGPU_SRT_USE_BIND_GROUP(FrameOutput)
 
-    ZSTDGPU_SRT_BUF_RW_STRUCT(zstdgpu_Counters              , Counters                      )
+    ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_Counters              , Counters                      )
 
     ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , PerFrameBlockCountCMP         )
     ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , BlockSizePrefix               )
