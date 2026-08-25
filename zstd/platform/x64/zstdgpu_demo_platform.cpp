@@ -138,7 +138,12 @@ ID3D12Device *zstdgpu_Demo_PlatformInit(uint32_t gpuVenId, uint32_t gpuDevId, bo
     IDXGIAdapter *adapter = NULL;
     ID3D12Device *device = NULL;
     D3D12AID_CHECK(CreateDXGIFactory2(0, D3D12AID_IID_PPV_ARGS(&factory)));
-    for (unsigned i = 0; DXGI_ERROR_NOT_FOUND != factory->EnumAdapters(i, &adapter); ++i)
+    for (unsigned i = 0;
+         DXGI_ERROR_NOT_FOUND != factory->EnumAdapterByGpuPreference(
+                                     i,
+                                     DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                     D3D12AID_IID_PPV_ARGS(&adapter));
+         ++i)
     {
         DXGI_ADAPTER_DESC desc;
         D3D12AID_CHECK(adapter->GetDesc(&desc));
