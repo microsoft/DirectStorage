@@ -4009,7 +4009,7 @@ static void zstdgpu_ExecuteSequence_FusedCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32_t, 
     const uint32_t total = seq.llen + seq.mlen;
 
     // Fast path: fused literal and match copy when the sequence fits within the wave.
-    ZSTDGPU_BRANCH if (seq.offs >= total && total <= laneCount)
+    ZSTDGPU_BRANCH if (seq.offs >= total && total <= laneCount && dstOfs + total <= dstEnd)
     {
         ZSTDGPU_BRANCH if (laneId < total)
         {
@@ -4050,7 +4050,8 @@ static void zstdgpu_ExecuteSequencePair_FusedCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32
     // Fast path: attempt to coalesce the two sequences into a single wave-cooperative store.
     ZSTDGPU_BRANCH if (combined <= laneCount
                        && seq0.offs >= total0
-                       && seq1.offs >= combined)
+                       && seq1.offs >= combined
+                       && dstOfs + combined <= dstEnd)
     {
         ZSTDGPU_BRANCH if (laneId < combined)
         {
@@ -4070,7 +4071,8 @@ static void zstdgpu_ExecuteSequencePair_FusedCopy(ZSTDGPU_RW_TYPED_BUFFER(uint32
     // Second tier: attempt to coalesce the two sequences into a single wave-cooperative store when the combined span is up to twice the lane count.
     else if (combined <= (laneCount << 1u)
              && seq0.offs >= total0
-             && seq1.offs >= combined)
+             && seq1.offs >= combined
+             && dstOfs + combined <= dstEnd)
     {
         ZSTDGPU_LOOP for (uint32_t b = laneId; b < combined; b += laneCount)
         {
