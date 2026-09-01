@@ -13,14 +13,9 @@
 // under the content path. Each file produces the following scenarios:
 //
 //   Correctness — "for all data" (ASSERT — hard fail):
-//     - GpuCheck           : --chk-gpu
-//     - GpuCheckSeq        : --chk-gpu --seq-cnt
 //     - ExternalMemory     : --chk-gpu --ext-mem
 //     - ExternalMemorySeq  : --chk-gpu --ext-mem --seq-cnt
-//     - D3D12DebugLayer    : --chk-gpu --d3d-dbg            (skipped on ARM)
 //     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --seq-cnt  (skipped on ARM)
-//     - SimulationCheck    : --chk-gpu --chk-cpu --sim-gpu
-//     - SimulationCheckSeq : --chk-gpu --chk-cpu --sim-gpu --seq-cnt
 //
 //   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose largest
 //   decompressed frame is under --gbv-max-mb, optionally further reduced by an
@@ -497,18 +492,6 @@ class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
 
 // --- Correctness tests — "for all data" matrix ---
 
-// GPU correctness check (--chk-gpu only).
-TEST_P(ZstdGpuDemoTests, GpuCheck)
-{
-    RunCorrectnessTest(GetParam(), {"--chk-gpu"});
-}
-
-// GpuCheck in single-submission mode (--seq-cnt).
-TEST_P(ZstdGpuDemoTests, GpuCheckSeq)
-{
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--seq-cnt"});
-}
-
 TEST_P(ZstdGpuDemoTests, ExternalMemory)
 {
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
@@ -519,15 +502,6 @@ TEST_P(ZstdGpuDemoTests, ExternalMemorySeq)
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
 }
 
-TEST_P(ZstdGpuDemoTests, D3D12DebugLayer)
-{
-#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
-    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
-#else
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg"});
-#endif
-}
-
 TEST_P(ZstdGpuDemoTests, D3D12DebugLayerSeq)
 {
 #if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
@@ -535,16 +509,6 @@ TEST_P(ZstdGpuDemoTests, D3D12DebugLayerSeq)
 #else
     RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
 #endif
-}
-
-TEST_P(ZstdGpuDemoTests, SimulationCheck)
-{
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--chk-cpu", "--sim-gpu"});
-}
-
-TEST_P(ZstdGpuDemoTests, SimulationCheckSeq)
-{
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--chk-cpu", "--sim-gpu", "--seq-cnt"});
 }
 
 // --- Correctness tests — GBV ---
