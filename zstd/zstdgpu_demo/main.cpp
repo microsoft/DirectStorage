@@ -91,44 +91,271 @@ static void debugPrint(const wchar_t *format, ...)
     va_end(args);
 }
 
+// Opens 'fileName' for binary reading. When 'dst' is NULL, returns the file's
+// size in bytes without reading anything (handy for sizing a buffer before a
+// read). Otherwise reads up to 'dstCapacity' bytes from the start of the file
+// into 'dst' and returns the number of bytes read. Returns 0 if the file can't
+// be opened, is empty, or on error.
+static uint32_t loadOneFile(const wchar_t *fileName, void *dst, uint32_t dstCapacity)
+{
+    FILE *file = NULL;
+    _wfopen_s(&file, fileName, L"rb");
+    if (NULL == file)
+    {
+        return 0;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    uint32_t result = 0;
+    if (size > 0)
+    {
+        if (NULL == dst)
+        {
+            result = (uint32_t)size; // size query only
+        }
+        else
+        {
+            uint32_t toRead = (uint32_t)size < dstCapacity ? (uint32_t)size : dstCapacity;
+            result = (uint32_t)fread(dst, 1, toRead, file);
+        }
+    }
+
+    fclose(file);
+    return result;
+}
+
+// Loads a batch of .zst files listed (one per line) in a text file and
+// concatenates their raw bytes into a single aligned buffer. The list file is
+// treated as ASCII; blank lines and lines whose first non-whitespace character
+// is '#' are ignored, and relative paths resolve against the current working
+// directory. Entries that cannot be opened are skipped with a warning. The
+// concatenation is byte-adjacent, so the result is a valid multi-frame zstd
+// stream that the frame scanner handles as usual.
+static void loadFileBatchAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, uint32_t bufferOffs, const wchar_t* listFileName)
+{
+    bufferOffs = zstdgpu_AlignUp(bufferOffs, 4); // NOTE(pamartis): align to 4 bytes at least for now.
+
+    *outData = NULL;
+    *outDataSize = 0;
+    *outBufferSize = 0;
+
+    // Read the entire list file (ASCII) into memory.
+    uint32_t listSize = loadOneFile(listFileName, NULL, 0);
+    if (0 == listSize)
+    {
+        debugPrint(L"[FAIL] Couldn't open (or empty) batch list file '%s'.\n", listFileName);
+        return;
+    }
+
+    char *listText = (char *)malloc((size_t)listSize + 1);
+    ZSTDGPU_ASSERT(NULL != listText);
+    if (NULL == listText)
+    {
+        return;
+    }
+    listSize = loadOneFile(listFileName, listText, listSize);
+    listText[listSize] = '\0';
+
+    // Parse the ASCII list in place into an array of char* paths, each pointing
+    // into listText (which stays alive until every file has been read).
+    char **paths = NULL;
+    uint32_t pathCount = 0;
+    uint32_t pathCapacity = 0;
+
+    uint32_t i = 0;
+    if (listSize >= 3 && (unsigned char)listText[0] == 0xEF && (unsigned char)listText[1] == 0xBB && (unsigned char)listText[2] == 0xBF)
+    {
+        i = 3; // skip UTF-8 BOM
+    }
+
+    while (i < listSize)
+    {
+        // skip leading whitespace
+        while (i < listSize && (listText[i] == ' ' || listText[i] == '\t')) { ++i; }
+
+        uint32_t lineStart = i;
+
+        // find the end of the line (or end of buffer)
+        while (i < listSize && listText[i] != '\n') { ++i; }
+
+        // capture the end of the line and move the cursor past it for the next iteration
+        uint32_t lineEnd = i++;
+
+        // strip trailing '\r' (CRLF)
+        if (lineEnd > lineStart && listText[lineEnd - 1] == '\r') { --lineEnd; }
+
+        // trim trailing whitespace
+        while (lineEnd > lineStart && (listText[lineEnd - 1] == ' ' || listText[lineEnd - 1] == '\t')) { --lineEnd; }
+
+        // Any blank lines or comments are ignored
+        if (lineEnd == lineStart || listText[lineStart] == '#') { continue; }
+
+        // terminate the path in place
+        listText[lineEnd] = '\0';
+
+        if (pathCount == pathCapacity)
+        {
+            uint32_t newCap = pathCapacity ? pathCapacity * 2 : 16;
+            char **newPaths = (char **)realloc(paths, (size_t)newCap * sizeof(char *));
+            ZSTDGPU_ASSERT(NULL != newPaths);
+            if (NULL == newPaths)
+            {
+                break;
+            }
+            paths = newPaths;
+            pathCapacity = newCap;
+        }
+
+        paths[pathCount++] = listText + lineStart;
+    }
+
+    if (0 == pathCount)
+    {
+        debugPrint(L"[WARN] Batch list file '%s' contained no usable .zst entries.\n", listFileName);
+        free(paths);
+        free(listText);
+        return;
+    }
+
+    // Pass 1: size every file, skipping ones that can't be opened.
+    uint32_t *sizes = (uint32_t *)malloc((size_t)pathCount * sizeof(uint32_t));
+    ZSTDGPU_ASSERT(NULL != sizes);
+    if (NULL == sizes)
+    {
+        free(paths);
+        free(listText);
+        return;
+    }
+
+    // Reusable buffer to widen each ASCII path for loadOneFile (which opens wide).
+    wchar_t widePath[MAX_PATH];
+
+    uint64_t totalDataSize = 0;
+    for (uint32_t p = 0; p < pathCount; ++p)
+    {
+        sizes[p] = 0;
+        if (0 == MultiByteToWideChar(CP_UTF8, 0, paths[p], -1, widePath, MAX_PATH))
+        {
+            debugPrint(L"[WARN] Batch: path invalid or longer than MAX_PATH '%S', skipping.\n", paths[p]);
+            continue;
+        }
+        uint32_t sz = loadOneFile(widePath, NULL, 0);
+        if (0 == sz)
+        {
+            debugPrint(L"[WARN] Batch: couldn't open (or empty) '%S', skipping.\n", paths[p]);
+            continue; // skip missing / empty / unsizable files
+        }
+        uint64_t projected = (uint64_t)bufferOffs + totalDataSize + (uint64_t)sz;
+        if (projected > 0xFFFFFFFFull)
+        {
+            debugPrint(L"[WARN] Batch: total size would exceed 4 GiB; stopping at '%S'.\n", paths[p]);
+            break;
+        }
+        sizes[p] = sz;
+        totalDataSize += (uint64_t)sz;
+    }
+
+    if (0 == totalDataSize)
+    {
+        debugPrint(L"[WARN] Batch list file '%s' had no readable, non-empty files.\n", listFileName);
+        free(paths);
+        free(listText);
+        free(sizes);
+        return;
+    }
+
+    // Allocate the concatenation buffer and zero the leading offset region.
+    uint32_t bufferSize = zstdgpu_AlignUp(bufferOffs + (uint32_t)totalDataSize, 1u << alignmentLog2);
+    void *data = malloc(bufferSize);
+    ZSTDGPU_ASSERT(NULL != data);
+    if (NULL == data)
+    {
+        free(paths);
+        free(listText);
+        free(sizes);
+        return;
+    }
+
+    if (bufferOffs > 0)
+    {
+        memset((char *)data, 0, bufferOffs);
+    }
+
+    // Pass 2: read each file's bytes into the buffer, byte-adjacent.
+    uint32_t ofs = bufferOffs;
+    uint32_t loadedCount = 0;
+    for (uint32_t p = 0; p < pathCount; ++p)
+    {
+        if (0 == sizes[p])
+        {
+            continue;
+        }
+        if (0 == MultiByteToWideChar(CP_UTF8, 0, paths[p], -1, widePath, MAX_PATH))
+        {
+            debugPrint(L"[WARN] Batch: '%S' became unavailable, skipping.\n", paths[p]);
+            continue;
+        }
+        uint32_t rd = loadOneFile(widePath, (char *)data + ofs, sizes[p]);
+        if (0 == rd)
+        {
+            debugPrint(L"[WARN] Batch: '%S' became unavailable, skipping.\n", paths[p]);
+            continue;
+        }
+        if (rd != sizes[p])
+        {
+            debugPrint(L"[WARN] Batch: short read on '%S' (%u of %u bytes).\n", paths[p], rd, sizes[p]);
+        }
+        ofs += rd;
+        ++loadedCount;
+    }
+
+    if (bufferSize > ofs)
+    {
+        memset((char *)data + ofs, 0, bufferSize - ofs); // zero trailing padding
+    }
+
+    debugPrint(L"[INFO] Batch: concatenated %u file(s) from '%s' -- %u bytes.\n", loadedCount, listFileName, ofs - bufferOffs);
+
+    free(paths);
+    free(listText);
+    free(sizes);
+
+    *outData = data;
+    *outDataSize = ofs - bufferOffs;
+    *outBufferSize = bufferSize;
+}
+
 static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *outBufferSize, uint32_t alignmentLog2, uint32_t bufferOffs, const wchar_t* fileName)
 {
     bufferOffs = zstdgpu_AlignUp(bufferOffs, 4); // NOTE(pamartis): align to 4 bytes at least for now.
 
-    uint32_t dataSize = 0;
+    uint32_t dataSize = loadOneFile(fileName, NULL, 0);
     uint32_t bufferSize = 0;
-
     void* data = NULL;
-    FILE* file = NULL;
-    _wfopen_s(&file, fileName, L"rb");
-    if (NULL != file)
+    if (dataSize > 0)
     {
-        fseek(file, 0, SEEK_END);
-        dataSize = ftell(file);
-        fseek(file, 0, SEEK_SET);
-        if (-1 != dataSize)
+        bufferSize = zstdgpu_AlignUp(bufferOffs + dataSize, 1u << alignmentLog2);
+        data = malloc(bufferSize);
+        ZSTDGPU_ASSERT(NULL != data);
+        if (NULL != data)
         {
-            bufferSize = zstdgpu_AlignUp(bufferOffs + dataSize, 1u << alignmentLog2);
-            data = malloc(bufferSize);
-            ZSTDGPU_ASSERT(NULL != data);
-            if (NULL != data)
+            // NOTE(pamarits): populate random data in the buffer with zeros for now.
+            if (bufferOffs > 0)
             {
-                // NOTE(pamarits): populate random data in the buffer with zeros for now.
-                if (bufferOffs > 0)
-                {
-                    memset((char*)data, 0, bufferOffs);
-                }
+                memset((char*)data, 0, bufferOffs);
+            }
 
-                size_t readSize = fread((char *)data + bufferOffs, 1, dataSize, file);
-                ZSTDGPU_ASSERT(readSize == dataSize);
+            uint32_t readSize = loadOneFile(fileName, (char *)data + bufferOffs, dataSize);
+            ZSTDGPU_ASSERT(readSize == dataSize);
 
-                if (bufferSize > bufferOffs + dataSize)
-                {
-                    memset((char*)data + bufferOffs + dataSize, 0, bufferSize - dataSize - bufferOffs);
-                }
+            if (bufferSize > bufferOffs + dataSize)
+            {
+                memset((char*)data + bufferOffs + dataSize, 0, bufferSize - dataSize - bufferOffs);
             }
         }
-        fclose(file);
     }
     *outData = data;
     *outDataSize = dataSize;
@@ -1235,7 +1462,7 @@ static int demoRun(void *demoCtx)
             if (1 == argc || badArg)
             {
                 debugPrint(L"USAGE:\n");
-                debugPrint(L"\t--zst <path to .zst file> [Required] Specifies a file path to .zst file to decompress. Could be absolute or relative path.\n");
+                debugPrint(L"\t--zst <path | @listfile>  [Required] Path to a .zst file (absolute or relative). If prefixed with '@', the value is a text file listing .zst paths (one per line, '#' comments allowed) loaded concatenated into one buffer.\n");
                 debugPrint(L"\t--chk-gpu                 [Optional] After running decompresssion on GPU, validates its outputs against the outputs from reference decompressor.\n");
                 debugPrint(L"\t--chk-cpu                 [Optional] Before running decompression on GPU, runs GPU decompressor code on CPU and validates its outputs against the outputs from reference decompressor.\n");
                 debugPrint(L"\t--sim-gpu                 [Optional] After running decompression on GPU, runs key GPU decompressor stages on CPU using intermediate inputs from GPU decompression and validates its outputs against the outputs from reference decompressor.\n");
@@ -1271,7 +1498,16 @@ static int demoRun(void *demoCtx)
     uint32_t zstdCompressedFramesMemorySizeInBytes = 0;
     uint32_t zstdUnCompressedFramesMemorySizeInBytes = 0;
 
-    loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstdOffs, zstFilePath);
+    // A leading '@' selects batch mode: zstFilePath names a text file listing
+    // .zst files (one per line) to load concatenated into a single buffer.
+    if (L'@' == zstFilePath[0])
+    {
+        loadFileBatchAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstdOffs, zstFilePath + 1);
+    }
+    else
+    {
+        loadFileAligned(&zstdData, &zstdDataSize, &zstdCompressedFramesMemorySizeInBytes, 2u, zstdOffs, zstFilePath);
+    }
     if (NULL == zstdData)
     {
         debugPrint(L"[FAIL] Couldn't load '%s'. Early Out.\n", zstFilePath);
