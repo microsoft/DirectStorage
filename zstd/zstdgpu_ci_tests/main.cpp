@@ -123,6 +123,12 @@ static void PrintUsage(const char* exe)
               << "                          frame size cannot be read is never skipped.\n"
               << "  --idx-max <N>           Forward --idx-max N to the demo to cap the last decoded frame index\n"
               << "                          (inclusive). Omit or use a negative value to run all frames (default).\n"
+              << "  --correctness-batch-mb <N>    Max total on-disk (compressed) size in MB of clean files grouped\n"
+              << "                          into one batched correctness run (default: 256). Bounds each concatenated\n"
+              << "                          --zst @listfile run so large-texture batches don't reach multi-GB\n"
+              << "                          decompressed and exceed GPU/int32 limits. A value <= 0 disables the byte cap.\n"
+              << "  --correctness-batch-count <N> Secondary cap: max number of files per correctness batch\n"
+              << "                          (default: 64). A value <= 0 disables the count cap (size-bounded only).\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -217,6 +223,18 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.idxMax = std::atoi(argv[++i]);
             if (config.idxMax < 0)
                 config.idxMax = -1;   // < 0 = unset; not forwarded, demo runs all frames
+        }
+        else if (std::strcmp(argv[i], "--correctness-batch-mb") == 0 && i + 1 < argc)
+        {
+            config.correctnessBatchMB = std::atoi(argv[++i]);
+            if (config.correctnessBatchMB < 0)
+                config.correctnessBatchMB = 0;   // <= 0 = no byte cap (count-only batching)
+        }
+        else if (std::strcmp(argv[i], "--correctness-batch-count") == 0 && i + 1 < argc)
+        {
+            config.correctnessBatchCount = std::atoi(argv[++i]);
+            if (config.correctnessBatchCount < 0)
+                config.correctnessBatchCount = 0;   // <= 0 = no count cap (size-only batching)
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
