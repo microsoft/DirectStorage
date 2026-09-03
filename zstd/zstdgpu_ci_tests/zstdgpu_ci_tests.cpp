@@ -9,13 +9,15 @@
 
 // Test definitions and demo runner for the Zstd GPU CI tests.
 //
-// Parameterized test suite (ZstdGpuDemoTests) instantiated once per .zst file
-// under the content path. Each file produces the following scenarios:
+// Two parameterized suites are instantiated from the .zst corpus discovered
+// under the content path:
 //
-//   Correctness — "for all data" (ASSERT — hard fail):
+//   ZstdGpuCorrectnessTests — These scenarios are executed over the corpus in batches (where appropriate) 
 //     - ExternalMemory     : --chk-gpu --ext-mem
 //     - ExternalMemorySeq  : --chk-gpu --ext-mem --seq-cnt
 //     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --seq-cnt  (skipped on ARM)
+//
+//   ZstdGpuDemoTests — per-file scenarios (one .zst file per parameter):
 //
 //   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose largest
 //   decompressed frame is under --gbv-max-mb, optionally further reduced by an
@@ -73,6 +75,10 @@ namespace
         const std::vector<std::string>& extraFlags);
 }
 
+// Defined below; used by RunBatchedCorrectnessTest to keep fuzz content out of
+// concatenated batches (corrupt-by-design fuzz inputs would poison a batch).
+static bool IsFuzzContent(const std::string& zstFile);
+
 // Helpers
 
 // Returns the list of .zst files to parameterize over.
@@ -92,9 +98,9 @@ static std::vector<std::string> GetTestFiles()
 // (e.g. firefly_albedo.DDS.zst exists under BC1/, BC1mip0/, block4K_*, etc.),
 // causing a fatal gtest assertion at startup. Use the path relative to
 // --content-path so different folders produce different names.
-static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& info)
+static std::string SanitizeRelName(const std::string& fullPath)
 {
-    std::filesystem::path full(info.param);
+    std::filesystem::path full(fullPath);
     std::filesystem::path rel;
     if (!g_testConfig.contentPath.empty())
     {
@@ -130,6 +136,23 @@ static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& i
         result = "_" + result;
     }
     return result.empty() ? "Unknown" : result;
+}
+
+// GTest name functor for the per-file suite (ZstdGpuDemoTests): the GBV and
+// perf scenarios run one .zst file per parameter.
+static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& info)
+{
+    return SanitizeRelName(info.param);
+}
+
+// GTest name functor for the batched-correctness suite. The suite takes a single
+// parameter — the full discovered corpus — so there is exactly one instance per
+// scenario; name it "Corpus". The batching itself is done at run time inside
+// RunBatchedCorrectnessTest (which walks the corpus), not here.
+static std::string CorrectnessCorpusName(const testing::TestParamInfo<std::vector<std::string>>& info)
+{
+    (void)info;
+    return "Corpus";
 }
 
 // Appends per-test output to the consolidated log file (--log-file).
@@ -397,6 +420,200 @@ static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std
         << "  (stdout already printed above as [DEMO OUT])";
 }
 
+// Writes out a list of .zst files into a temp file for use as a batched .zst input to zstdgpu_demo.exe
+static bool WriteBatchListFile(const std::string& batchName,
+                               const std::vector<std::string>& files,
+                               std::string& outPath)
+{
+    std::error_code ec;
+    std::filesystem::path dir = g_testConfig.logDir.empty()
+        ? (std::filesystem::temp_directory_path() / "zstdgpu_batch_lists")
+        : (std::filesystem::path(g_testConfig.logDir) / "batch_lists");
+    std::filesystem::create_directories(dir, ec);
+
+    std::filesystem::path path = dir / (CurrentScenarioName() + "_" + batchName + ".txt");
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+
+    if (!out) return false;
+
+    for (const auto& f : files)
+    {
+        out << f << "\n";
+    }
+
+    out.flush();
+
+    if (!out) return false;
+
+    outPath = path.string();
+    return true;
+}
+
+// Runs each file individually with the scenario flags using non-fatal checks
+// (ADD_FAILURE) so every file is exercised and each culprit reported. Returns
+// the count that failed. Used to isolate failures after a batch run fails.
+static size_t RunCorrectnessFilesIndividually(const std::vector<std::string>& files,
+                                              const std::vector<std::string>& scenarioFlags)
+{
+    size_t failures = 0;
+    for (const auto& zstFile : files)
+    {
+        auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
+        auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+        WriteToLogFile(zstFile, result);
+
+        std::cout << "[ISO CMD] " << result.commandLine << "\n";
+
+        if (!result.stdOut.empty())
+        {
+            std::cout << "[DEMO OUT] " << result.stdOut << "\n";
+        }
+
+        const bool ok = !result.timedOut && result.launchError.empty() && result.exitCode == 0;
+        if (!ok)
+        {
+            ++failures;
+            ADD_FAILURE()
+                << "Isolated file failed: " << zstFile << "\n"
+                << "  exit=" << result.exitCode
+                << (result.timedOut ? " (TIMED OUT)" : "")
+                << (result.launchError.empty() ? std::string() : ("  launchError=" + result.launchError)) << "\n"
+                << "  Command: " << result.commandLine
+                << "  (stdout already printed above as [DEMO OUT])";
+        }
+    }
+    return failures;
+}
+
+// Runs zstdgpu_demo.exe over a .zst batch
+static void RunDemoOnBatch(const std::string& batchName,
+                           const std::vector<std::string>& files,
+                           const std::vector<std::string>& scenarioFlags)
+{
+    if (files.empty()) return;
+
+
+    // Stage the list file and run the whole batch in a single demo invocation.
+    std::string listPath;
+    if (!WriteBatchListFile(batchName, files, listPath))
+    {
+        // Could not stage the list — fall back to individual runs so coverage
+        // isn't lost, and flag the staging failure.
+        ADD_FAILURE() << "Could not write batch list file for " << batchName
+                      << "; running the " << files.size() << " file(s) individually instead.";
+        RunCorrectnessFilesIndividually(files, scenarioFlags);
+        return;
+    }
+
+    auto args = BuildCorrectnessArgs("@" + listPath, scenarioFlags);
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+    WriteToLogFile("[batch " + batchName + "] " + listPath, result);
+
+    std::cout << "[BATCH CMD] " << result.commandLine << "\n";
+    std::cout << "[BATCH] scenario " << CurrentScenarioName() << ", " << files.size() << " file(s), list: " << listPath << "\n";
+
+    if (!result.stdOut.empty())
+    {
+        std::cout << "[DEMO OUT] " << result.stdOut << "\n";
+    }
+
+    if (!result.timedOut && result.launchError.empty() && result.exitCode == 0)
+    {
+        // Whole batch decoded and validated against the reference — all files OK.
+        return;
+    }
+
+    // Batch failed: re-run every file individually to pinpoint the culprit(s).
+    std::cout << "[BATCH] FAILED (exit " << result.exitCode
+              << (result.timedOut ? ", TIMED OUT" : "")
+              << (result.launchError.empty() ? "" : ", launch error")
+              << "); re-running " << files.size() << " file(s) individually to isolate...\n";
+
+    const size_t failed = RunCorrectnessFilesIndividually(files, scenarioFlags);
+
+    if (failed == 0)
+    {
+        ADD_FAILURE()
+            << "Batch '" << batchName << "' failed for scenario " << CurrentScenarioName()
+            << " (exit " << result.exitCode << (result.timedOut ? ", TIMED OUT" : "")
+            << ") but all " << files.size() << " file(s) passed individually. This points at a "
+            << "batch-level issue (concatenated size / GPU memory / list loading), not a per-file "
+            << "decode error. Consider lowering --correctness-batch-mb.\n"
+            << "Batch command: " << result.commandLine;
+    }
+    else
+    {
+        ADD_FAILURE()
+            << failed << " of " << files.size() << " file(s) in batch '" << batchName
+            << "' failed individual re-run for scenario " << CurrentScenarioName()
+            << " (batch exit " << result.exitCode << "). See the per-file failures above.\n"
+            << "Batch command: " << result.commandLine;
+    }
+}
+
+// Run a correctness test over a batch of files. Spawns zstdgpu_demo.exe with the batch of .zst files and scenario flags 
+// NOTE: Batching is opportunistic.  Some files are known to need to run standalone (currently).
+static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
+                                      const std::vector<std::string>& scenarioFlags)
+{
+    // Determine batch bounds (reasonable limits to ensure we don't blow out VRAM with current scratch memory implementation)
+    const uint64_t budgetBytes = g_testConfig.correctnessBatchMB > 0 ? static_cast<uint64_t>(g_testConfig.correctnessBatchMB) * 1024u * 1024u : UINT64_MAX;
+    const size_t countCap = g_testConfig.correctnessBatchCount > 0 ? static_cast<size_t>(g_testConfig.correctnessBatchCount) : SIZE_MAX;
+
+    std::vector<std::string> batch;
+    uint64_t batchBytes = 0;
+    size_t batchIdx = 0;
+
+    auto runBatch = [&]()
+    {
+        if (batch.empty()) return;
+
+        std::string batchName = "Batch_" + std::to_string(batchIdx);
+        
+        RunDemoOnBatch(batchName, batch, scenarioFlags);
+        ++batchIdx;
+        batch.clear();
+        batchBytes = 0;
+    };
+
+    for (const auto& f : allFiles)
+    {
+        // Mirror per-file behavior: drop files this scenario would skip (manifest
+        // scenario-skip for this GPU, or --max-frame-mb) instead of batching them.
+        if (!ScenarioSkipReason(f).empty() || !FrameSizeSkipReason(f).empty())
+        {
+            std::cout << "[BATCH] skipping (scenario/size) " << f << "\n";
+            continue;
+        }
+
+        // Fuzz + adversarial content is run individually at present due to unavailability of per-file status in zstdgpu_demo.exe
+        const bool individual = IsFuzzContent(f) || g_testConfig.adversarialManifest.Match(f, g_testConfig.contentPath);
+        if (individual)
+        {
+            runBatch();
+            RunCorrectnessTest(f, scenarioFlags);
+            continue;
+        }
+
+        // If we got here, the file is a well formed compressed file and can be bundled with other files (within batch limits)
+        std::error_code ec;
+        uint64_t sz = std::filesystem::file_size(f, ec);
+        if (ec) sz = 0;  // unreadable size: don't let it distort the budget math
+
+        // Process the batch if it is at the batch limits and move on to the next one
+        if (!batch.empty() && (batch.size() >= countCap || batchBytes + sz > budgetBytes))
+        {
+            runBatch();
+        }
+
+        batch.push_back(f);
+        batchBytes += sz;
+    }
+
+    // Finish running the final batch
+    runBatch();
+}
+
 // Run a performance scenario. Spawns zstdgpu_demo.exe with profiling flags and requests CSV output. Uses EXPECT (not ASSERT) to verify the demo executed successfully and produced CSV output.
 // main() has already validated the demo path exists.
 static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
@@ -483,31 +700,36 @@ static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
 
 // Test fixture and test cases
 
-// Test fixture parameterized over .zst file paths (spec: ZstdGpuDemoTests).
-// Both correctness and performance tests share this fixture — correctness tests
-// use ASSERT (hard fail), performance tests use EXPECT (soft fail).
+// Per-file fixture (spec: ZstdGpuDemoTests).
+// Whole corpus is parameterized over individual .zst files
 class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
 {
 };
 
-// --- Correctness tests — "for all data" matrix ---
-
-TEST_P(ZstdGpuDemoTests, ExternalMemory)
+// Batched fixture (spec: ZstdGpuCorrectnessTests).
+// Whole corpus is passed as a vector for batched execution
+class ZstdGpuCorrectnessTests : public ::testing::TestWithParam<std::vector<std::string>>
 {
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
+};
+
+// --- Correctness tests — "for all data" matrix (batched) ---
+
+TEST_P(ZstdGpuCorrectnessTests, ExternalMemory)
+{
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
 }
 
-TEST_P(ZstdGpuDemoTests, ExternalMemorySeq)
+TEST_P(ZstdGpuCorrectnessTests, ExternalMemorySeq)
 {
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
 }
 
-TEST_P(ZstdGpuDemoTests, D3D12DebugLayerSeq)
+TEST_P(ZstdGpuCorrectnessTests, D3D12DebugLayerSeq)
 {
 #if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
     GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
 #else
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
 #endif
 }
 
@@ -559,6 +781,12 @@ INSTANTIATE_TEST_SUITE_P(
     ZstdGpuDemoTests,
     ::testing::ValuesIn(GetTestFiles()),
     SanitizeTestName);
+
+INSTANTIATE_TEST_SUITE_P(
+    ContentTests,
+    ZstdGpuCorrectnessTests,
+    ::testing::Values(GetTestFiles()),
+    CorrectnessCorpusName);
 
 // Demo runner implementation
 //

@@ -38,6 +38,8 @@ struct TestConfig
     int gbvMaxMB = 4;                           // Max largest-frame decompressed size (MB) for Gbv tests. Files with a bigger single frame are skipped to avoid GBV TDRs (GBV slows the GPU, so hang risk tracks the largest per-frame dispatch's decompressed output, not the whole-file total).
     int maxFrameMB = 0;                          // Skip any file whose largest on-disk zstd frame exceeds this (MB). <= 0 = disabled (run every file).
     int idxMax = -1;                             // Forwarded to the demo as --idx-max (inclusive last frame index). < 0 = unset (demo runs all frames).
+    int correctnessBatchMB = 256;                // Max total on-disk (compressed) size (MB) of clean files grouped into one correctness batch. Bounds each concatenated demo run: batching by file count alone lets large-texture batches reach multi-GB decompressed, overflowing the demo's int32 size fields (>2 GB) and exceeding a GPU buffer limit. <= 0 = no byte cap (count-only).
+    int correctnessBatchCount = 64;              // Secondary cap: max number of files per correctness batch, regardless of size. <= 0 = no count cap (size-only).
 
     // Cached list of .zst files discovered under contentPath. Populated once
     // in main() after validation; consumed by GetTestFiles() at fixture
