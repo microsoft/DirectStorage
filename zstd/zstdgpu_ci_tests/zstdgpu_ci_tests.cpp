@@ -31,14 +31,74 @@
 #include "zstdgpu_ci_tests.h"
 #include "zstd_frame_size.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <array>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <Windows.h>
+
+bool ParseGpuVendorId(std::string_view value, uint32_t& vendorId, std::string& error)
+{
+    vendorId = 0;
+    error.clear();
+
+    if (value.size() >= 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
+    {
+        value.remove_prefix(2);
+    }
+    if (value.empty())
+    {
+        error = "GPU vendor ID is empty";
+        return false;
+    }
+
+    uint32_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed, 16);
+    if (result.ec == std::errc::result_out_of_range)
+    {
+        error = "GPU vendor ID is outside the 32-bit range";
+        return false;
+    }
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size())
+    {
+        error = "GPU vendor ID must contain only hexadecimal digits";
+        return false;
+    }
+    if (parsed == 0)
+    {
+        error = "GPU vendor ID must be nonzero";
+        return false;
+    }
+
+    vendorId = parsed;
+    return true;
+}
+
+void AppendGpuVendorArgs(std::vector<std::string>& args, uint32_t vendorId)
+{
+    if (vendorId == 0)
+    {
+        return;
+    }
+
+    static constexpr char digits[] = "0123456789abcdef";
+    char buffer[8]{};
+    size_t index = sizeof(buffer);
+    for (uint32_t remaining = vendorId; remaining != 0; remaining >>= 4)
+    {
+        buffer[--index] = digits[remaining & 0xF];
+    }
+
+    args.push_back("--gpu-ven-id");
+    args.emplace_back(buffer + index, sizeof(buffer) - index);
+}
 
 // Internal types + forward declarations
 //
@@ -939,6 +999,7 @@ std::vector<std::string> BuildCorrectnessArgs(
         args.push_back("--idx-max");
         args.push_back(std::to_string(g_testConfig.idxMax));
     }
+    AppendGpuVendorArgs(args, g_testConfig.gpuVendorId);
     for (const auto& flag : scenarioFlags)
     {
         args.push_back(flag);
@@ -973,11 +1034,89 @@ std::vector<std::string> BuildPerformanceArgs(
         args.push_back("--idx-max");
         args.push_back(std::to_string(g_testConfig.idxMax));
     }
+    AppendGpuVendorArgs(args, g_testConfig.gpuVendorId);
     for (const auto& flag : extraFlags)
     {
         args.push_back(flag);
     }
     return args;
+}
+
+TEST(GpuVendorArgsTests, ParsesHexadecimalVendorId)
+{
+    uint32_t vendorId = 0;
+    std::string error;
+    EXPECT_TRUE(ParseGpuVendorId("10de", vendorId, error));
+    EXPECT_EQ(vendorId, 0x10deu);
+    EXPECT_TRUE(error.empty());
+
+    EXPECT_TRUE(ParseGpuVendorId("0X10DE", vendorId, error));
+    EXPECT_EQ(vendorId, 0x10deu);
+}
+
+TEST(GpuVendorArgsTests, RejectsMalformedZeroAndOverflowValues)
+{
+    for (const std::string value : {"", "0", "10de-tail", "100000000"})
+    {
+        uint32_t vendorId = 123;
+        std::string error;
+        EXPECT_FALSE(ParseGpuVendorId(value, vendorId, error)) << value;
+        EXPECT_EQ(vendorId, 0u) << value;
+        EXPECT_FALSE(error.empty()) << value;
+    }
+}
+
+TEST(GpuVendorArgsTests, OmitsUnsetVendorId)
+{
+    std::vector<std::string> args{"--chk-gpu"};
+    AppendGpuVendorArgs(args, 0);
+    EXPECT_EQ(args, std::vector<std::string>({"--chk-gpu"}));
+}
+
+TEST(GpuVendorArgsTests, AppendsNormalizedVendorId)
+{
+    std::vector<std::string> args{"--chk-gpu"};
+    AppendGpuVendorArgs(args, 0x10de);
+    EXPECT_EQ(args, std::vector<std::string>({"--chk-gpu", "--gpu-ven-id", "10de"}));
+}
+
+TEST(GpuVendorForwardingTests, CorrectnessArgsOmitUnsetVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0;
+
+    const auto args = BuildCorrectnessArgs("content.zst", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    EXPECT_EQ(std::find(args.begin(), args.end(), "--gpu-ven-id"), args.end());
+}
+
+TEST(GpuVendorForwardingTests, CorrectnessArgsIncludeConfiguredVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0x10de;
+
+    const auto args = BuildCorrectnessArgs("content.zst", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    const auto option = std::find(args.begin(), args.end(), "--gpu-ven-id");
+    ASSERT_NE(option, args.end());
+    ASSERT_NE(std::next(option), args.end());
+    EXPECT_EQ(*std::next(option), "10de");
+}
+
+TEST(GpuVendorForwardingTests, PerformanceArgsIncludeConfiguredVendor)
+{
+    const uint32_t originalVendorId = g_testConfig.gpuVendorId;
+    g_testConfig.gpuVendorId = 0x10de;
+
+    const auto args = BuildPerformanceArgs("content.zst", 1, 2, "results.csv", {});
+
+    g_testConfig.gpuVendorId = originalVendorId;
+    const auto option = std::find(args.begin(), args.end(), "--gpu-ven-id");
+    ASSERT_NE(option, args.end());
+    ASSERT_NE(std::next(option), args.end());
+    EXPECT_EQ(*std::next(option), "10de");
 }
 
 } // namespace

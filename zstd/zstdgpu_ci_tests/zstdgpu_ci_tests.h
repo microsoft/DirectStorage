@@ -15,7 +15,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "adversarial_manifest.h"
@@ -31,6 +33,7 @@ struct TestConfig
     std::string adversarialManifestPath;        // Optional path to adversarial_manifest.json (--adversarial-manifest)
     std::string gpuName;                        // Adapter name of the machine under test (--gpu-name). Used only for the
                                                 // manifest's scenario skips.
+    uint32_t gpuVendorId = 0;                    // PCI vendor ID forwarded to zstdgpu_demo. 0 = unset.
     int runCount = 40;                          // Number of iterations for performance tests
     int timeoutSeconds = 0;                     // Max seconds before killing a demo process (0 = no timeout)
     int perfMinMB = 4;                          // Min .zst size (MB) required for perf tests. Smaller files skip perf (individually-compressed textures are not representative).
@@ -56,6 +59,14 @@ struct TestConfig
 // Global config, set once in main() before RUN_ALL_TESTS(), then read-only
 // from test bodies.
 extern TestConfig g_testConfig;
+
+// Parses a nonzero PCI vendor ID written in hexadecimal. An optional 0x prefix
+// is accepted. On failure, returns false and describes the invalid value.
+bool ParseGpuVendorId(std::string_view value, uint32_t& vendorId, std::string& error);
+
+// Appends the zstdgpu_demo adapter selector when an explicit vendor was set.
+// A zero ID means "use the demo's normal adapter selection".
+void AppendGpuVendorArgs(std::vector<std::string>& args, uint32_t vendorId);
 
 // File discovery — scans a directory for *.zst files. Returns sorted full paths.
 // Called by main() during startup.

@@ -116,6 +116,8 @@ static void PrintUsage(const char* exe)
               << "                          within --gbv-max-mb). A positive N samples that many files by stride.\n"
               << "  --gpu-name <name>       Adapter name of this machine. Consumed only by the manifest's\n"
               << "                          scenario_skips; if omitted, no scenario is skipped by GPU name.\n"
+              << "  --gpu-ven-id <hex-id>   Optional PCI vendor ID forwarded to zstdgpu_demo for adapter\n"
+              << "                          selection (for example, 10de selects NVIDIA).\n"
               << "  --gbv-max-mb <N>        Max largest single frame decompressed size for GBV tests in MB (default: 4).\n"
               << "                          A value <= 0 disables the cap and runs GBV on files of any size.\n"
               << "  --max-frame-mb <N>      Skip any .zst file whose largest single on-disk zstd frame exceeds N MB,\n"
@@ -193,6 +195,22 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         else if (std::strcmp(argv[i], "--gpu-name") == 0 && i + 1 < argc)
         {
             config.gpuName = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "--gpu-ven-id") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Error: --gpu-ven-id requires a hexadecimal value." << std::endl;
+                return false;
+            }
+            std::string parseError;
+            const std::string value = argv[++i];
+            if (!ParseGpuVendorId(value, config.gpuVendorId, parseError))
+            {
+                std::cerr << "Error: invalid --gpu-ven-id '" << value << "': "
+                          << parseError << "." << std::endl;
+                return false;
+            }
         }
         else if (std::strcmp(argv[i], "--perf-min-mb") == 0 && i + 1 < argc)
         {
@@ -278,6 +296,16 @@ static int ValidateAndDiscover(TestConfig& config)
 
     std::cout << "Discovered " << config.discoveredFiles.size() << " .zst file(s) at '"
               << config.contentPath << "'.\n";
+
+    if (config.gpuVendorId != 0)
+    {
+        std::cout << "GPU vendor selection enabled: 0x" << std::hex
+                  << config.gpuVendorId << std::dec << ".\n";
+    }
+    else
+    {
+        std::cout << "GPU vendor selection not configured; demo default selection will be used.\n";
+    }
 
     if (config.logDir.empty())
     {
