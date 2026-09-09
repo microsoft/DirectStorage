@@ -61,8 +61,6 @@
   </PropertyGroup>
   <ItemGroup>
     <None Include="packages.config" />
-    <None Include="..\tools\srtgen\zstdgpu_srt_decl.h" />
-    <None Include="..\tools\srtgen\zstdgpu_srt_tool.c" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
