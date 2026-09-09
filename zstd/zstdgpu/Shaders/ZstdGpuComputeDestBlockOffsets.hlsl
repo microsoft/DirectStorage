@@ -17,7 +17,7 @@
 #include "../zstdgpu_shaders.h"
 
 
-#include "../.generated/ZstdGpuSrt_ComputeDestBlockOffsets.h"
+#include "../srt_headers/ZstdGpuSrt_ComputeDestBlockOffsets.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_ComputeDestBlockOffsets)]
 [numthreads(kzstdgpu_TgSizeX_ComputeDestBlockOffset, 1, 1)]

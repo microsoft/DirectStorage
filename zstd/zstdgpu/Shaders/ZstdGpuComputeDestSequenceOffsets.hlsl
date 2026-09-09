@@ -15,7 +15,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_ComputeDestSequenceOffsets.h"
+#include "../srt_headers/ZstdGpuSrt_ComputeDestSequenceOffsets.h"
 
 #define NUM_THREADS 256
 

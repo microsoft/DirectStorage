@@ -20,7 +20,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_FinaliseSequenceOffsets.h"
+#include "../srt_headers/ZstdGpuSrt_FinaliseSequenceOffsets.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_FinaliseSequenceOffsets)]
 [numthreads(kzstdgpu_TgSizeX_FinaliseSequenceOffsets, 1, 1)]

@@ -16,7 +16,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_MemsetMemcpy.h"
+#include "../srt_headers/ZstdGpuSrt_MemsetMemcpy.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_MemsetMemcpy)]
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]

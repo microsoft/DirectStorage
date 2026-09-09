@@ -43,7 +43,7 @@
 #include "../zstdgpu_shaders.h"
 
 
-#include "../.generated/ZstdGpuSrt_InitFseTable.h"
+#include "../srt_headers/ZstdGpuSrt_InitFseTable.h"
 
 #if ZSTD_BITCNT_NSTATE_METHOD == ZSTD_BITCNT_NSTATE_METHOD_DEFAULT
 groupshared uint32_t Lds[kzstdgpu_InitFseTable_Default_LdsSize];

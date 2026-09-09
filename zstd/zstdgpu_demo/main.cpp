@@ -407,15 +407,15 @@ static const int16_t kzstdgpuFseProbsDefault[] =
 };
 
 #include "zstdgpu_resources.h"
-#include ".generated/ZstdGpuSrt_InitResources.h"
-#include ".generated/ZstdGpuSrt_ParseFrames.h"
-#include ".generated/ZstdGpuSrt_ParseCompressedBlocks.h"
-#include ".generated/ZstdGpuSrt_InitFseTable.h"
-#include ".generated/ZstdGpuSrt_DecompressHuffmanWeights.h"
-#include ".generated/ZstdGpuSrt_DecodeHuffmanWeights.h"
-#include ".generated/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
-#include ".generated/ZstdGpuSrt_DecompressSequences.h"
-#include ".generated/ZstdGpuSrt_FinaliseSequenceOffsets.h"
+#include "srt_headers/ZstdGpuSrt_InitResources.h"
+#include "srt_headers/ZstdGpuSrt_ParseFrames.h"
+#include "srt_headers/ZstdGpuSrt_ParseCompressedBlocks.h"
+#include "srt_headers/ZstdGpuSrt_InitFseTable.h"
+#include "srt_headers/ZstdGpuSrt_DecompressHuffmanWeights.h"
+#include "srt_headers/ZstdGpuSrt_DecodeHuffmanWeights.h"
+#include "srt_headers/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
+#include "srt_headers/ZstdGpuSrt_DecompressSequences.h"
+#include "srt_headers/ZstdGpuSrt_FinaliseSequenceOffsets.h"
 
 #define VALIDATE(name, data) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(data))
 

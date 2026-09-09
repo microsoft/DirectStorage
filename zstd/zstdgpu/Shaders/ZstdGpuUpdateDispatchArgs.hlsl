@@ -17,7 +17,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_UpdateDispatchArgs.h"
+#include "../srt_headers/ZstdGpuSrt_UpdateDispatchArgs.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_UpdateDispatchArgs)]
 [numthreads(1, 1, 1)]

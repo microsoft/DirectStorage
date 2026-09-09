@@ -55,7 +55,7 @@
 
 ZSTDGPU_WARN_PUSH_MSVC()
 ZSTDGPU_WARN_STOP_MSVC(4505) /**< warning C4505: 'function name': unreferenced function with internal linkage has been removed */
-#include ".generated/zstdgpu_srt_bind.h"
+#include "srt_headers/zstdgpu_srt_bind.h"
 ZSTDGPU_WARN_POP_MSVC()
 
 #include "ZstdGpuComputeDestBlockOffsets.h"

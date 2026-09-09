@@ -21,7 +21,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_InitResources.h"
+#include "../srt_headers/ZstdGpuSrt_InitResources.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_InitResources)]
 [numthreads(kzstdgpu_TgSizeX_InitCounters, 1, 1)]

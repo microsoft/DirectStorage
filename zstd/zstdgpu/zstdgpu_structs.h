@@ -1591,6 +1591,6 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     return (maxThreads + kzstdgpu_TgSizeX_InitCounters - 1) / kzstdgpu_TgSizeX_InitCounters;
 }
 
-#include ".generated/zstdgpu_srt_structs.h"
+#include "srt_headers/zstdgpu_srt_structs.h"
 
 #endif // #define ZSTDGPU_STRUCTS_H

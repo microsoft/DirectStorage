@@ -16,7 +16,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
+#include "../srt_headers/ZstdGpuSrt_InitHuffmanTableAndDecompressLiterals.h"
 
 #if !defined(__HLSL_VERSION) || (__HLSL_VERSION < 2021)
 #pragma dxc diagnostic ignored "-Wfor-redefinition"

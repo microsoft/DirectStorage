@@ -25,7 +25,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_DecompressSequences.h"
+#include "../srt_headers/ZstdGpuSrt_DecompressSequences.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_DecompressSequences)]
 [numthreads(kzstdgpu_DecompressSequences_StreamsPerTG, 1, 1)]

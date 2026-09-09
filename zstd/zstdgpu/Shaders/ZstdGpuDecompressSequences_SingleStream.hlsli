@@ -34,7 +34,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_DecompressSequences.h"
+#include "../srt_headers/ZstdGpuSrt_DecompressSequences.h"
 
 #if !kzstdgpu_DecompressSequences_SingleStream_NoLdsFseCache
 groupshared uint32_t Lds[kzstdgpu_DecompressSequences_SingleStream_LdsFseCache_LdsSize];
