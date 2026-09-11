@@ -33,6 +33,7 @@ typedef struct zstdgpu_ParseFrames_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutGlobalBlockIndexPerRawBlock;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutGlobalBlockIndexPerRleBlock;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutGlobalBlockIndexPerCmpBlock;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFrameStatus;
     uint32_t                                                frameCount;
     uint32_t                                                compressedBufferSizeInBytes;
     uint32_t                                                countBlocksOnly;

@@ -64,7 +64,7 @@ ZstdDecompressionWork::ZstdDecompressionWork(ID3D12Device* device, const wchar_t
     m_zstdgu = std::make_unique<Decompression::ZstdFallbackShaderDecompressionLibrary>(device);
 }
 
-Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, OffsetsAndSizes& offsetsAndSizes)
+Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, OffsetsAndSizes& offsetsAndSizes, std::vector<uint32_t>* outFrameStatus)
 {
     uint32_t totalOffsetsAndSizes = static_cast<uint32_t>(
         offsetsAndSizes.InputOffsets.size()); // assume input and output offsets and sizes count are the same
@@ -89,6 +89,8 @@ Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, O
         reinterpret_cast<uint8_t*>(offsetsAndSizes.OutputOffsets.data()),
         offsetsAndSizesBufferSize);
 
+    auto frameStatusBuffer = CreateBuffer(static_cast<size_t>(totalOffsetsAndSizes) * sizeof(uint32_t), L"Frame Status Buffer");
+
     uint32_t totalStageCount = 0;
     auto session = m_zstdgu->CreateDecompressionSession(
         inputBuffer.get(),
@@ -97,6 +99,7 @@ Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, O
         outputBuffer.get(),
         outputBufferSize,
         outputOffsetsAndSizesBuffer.get(),
+        frameStatusBuffer.get(),
         totalOffsetsAndSizes,
         &totalStageCount);
 
@@ -159,6 +162,21 @@ Frames ZstdDecompressionWork::Decompress(std::vector<uint8_t>& compressedData, O
 
     std::vector<uint8_t> decompressedData;
     CopyFromResource(decompressedData, outputBuffer.get());
+
+    // Read back the per-frame status buffer written by the parse shader (one HRESULT per input frame).
+    if (outFrameStatus != nullptr)
+    {
+        std::vector<uint8_t> statusBytes;
+        CopyFromResource(statusBytes, frameStatusBuffer.get());
+        outFrameStatus->resize(totalOffsetsAndSizes);
+        if (totalOffsetsAndSizes != 0)
+        {
+            memcpy(
+                outFrameStatus->data(),
+                statusBytes.data(),
+                static_cast<size_t>(totalOffsetsAndSizes) * sizeof(uint32_t));
+        }
+    }
 
     Frames decompressedFrames;
     for (size_t i = 0; i < offsetsAndSizes.OutputOffsets.size(); ++i)

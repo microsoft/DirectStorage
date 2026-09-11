@@ -62,6 +62,8 @@ ZSTDGPU_SRT_BIND_GROUP_BEGIN(ParseFrames, Stage0|Stage1)
     ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , GlobalBlockIndexPerRawBlock   )
     ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , GlobalBlockIndexPerRleBlock   )
     ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , GlobalBlockIndexPerCmpBlock   )
+
+    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , FrameStatus                   )
 ZSTDGPU_SRT_BIND_GROUP_END()
 
 ZSTDGPU_SRT_BIND_GROUP_BEGIN(LiteralStreams, Stage2)

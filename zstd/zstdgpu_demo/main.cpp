@@ -863,6 +863,11 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             prefix += count;
         }
     }
+    // FrameStatus is a caller-supplied (external) resource on GPU, so InitFromHeap never
+    // allocates it. The real ParseFrames pass writes one HRESULT per frame, so the CPU
+    // emulation supplies throwaway scratch storage to receive those writes.
+    uint32_t *cpuFrameStatusScratch = (uint32_t *)malloc(sizeof(uint32_t) * zstdFrameCount);
+    zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
         zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0);
@@ -872,6 +877,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_ParseFrames(srt, i);
         }
     }
+    zstdCpu.FrameStatus = NULL;
+    free(cpuFrameStatusScratch);
     VALIDATE(Blocks, &zstdCpu);
 
     {
@@ -1153,6 +1160,7 @@ struct DemoCtx
     d3d12aid_MappedBuffer       zstdCompressedFramesRefs;
     d3d12aid_MappedBuffer       zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer       zstdUnCompressedFramesRefs;
+    d3d12aid_MappedBuffer       zstdFrameStatus;
     ID3D12Heap                 *readbackHeap[3];
     ID3D12Heap                 *uploadHeap[3];
     ID3D12Heap                 *defaultHeap[3];
@@ -1199,6 +1207,8 @@ static void demoCleanup(DemoCtx *ctx)
         d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesMemory);
     if (NULL != ctx->zstdUnCompressedFramesRefs.bufGpu)
         d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesRefs);
+    if (NULL != ctx->zstdFrameStatus.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdFrameStatus);
 
     if (NULL != ctx->timestamps.heap)
         d3d12aid_Timestamps_Release(&ctx->timestamps);
@@ -1295,6 +1305,7 @@ static int demoRun(void *demoCtx)
     d3d12aid_MappedBuffer      &zstdCompressedFramesRefs     = ctx->zstdCompressedFramesRefs;
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesMemory = ctx->zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesRefs   = ctx->zstdUnCompressedFramesRefs;
+    d3d12aid_MappedBuffer      &zstdFrameStatus              = ctx->zstdFrameStatus;
     ID3D12Heap                *(&readbackHeap)[3]            = ctx->readbackHeap;
     ID3D12Heap                *(&uploadHeap)[3]              = ctx->uploadHeap;
     ID3D12Heap                *(&defaultHeap)[3]             = ctx->defaultHeap;
@@ -1802,6 +1813,7 @@ static int demoRun(void *demoCtx)
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1u, zstdUnCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_READBACK);
+        d3d12aid_MappedBuffer_Create(&zstdFrameStatus, device, 1u, fbInfo.frameCount * (uint32_t)sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK);
 
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdOffs + zstdDataSize);
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesRefs, 0, (void *)zstdInFrameRefs, zstdFramesRefsSizeInBytes);
@@ -1823,7 +1835,7 @@ static int demoRun(void *demoCtx)
                 zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.decodedLiteralsByteCount, blkInfo.sequenceCount);
             }
         }
-        zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
+        zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount, zstdFrameStatus.bufGpu);
     }
     else
     {
@@ -1832,6 +1844,7 @@ static int demoRun(void *demoCtx)
         // we only create the reusable GPU-side resources sized to the largest batch.
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, maxRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1, maxBatchDecompBytes, D3D12_HEAP_TYPE_READBACK);
+        d3d12aid_MappedBuffer_Create(&zstdFrameStatus, device, 1u, maxBatchFrames * (uint32_t)sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK);
     }
 
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
@@ -1934,7 +1947,7 @@ static int demoRun(void *demoCtx)
                     zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.decodedLiteralsByteCount, blkInfo.sequenceCount);
                 }
             }
-            zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
+            zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount, zstdFrameStatus.bufGpu);
 
             perBatchFrames[b] = fbInfo.frameCount;
             perBatchBytes[b]  = zstdUnCompressedFramesMemorySizeInBytes;
@@ -2102,6 +2115,45 @@ static int demoRun(void *demoCtx)
                 d3d12aid_Timestamps_AdvanceFrame(&timestamps, cmdList);
                 d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
                 d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+
+                if (chkGpu && sweep == 0)
+                {
+                    // Read back the per-frame status buffer written by the ParseFrames real pass.
+                    // The GPU is idle here, so bufGpu has decayed to COMMON and COMMON->COPY_SOURCE
+                    // is a valid transition regardless of which stage produced the writes.
+                    cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0 /** cmdListId */);
+                    {
+                        D3D12_RESOURCE_BARRIER barrier;
+                        d3d12aid_MappedBuffer_BeginTransfer(&barrier, &zstdFrameStatus, D3D12_RESOURCE_STATE_COMMON);
+                        cmdList->ResourceBarrier(1u, &barrier);
+                        d3d12aid_MappedBuffer_Transfer(cmdList, &zstdFrameStatus, 0);
+                    }
+                    d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
+                    d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+
+                    const uint32_t *frameStatus = (const uint32_t *)zstdFrameStatus.bufMem[0];
+                    uint32_t statusFailCount = 0;
+                    for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
+                    {
+                        if (frameStatus[i] != kzstdgpu_FrameStatus_Success)
+                        {
+                            ++statusFailCount;
+                            if (statusFailCount <= 8)
+                            {
+                                debugPrint(L"[FAIL] Frame status: local %u (global %u) = 0x%08X.\n", i, bLo + i, frameStatus[i]);
+                            }
+                        }
+                    }
+                    if (statusFailCount > 0)
+                    {
+                        debugPrint(L"[FAIL] Frame status: %u/%u frames not S_OK (sweep %u, batch %u).\n", statusFailCount, fbInfo.frameCount, sweep, b);
+                        ctx->retv = 1;
+                    }
+                    else
+                    {
+                        debugPrint(L"[INFO] Frame status: all %u frames S_OK (sweep %u, batch %u).\n", fbInfo.frameCount, sweep, b);
+                    }
+                }
 
                 if ((simGpu || chkGpu) && sweep == 0)
                 {
