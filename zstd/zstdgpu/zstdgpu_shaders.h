@@ -598,6 +598,64 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
     }
 }
 
+// "Info" here is short for baselines + extra bits.
+#define SEQ_LLEN_CODE_INFO_END 36
+#define SEQ_MLEN_CODE_INFO_END 53
+
+// Extra bits are low 5 bits, rest are baseline.
+// It could be better/simpler to not bitpack (use uint32_t2), but the LLVM-SROA pass in DXC might split that up; a single load is desired.
+static const uint32_t SEQ_LLEN_EXTRA_BITS_AND_BASELINES[SEQ_LLEN_CODE_INFO_END] =
+{
+        0 << 5 |  0,     1 << 5 |  0,     2 << 5 |  0,     3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,
+        8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,    11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,
+       16 << 5 |  1,    18 << 5 |  1,    20 << 5 |  1,    22 << 5 |  1,    24 << 5 |  2,    28 << 5 |  2,    32 << 5 |  3,    40 << 5 |  3,
+       48 << 5 |  4,    64 << 5 |  6,   128 << 5 |  7,   256 << 5 |  8,   512 << 5 |  9,  1024 << 5 | 10,  2048 << 5 | 11,  4096 << 5 | 12,
+     8192 << 5 | 13, 16384 << 5 | 14, 32768 << 5 | 15, 65536 << 5 | 16
+};
+
+static const uint32_t SEQ_MLEN_EXTRA_BITS_AND_BASELINES[SEQ_MLEN_CODE_INFO_END] =
+{
+        3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,     8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,
+       11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,    16 << 5 |  0,    17 << 5 |  0,    18 << 5 |  0,
+       19 << 5 |  0,    20 << 5 |  0,    21 << 5 |  0,    22 << 5 |  0,    23 << 5 |  0,    24 << 5 |  0,    25 << 5 |  0,    26 << 5 |  0,
+       27 << 5 |  0,    28 << 5 |  0,    29 << 5 |  0,    30 << 5 |  0,    31 << 5 |  0,    32 << 5 |  0,    33 << 5 |  0,    34 << 5 |  0,
+       35 << 5 |  1,    37 << 5 |  1,    39 << 5 |  1,    41 << 5 |  1,    43 << 5 |  2,    47 << 5 |  2,    51 << 5 |  3,    59 << 5 |  3,
+       67 << 5 |  4,    83 << 5 |  4,    99 << 5 |  5,   131 << 5 |  7,   259 << 5 |  8,   515 << 5 |  9,  1027 << 5 | 10,  2051 << 5 | 11,
+     4099 << 5 | 12,  8195 << 5 | 13, 16387 << 5 | 14, 32771 << 5 | 15, 65539 << 5 | 16
+};
+
+// For both LLen and MLen, the Predefined_Mode accuracy log is 6 bits, while FSE_Compressed_Mode is 9 bits.
+// So for the default/predefined FSE decoder-tables, there are 512-64 unused DWORDs; the first of each 64 of
+// which are used to store copies of SEQ_{LLEN,MLEN}_EXTRA_BITS_AND_BASELINES, since current AMD RDNA3 compilers
+// seem to emit better code when reading from an SRV than an embedded array, especially for SingleStream variants
+// (which should mostly be SMEM loads). In most other shaders, embedded arrays don't seem to be an issue for RDNA3.
+static uint32_t zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(uint32_t cmpBlockCnt)
+{
+    return zstdgpu_ComputeFseDataStartFromFseIndexLLen(zstdgpu_ComputeFseIndexLLen(0, cmpBlockCnt), cmpBlockCnt) + 64;
+}
+
+static uint32_t zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(uint32_t cmpBlockCnt)
+{
+    return zstdgpu_ComputeFseDataStartFromFseIndexMLen(zstdgpu_ComputeFseIndexMLen(0, cmpBlockCnt), cmpBlockCnt) + 64;
+}
+
+struct zstdgpu_SeqCodeInfoContext
+{
+    ZSTDGPU_RO_BUFFER(uint32_t) fseElems;
+    uint32_t llenDataStart;
+    uint32_t mlenDataStart;
+};
+
+static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext(ZSTDGPU_RO_BUFFER(uint32_t) fseElems, uint32_t cmpBlockCnt)
+{
+    zstdgpu_SeqCodeInfoContext ctx = {
+        fseElems,
+        zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(cmpBlockCnt),
+        zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(cmpBlockCnt)
+    };
+    return ctx;
+}
+
 static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitResources_SRT) srt, uint32_t threadId)
 {
     ZSTDGPU_UNUSED(threadId);
@@ -636,7 +694,7 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
 
     const uint32_t cmpBlockCnt = srt.inoutCounters[0].Blocks_CMP;
 
-    ZSTDGPU_FOR_WORK_ITEMS(i, 1, threadId, kzstdgpu_TgSizeX_InitCounters)
+    if (threadId == 0)
     {
         srt.inoutFseInfos[zstdgpu_ComputeFseIndexLLen(0, cmpBlockCnt)] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_LLen, kzstdgpu_FseDefaultProbAccuracy_LLen);
         srt.inoutFseInfos[zstdgpu_ComputeFseIndexOffs(0, cmpBlockCnt)] = zstdgpu_CreateFseInfo(kzstdgpu_FseDefaultProbCount_Offs, kzstdgpu_FseDefaultProbAccuracy_Offs);
@@ -653,6 +711,18 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
         zstdgpu_FseInfo rleInfo;
         rleInfo.fseProbCountAndAccuracyLog2 = 0;
         srt.inoutFseInfos[i] = rleInfo;
+    }
+
+    const uint32_t codeInfoStartLLen = zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(cmpBlockCnt);
+    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_LLEN_CODE_INFO_END, threadId, kzstdgpu_TgSizeX_InitCounters)
+    {
+        srt.inoutFseElems[codeInfoStartLLen + i] = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[i];
+    }
+
+    const uint32_t codeInfoStartMLen = zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(cmpBlockCnt);
+    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_MLEN_CODE_INFO_END, threadId, kzstdgpu_TgSizeX_InitCounters)
+    {
+        srt.inoutFseElems[codeInfoStartMLen + i] = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[i];
     }
 
     // NOTE(pamartis): We start from `srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs` because
@@ -1004,8 +1074,8 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     //
     const uint32_t literalBlockSzFmt = zstdgpu_Forward_BitBuffer_GetNoRefill(buffer, 2);
 
-    const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
     #ifdef __hlsl_dx_compiler
+        const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
         const uint32_t hufLitStreamStart = zstdgpu_OrderedAppendIndex(srt.inoutLitStreamCountPrefixLookback, hufLitStreamCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
     #else
         const uint32_t hufLitStreamStart = srt.inoutCounters[0].HUF_Streams;
@@ -3123,6 +3193,7 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
         for (; dwordIdx < dwordIdxBatchEnd; ++dwordIdx)
         {
             uint32_t dword = 0;
+
             state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             dword |= symbol;
@@ -3249,37 +3320,18 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
                                              ZSTDGPU_PARAM_INOUT(uint32_t) outLLen,
                                              ZSTDGPU_PARAM_INOUT(uint32_t) outOffs,
                                              ZSTDGPU_PARAM_INOUT(uint32_t) outMLen,
-                                             bool skipOffsRefill)
+                                             bool skipOffsRefill,
+                                             zstdgpu_SeqCodeInfoContext ctx)
 {
-    // Extra bits are low 5 bits, rest are baseline.
-    // It could be better/simpler to not bitpack (use uint32_t2), but the LLVM-SROA pass in DXC might split that up; a single load is desired.
-    static const uint32_t SEQ_LITERAL_LENGTH_EXTRA_BITS_AND_BASELINES[36] =
-    {
-            0 << 5 |  0,     1 << 5 |  0,     2 << 5 |  0,     3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,
-            8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,    11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,
-           16 << 5 |  1,    18 << 5 |  1,    20 << 5 |  1,    22 << 5 |  1,    24 << 5 |  2,    28 << 5 |  2,    32 << 5 |  3,    40 << 5 |  3,
-           48 << 5 |  4,    64 << 5 |  6,   128 << 5 |  7,   256 << 5 |  8,   512 << 5 |  9,  1024 << 5 | 10,  2048 << 5 | 11,  4096 << 5 | 12,
-         8192 << 5 | 13, 16384 << 5 | 14, 32768 << 5 | 15, 65536 << 5 | 16
-    };
-
-    static const uint32_t SEQ_MATCH_LENGTH_EXTRA_BITS_AND_BASELINES[53] =
-    {
-            3 << 5 |  0,     4 << 5 |  0,     5 << 5 |  0,     6 << 5 |  0,     7 << 5 |  0,     8 << 5 |  0,     9 << 5 |  0,    10 << 5 |  0,
-           11 << 5 |  0,    12 << 5 |  0,    13 << 5 |  0,    14 << 5 |  0,    15 << 5 |  0,    16 << 5 |  0,    17 << 5 |  0,    18 << 5 |  0,
-           19 << 5 |  0,    20 << 5 |  0,    21 << 5 |  0,    22 << 5 |  0,    23 << 5 |  0,    24 << 5 |  0,    25 << 5 |  0,    26 << 5 |  0,
-           27 << 5 |  0,    28 << 5 |  0,    29 << 5 |  0,    30 << 5 |  0,    31 << 5 |  0,    32 << 5 |  0,    33 << 5 |  0,    34 << 5 |  0,
-           35 << 5 |  1,    37 << 5 |  1,    39 << 5 |  1,    41 << 5 |  1,    43 << 5 |  2,    47 << 5 |  2,    51 << 5 |  3,    59 << 5 |  3,
-           67 << 5 |  4,    83 << 5 |  4,    99 << 5 |  5,   131 << 5 |  7,   259 << 5 |  8,   515 << 5 |  9,  1027 << 5 | 10,  2051 << 5 | 11,
-         4099 << 5 | 12,  8195 << 5 | 13, 16387 << 5 | 14, 32771 << 5 | 15, 65539 << 5 | 16
-    };
-
-    ZSTDGPU_ASSERT(symbolLLen < 36);
-    ZSTDGPU_ASSERT(symbolMLen < 53);
+    ZSTDGPU_ASSERT(symbolLLen < SEQ_LLEN_CODE_INFO_END);
+    ZSTDGPU_ASSERT(symbolMLen < SEQ_MLEN_CODE_INFO_END);
     ZSTDGPU_ASSERT(symbolOffs <= (kzstdgpu_SeqOffset_Encoded_BitBase - 1));
     const uint32_t symbolOffs_Clamped = zstdgpu_MinU32(symbolOffs, kzstdgpu_SeqOffset_Encoded_BitBase - 1);
 
-    const uint32_t llenInfo = SEQ_LITERAL_LENGTH_EXTRA_BITS_AND_BASELINES[symbolLLen];
-    const uint32_t mlenInfo = SEQ_MATCH_LENGTH_EXTRA_BITS_AND_BASELINES[symbolMLen];
+    // Read from BASELINES and EXTRA_BITS:
+    const uint32_t llenInfo = ctx.fseElems[ctx.llenDataStart + symbolLLen];
+    const uint32_t mlenInfo = ctx.fseElems[ctx.mlenDataStart + symbolMLen];
+
     const uint32_t bitcntLLen = llenInfo & 31;
     const uint32_t bitcntOffs = symbolOffs_Clamped;
     const uint32_t bitcntMLen = mlenInfo & 31;
@@ -3347,6 +3399,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
+    // An alternative implementation of this may require all threads in the group to be active (before any return):
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
+
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
@@ -3409,7 +3464,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
                 zstdgpu_FseElem_Symbol(fseElemLLen),
                 zstdgpu_FseElem_Symbol(fseElemOffs),
                 zstdgpu_FseElem_Symbol(fseElemMLen),
-                llen, offs, mlen, true
+                llen, offs, mlen, true, seqCodeInfoCtx
             );
             offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
@@ -3443,7 +3498,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
                 zstdgpu_FseElem_Symbol(fseElemLLen),
                 zstdgpu_FseElem_Symbol(fseElemOffs),
                 zstdgpu_FseElem_Symbol(fseElemMLen),
-                llen, offs, mlen, true
+                llen, offs, mlen, true, seqCodeInfoCtx
             );
             offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
@@ -3496,6 +3551,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const uint32_t seqStreamIdx = groupId;
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
+
+    // An alternative implementation of this may require all threads in the group to be active (before any return):
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
 
     if (seqStreamIdx >= seqStreamCnt)
         return;
@@ -3592,7 +3650,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
             zstdgpu_FseElem_Symbol(packedFseElemLLen),
             zstdgpu_FseElem_Symbol(packedFseElemOffs),
             zstdgpu_FseElem_Symbol(packedFseElemMLen),
-            llen, offs, mlen, false);
+            llen, offs, mlen, false, seqCodeInfoCtx
+        );
         offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
         /*totalSize += llen + mlen;*/
@@ -3695,6 +3754,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
+    // An alternative implementation of this may require all threads in the group to be active (before any return):
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
+
     const zstdgpu_OffsetAndSize seqRefDst = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
 
     const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
@@ -3768,7 +3830,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
                     zstdgpu_FseElem_Symbol(fseElemLLen),
                     zstdgpu_FseElem_Symbol(fseElemOffs),
                     zstdgpu_FseElem_Symbol(fseElemMLen),
-                    llen, offs, mlen, false
+                    llen, offs, mlen, false, seqCodeInfoCtx
                 );
                 offs = zstdgpu_UpdatePreviousAndRecomputeIncoming(offset1, offset2, offset3, offs, llen);
 
@@ -4136,8 +4198,8 @@ static void zstdgpu_ExecuteSequences_Lit(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequ
         // NOTE(pamartis): these are still uniform variables HLSL has no way of enforcing....
         zstdgpu_Sequence seq = zstdgpu_LoadSequence(srt, seqIdx);
 
-        // NOTE: Process 2 sequences at a time to optimize execution.  Execution is not VGPR limited. 
-        // Sequence k's match copy and k+1's literal copy are independent: different source buffers, non-overlapping destinations.        
+        // NOTE: Process 2 sequences at a time to optimize execution.  Execution is not VGPR limited.
+        // Sequence k's match copy and k+1's literal copy are independent: different source buffers, non-overlapping destinations.
         ZSTDGPU_LOOP for (; seqIdx + 1u < seqEnd; seqIdx += 2u)
         {
             const uint32_t nextSeqIdx = seqIdx + 1u;
