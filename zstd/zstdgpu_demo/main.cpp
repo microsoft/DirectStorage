@@ -1583,6 +1583,13 @@ static int demoRun(void *demoCtx)
                 else if (0 == wcscmp(argv[argi], L"--ssm"))
                 {
                     ssm = true;
+                    // Single submission cannot read counters back from the GPU, so every scratch
+                    // size must be known up front. Sequence/literal scratch is covered by a
+                    // provable bound derived from the decompressed size, but block count cannot be
+                    // bounded that way at all (an empty RAW block regenerates zero bytes), so we
+                    // supply exact counts. This is the cheap block-header hop -- it does NOT
+                    // descend into literal/sequence sections the way --seq-cnt does.
+                    blkCnt = true;
                 }
                 else if (0 == wcscmp(argv[argi], L"--warmup"))
                 {
@@ -1616,7 +1623,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--zst-ofs <byte count>    [Optional] When loading .zst file is appended to a buffer with <byte count> bytes. (Useful for testing large buffer sizes)  \n");
                 debugPrint(L"\t--out-frm                 [Optional] Outputs decompressed frames to files with <source_name.frame_N> name.\n");
                 debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
-                debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode with automatic scratch estimation.\n");
+                debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode. Uses exact block counts from the cheap block-header pre-scan plus a provable literal/sequence scratch bound derived from the decompressed size.\n");
                 debugPrint(L"\t--warmup                  [Optional] Runs a fixed warmup period (~10s) before measuring; warmup runs are excluded from the [PERF] stdout statistics.\n");
                 if (badArg)
                 {
