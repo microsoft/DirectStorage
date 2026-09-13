@@ -253,6 +253,13 @@ static const uint32_t kzstdgpu_MinCount_Blocks = 1;
 static const uint32_t kzstdgpu_MinCount_UncompressedLitBytes = 16;
 static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
 
+/**
+ *  The zstd minimum match length. Every sequence emits at least this many output bytes, which is
+ *  what makes `sequenceCount <= decompressedBytes / kzstdgpu_MinMatchLength` a provable bound
+ *  rather than an estimate. See `zstdgpu_OutputSizeToSequenceCount`.
+ */
+static const uint32_t kzstdgpu_MinMatchLength = 3;
+
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 7;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_LLen = 9;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_Offs = 8;
