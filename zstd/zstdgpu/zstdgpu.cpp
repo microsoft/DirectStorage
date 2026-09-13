@@ -1639,6 +1639,22 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
             zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, req);
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
+
+        // Report an unsatisfiable scratch requirement here, where we still know WHY it is large,
+        // rather than letting it surface later as an opaque E_INVALIDARG out of CreateHeap.
+        // Single submission cannot read counters back from the GPU, so it must size literal and
+        // sequence scratch from provable bounds; those bounds are proportional to the decompressed
+        // size and are therefore much larger than the counts a staged decode would observe. Until
+        // literals and sequences share one arena, a caller can legitimately ask for more scratch
+        // than any heap can provide.
+        if (req->resInfo.gpuOnly_ByteCount[stageIndex] > kzstdgpu_MaxScratchHeapByteCount)
+        {
+            ZSTDGPU_ASSERT(!"zstdgpu: scratch requirement exceeds the maximum supported heap size. "
+                            "Reduce the batch size (fewer frames per request), or use staged "
+                            "submission so scratch can be sized from actual GPU counters.");
+            return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+        }
+
         *outDefaultHeapByteCount            = req->resInfo.gpuOnly_ByteCount[stageIndex];
         *outUploadHeapByteCount             = req->resInfo.cpu2Gpu_ByteCount[stageIndex];
         *outReadbackHeapByteCount           = req->resInfo.gpu2Cpu_ByteCount[stageIndex];
@@ -1700,6 +1716,18 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaul
     if (proceed)
     {
         zstdgpu_GetAllStageGpuMemoryRequirementInternal(outDefaultHeapByteCount, outUploadHeapByteCount, outReadbackHeapByteCount, req);
+
+        // See the matching check in `zstdgpu_GetGpuMemoryRequirement`. Single submission sizes
+        // literal and sequence scratch from bounds proportional to the decompressed size, so a
+        // large batch can require more scratch than any heap can provide. Report that here, while
+        // the cause is still known, instead of as an opaque E_INVALIDARG from CreateHeap.
+        if (*outDefaultHeapByteCount > kzstdgpu_MaxScratchHeapByteCount)
+        {
+            ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
+                            "supported heap size. Reduce the batch size (fewer frames per request), "
+                            "or use staged submission so scratch can be sized from actual GPU counters.");
+            return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+        }
 
         *outShaderVisibleDescriptorCount    = zstdgpu_Count_SRTs_Stage(0)
                                             + zstdgpu_Count_SRTs_Stage(1)

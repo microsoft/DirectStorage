@@ -260,6 +260,13 @@ static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
  */
 static const uint32_t kzstdgpu_MinMatchLength = 3;
 
+/**
+ *  Ceiling on a single stage's scratch allocation. A request above this is reported as an invalid
+ *  argument at sizing time -- where the cause is still known -- instead of failing later inside
+ *  ID3D12Device::CreateHeap with an uninformative E_INVALIDARG.
+ */
+static const uint64_t kzstdgpu_MaxScratchHeapByteCount = 4ull * 1024ull * 1024ull * 1024ull;
+
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 7;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_LLen = 9;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_Offs = 8;
