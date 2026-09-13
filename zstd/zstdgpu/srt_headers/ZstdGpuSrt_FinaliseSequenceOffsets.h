@@ -17,16 +17,16 @@
 
 #ifdef __hlsl_dx_compiler
 
-ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutDecompressedSequenceOffs   : register(u0);
-ZSTDGPU_RO_BUFFER(zstdgpu_Counters) ZstdInCounters                      : register(t0);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset1      : register(t1);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset2      : register(t2);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset3      : register(t3);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamSeqStart          : register(t4);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameBlockCountAll         : register(t5);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMinIdx       : register(t6);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInSeqStreamToBlockId            : register(t7);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs                  : register(t8);
+ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutDecompressedSequences  : register(u0);
+ZSTDGPU_RO_BUFFER(zstdgpu_Counters) ZstdInCounters                  : register(t0);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset1  : register(t1);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset2  : register(t2);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset3  : register(t3);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamSeqStart      : register(t4);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameBlockCountAll     : register(t5);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMinIdx   : register(t6);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInSeqStreamToBlockId        : register(t7);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs              : register(t8);
 
 typedef struct zstdgpu_FinaliseSequenceOffsets_Consts
 {
@@ -40,18 +40,18 @@ ConstantBuffer<zstdgpu_FinaliseSequenceOffsets_Consts> ZstdConstants_FinaliseSeq
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets_SRT) srt)
 {
-    srt.inoutDecompressedSequenceOffs   = ZstdInOutDecompressedSequenceOffs;
-    srt.inCounters                      = ZstdInCounters;
-    srt.inPerSeqStreamFinalOffset1      = ZstdInPerSeqStreamFinalOffset1;
-    srt.inPerSeqStreamFinalOffset2      = ZstdInPerSeqStreamFinalOffset2;
-    srt.inPerSeqStreamFinalOffset3      = ZstdInPerSeqStreamFinalOffset3;
-    srt.inPerSeqStreamSeqStart          = ZstdInPerSeqStreamSeqStart;
-    srt.inPerFrameBlockCountAll         = ZstdInPerFrameBlockCountAll;
-    srt.inPerFrameSeqStreamMinIdx       = ZstdInPerFrameSeqStreamMinIdx;
-    srt.inSeqStreamToBlockId            = ZstdInSeqStreamToBlockId;
-    srt.inDispatchArgs                  = ZstdInDispatchArgs;
-    srt.tgOffset                        = ZstdConstants_FinaliseSequenceOffsets.tgOffset;
-    srt.workItemCount                   = ZstdConstants_FinaliseSequenceOffsets.workItemCount;
+    srt.inoutDecompressedSequences  = ZstdInOutDecompressedSequences;
+    srt.inCounters                  = ZstdInCounters;
+    srt.inPerSeqStreamFinalOffset1  = ZstdInPerSeqStreamFinalOffset1;
+    srt.inPerSeqStreamFinalOffset2  = ZstdInPerSeqStreamFinalOffset2;
+    srt.inPerSeqStreamFinalOffset3  = ZstdInPerSeqStreamFinalOffset3;
+    srt.inPerSeqStreamSeqStart      = ZstdInPerSeqStreamSeqStart;
+    srt.inPerFrameBlockCountAll     = ZstdInPerFrameBlockCountAll;
+    srt.inPerFrameSeqStreamMinIdx   = ZstdInPerFrameSeqStreamMinIdx;
+    srt.inSeqStreamToBlockId        = ZstdInSeqStreamToBlockId;
+    srt.inDispatchArgs              = ZstdInDispatchArgs;
+    srt.tgOffset                    = ZstdConstants_FinaliseSequenceOffsets.tgOffset;
+    srt.workItemCount               = ZstdConstants_FinaliseSequenceOffsets.workItemCount;
     // fixup code for executeIndirectWorkaround
     ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
     {
@@ -67,18 +67,18 @@ static void zstdgpu_Srt_Fill(zstdgpu_FinaliseSequenceOffsets_SRT &srt, const zst
                              uint32_t     tgOffset,
                              uint32_t     workItemCount)
 {
-    srt.inoutDecompressedSequenceOffs   = cpuRes.DecompressedSequenceOffs;
-    srt.inCounters                      = cpuRes.Counters;
-    srt.inPerSeqStreamFinalOffset1      = cpuRes.PerSeqStreamFinalOffset1;
-    srt.inPerSeqStreamFinalOffset2      = cpuRes.PerSeqStreamFinalOffset2;
-    srt.inPerSeqStreamFinalOffset3      = cpuRes.PerSeqStreamFinalOffset3;
-    srt.inPerSeqStreamSeqStart          = cpuRes.PerSeqStreamSeqStart;
-    srt.inPerFrameBlockCountAll         = cpuRes.PerFrameBlockCountAll;
-    srt.inPerFrameSeqStreamMinIdx       = cpuRes.PerFrameSeqStreamMinIdx;
-    srt.inSeqStreamToBlockId            = cpuRes.SeqStreamToBlockId;
-    srt.inDispatchArgs                  = cpuRes.DispatchArgs;
-    srt.tgOffset                        = tgOffset;
-    srt.workItemCount                   = workItemCount;
+    srt.inoutDecompressedSequences  = cpuRes.DecompressedSequences;
+    srt.inCounters                  = cpuRes.Counters;
+    srt.inPerSeqStreamFinalOffset1  = cpuRes.PerSeqStreamFinalOffset1;
+    srt.inPerSeqStreamFinalOffset2  = cpuRes.PerSeqStreamFinalOffset2;
+    srt.inPerSeqStreamFinalOffset3  = cpuRes.PerSeqStreamFinalOffset3;
+    srt.inPerSeqStreamSeqStart      = cpuRes.PerSeqStreamSeqStart;
+    srt.inPerFrameBlockCountAll     = cpuRes.PerFrameBlockCountAll;
+    srt.inPerFrameSeqStreamMinIdx   = cpuRes.PerFrameSeqStreamMinIdx;
+    srt.inSeqStreamToBlockId        = cpuRes.SeqStreamToBlockId;
+    srt.inDispatchArgs              = cpuRes.DispatchArgs;
+    srt.tgOffset                    = tgOffset;
+    srt.workItemCount               = workItemCount;
 }
 
 #endif

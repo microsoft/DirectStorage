@@ -261,6 +261,28 @@ static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
 static const uint32_t kzstdgpu_MinMatchLength = 3;
 
 /**
+ *  Layout of one decoded sequence record in `DecompressedSequences`.
+ *
+ *  Sequences are stored as interleaved records (AoS) rather than as three parallel arrays (SoA).
+ *  The record address is a pure function of the global sequence index, so a record can be placed
+ *  at a fixed stride from either end of a buffer without knowing the total sequence count. That
+ *  is the property a merged literal/sequence arena needs: literals grow up from the base while
+ *  sequence records occupy the top, with no shared allocation cursor and therefore no ordering
+ *  dependency between the (deliberately overlapping) literal and sequence dispatches.
+ */
+static const uint32_t kzstdgpu_SeqRecordDwordCount = 3;
+static const uint32_t kzstdgpu_SeqRecordDword_LLen = 0;
+static const uint32_t kzstdgpu_SeqRecordDword_MLen = 1;
+static const uint32_t kzstdgpu_SeqRecordDword_Offs = 2;
+
+/** Dword index of sequence `seqIdx`'s record within `DecompressedSequences`. */
+#define zstdgpu_SeqRecordBase(seqIdx) ((seqIdx) * kzstdgpu_SeqRecordDwordCount)
+
+#define zstdgpu_SeqRecordLLen(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_LLen)
+#define zstdgpu_SeqRecordMLen(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_MLen)
+#define zstdgpu_SeqRecordOffs(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_Offs)
+
+/**
  *  Ceiling on a single stage's scratch allocation. A request above this is reported as an invalid
  *  argument at sizing time -- where the cause is still known -- instead of failing later inside
  *  ID3D12Device::CreateHeap with an uninformative E_INVALIDARG.

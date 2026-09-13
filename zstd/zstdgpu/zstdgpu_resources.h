@@ -60,9 +60,7 @@
 #define ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()                                                 \
     ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          )   \
     \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceLLen      )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceMLen      )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceOffs      )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequences         )   \
     \
     ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        )   \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
@@ -388,9 +386,7 @@ static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
     const uint32_t UnCompressedFramesRefs_Count     = uncompressedFrameCount;
 
-    const uint32_t DecompressedSequenceLLen_Count   = sequencesCount;
-    const uint32_t DecompressedSequenceMLen_Count   = DecompressedSequenceLLen_Count;
-    const uint32_t DecompressedSequenceOffs_Count   = DecompressedSequenceLLen_Count;
+    const uint32_t DecompressedSequences_Count      = sequencesCount * kzstdgpu_SeqRecordDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
 }

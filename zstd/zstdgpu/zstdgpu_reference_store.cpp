@@ -542,28 +542,19 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
     }
 #endif
 
-    if (seqOffs + sequenceCount > GZstdInfo.DecompressedSequenceLLen_Count)
+    if (zstdgpu_SeqRecordBase(seqOffs + sequenceCount) > GZstdInfo.DecompressedSequences_Count)
     {
         const uint32_t DecompressedSequence_Count_New = (seqOffs + sequenceCount) << 1u;
-        uint32_t *DecompressedSequenceLLen_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceLLen[0]));
-        uint32_t *DecompressedSequenceOffs_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceOffs[0]));
-        uint32_t *DecompressedSequenceMLen_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceMLen[0]));
+        const uint32_t DecompressedSequences_DwordCount_New = zstdgpu_SeqRecordBase(DecompressedSequence_Count_New);
+        uint32_t *DecompressedSequences_New = (uint32_t *)alloc(DecompressedSequences_DwordCount_New * sizeof(GZstd.DecompressedSequences[0]));
 
-        memcpy(DecompressedSequenceLLen_New, GZstd.DecompressedSequenceLLen, seqOffs * sizeof(GZstd.DecompressedSequenceLLen[0]));
-        memcpy(DecompressedSequenceOffs_New, GZstd.DecompressedSequenceOffs, seqOffs * sizeof(GZstd.DecompressedSequenceOffs[0]));
-        memcpy(DecompressedSequenceMLen_New, GZstd.DecompressedSequenceMLen, seqOffs * sizeof(GZstd.DecompressedSequenceMLen[0]));
+        memcpy(DecompressedSequences_New, GZstd.DecompressedSequences, zstdgpu_SeqRecordBase(seqOffs) * sizeof(GZstd.DecompressedSequences[0]));
 
-        dealloc(GZstd.DecompressedSequenceLLen);
-        dealloc(GZstd.DecompressedSequenceOffs);
-        dealloc(GZstd.DecompressedSequenceMLen);
+        dealloc(GZstd.DecompressedSequences);
 
-        GZstd.DecompressedSequenceLLen = DecompressedSequenceLLen_New;
-        GZstd.DecompressedSequenceOffs = DecompressedSequenceOffs_New;
-        GZstd.DecompressedSequenceMLen = DecompressedSequenceMLen_New;
+        GZstd.DecompressedSequences = DecompressedSequences_New;
 
-        GZstdInfo.DecompressedSequenceLLen_Count = DecompressedSequence_Count_New;
-        GZstdInfo.DecompressedSequenceOffs_Count = DecompressedSequence_Count_New;
-        GZstdInfo.DecompressedSequenceMLen_Count = DecompressedSequence_Count_New;
+        GZstdInfo.DecompressedSequences_Count = DecompressedSequences_DwordCount_New;
     }
 
     uint32_t mlenSum = 0;
@@ -575,12 +566,12 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 
         mlenSum += mlen;
 
-        GZstd.DecompressedSequenceLLen[seqOffs + seqId] = llen;
-        GZstd.DecompressedSequenceMLen[seqOffs + seqId] = mlen;
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = offs;
+        GZstd.DecompressedSequences[zstdgpu_SeqRecordLLen(seqOffs + seqId)] = llen;
+        GZstd.DecompressedSequences[zstdgpu_SeqRecordMLen(seqOffs + seqId)] = mlen;
+        GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + seqId)] = offs;
 
 #if ENABLE_OFFSET_PROPAGATION
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
+        GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + seqId)] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
 #endif
     }
     // NOTE(pamartis): accumulated match length are used to update the uncompressed size of compressed block
@@ -603,12 +594,12 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 #if ENABLE_OFFSET_PROPAGATION
     for (uint32_t seqId = 0; seqId < sequenceCount; ++seqId)
     {
-        uint32_t offset = GZstd.DecompressedSequenceOffs[seqOffs + seqId];
+        uint32_t offset = GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + seqId)];
         if (zstdgpu_DecodeSeqRepeatOffsetEncoded(offset))
         {
-            GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
+            GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + seqId)] = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
         }
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] -= 3u;
+        GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + seqId)] -= 3u;
     }
 #endif
     GRecentOffset1 = recent1;
@@ -634,7 +625,7 @@ void zstdgpu_ReferenceStore_Report_ResolvedOffset(size_t offset)
     const uint32_t i = GSequenceStreamCount - 1u;
     const uint32_t seqOffs = GZstd.PerSeqStreamSeqStart[i];
 #if ENABLE_OFFSET_PROPAGATION
-    ZSTDGPU_ASSERT(GZstd.DecompressedSequenceOffs[seqOffs + GResolvedOffsetIndex] == offset);
+    ZSTDGPU_ASSERT(GZstd.DecompressedSequences[zstdgpu_SeqRecordOffs(seqOffs + GResolvedOffsetIndex)] == offset);
 #else
     (void)offset;
 #endif
@@ -1124,13 +1115,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
                 if (refSeqCount != tstSeqCount)
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-                if (0 != memcmp(&refData->DecompressedSequenceLLen[refSeqOffs], &tstData->DecompressedSequenceLLen[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceLLen[0])))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (0 != memcmp(&refData->DecompressedSequenceMLen[refSeqOffs], &tstData->DecompressedSequenceMLen[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceMLen[0])))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (0 != memcmp(&refData->DecompressedSequenceOffs[refSeqOffs], &tstData->DecompressedSequenceOffs[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceOffs[0])))
+                // One contiguous compare now covers literal length, match length and offset,
+                // since the three fields are interleaved into a single record per sequence.
+                if (0 != memcmp(&refData->DecompressedSequences[zstdgpu_SeqRecordBase(refSeqOffs)], &tstData->DecompressedSequences[zstdgpu_SeqRecordBase(tstSeqOffs)], zstdgpu_SeqRecordBase(refSeqCount) * sizeof(refData->DecompressedSequences[0])))
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }
 

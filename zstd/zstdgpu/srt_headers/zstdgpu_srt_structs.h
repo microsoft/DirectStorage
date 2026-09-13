@@ -161,9 +161,7 @@ typedef struct zstdgpu_DecodeHuffmanWeights_SRT
 
 typedef struct zstdgpu_DecompressSequences_SRT
 {
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequenceLLen;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequenceMLen;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequenceOffs;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequences;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutBlockSizePrefix;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerSeqStreamFinalOffset1;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerSeqStreamFinalOffset2;
@@ -188,7 +186,7 @@ typedef struct zstdgpu_DecompressSequences_SRT
 
 typedef struct zstdgpu_FinaliseSequenceOffsets_SRT
 {
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequenceOffs;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedSequences;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamFinalOffset1;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamFinalOffset2;
@@ -238,9 +236,7 @@ typedef struct zstdgpu_ExecuteSequences_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountCMP;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockSizePrefix;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockDestOffs;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inDecompressedSequenceLLen;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inDecompressedSequenceMLen;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inDecompressedSequenceOffs;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDecompressedSequences;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inGlobalBlockIndexPerCmpBlock;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamSeqStart;
     ZSTDGPU_RO_BUFFER(zstdgpu_CompressedBlockData)          inCompressedBlocks;

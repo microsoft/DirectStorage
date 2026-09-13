@@ -3347,13 +3347,13 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavSync(barriers, bc + 6, req->resData.gpuOnly.PerSeqStreamFinalOffset2Lookback);
         setResourceUavSync(barriers, bc + 7, req->resData.gpuOnly.PerSeqStreamFinalOffset3Lookback);
         // last written/updated by [Decompress Sequences]
-        // next written/updated by [Finalise Sequence Offsets]
-        setResourceUavSync(barriers, bc + 8, req->resData.gpuOnly.DecompressedSequenceOffs);
-        // last written/updated by [Decompress Sequences]
-        // next read by [Execute Sequences]
-        setResourceUavToSrvSync(barriers, bc + 9, req->resData.gpuOnly.DecompressedSequenceLLen);
-        setResourceUavToSrvSync(barriers, bc + 10, req->resData.gpuOnly.DecompressedSequenceMLen);
-        bc += 11;
+        // next written/updated by [Finalise Sequence Offsets] (offset field), then read by
+        // [Execute Sequences]. Literal lengths, match lengths and offsets now share one resource,
+        // so this stays a UAV barrier here and is transitioned to SRV after [Finalise Sequence
+        // Offsets] - the last writer - rather than being split per field as it was when these
+        // were three separate buffers.
+        setResourceUavSync(barriers, bc + 8, req->resData.gpuOnly.DecompressedSequences);
+        bc += 9;
         // last written/updated by [Init Huffman Table and Decompress Literals]
         // next read by [Execute Sequences]
         {
@@ -3443,7 +3443,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         D3D12_RESOURCE_BARRIER barriers[2];
         // last written/updated by [Finalise Sequence Offsets]
         // next read by [Execute Sequences]
-        setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedSequenceOffs);
+        setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedSequences);
         // last written by [Compute Dest Block Offsets]
         // next read by [Memcpy RAW blocks, Memset RLE blocks], [Execute Sequences], and [Compute Dest Sequence Offsets]
         setResourceUavToSrvSync(barriers, 1, req->resData.gpuOnly.BlockDestOffs);

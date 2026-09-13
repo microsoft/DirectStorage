@@ -624,9 +624,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             zstdgpu_DecompressSequences_SRT srt;
             zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0, /* fseArenaStreamCount */ 0);
             srt.inCompressedData                = cpuRes.CompressedData;
-            srt.inoutDecompressedSequenceLLen   = cpuRes.DecompressedSequenceLLen;
-            srt.inoutDecompressedSequenceMLen   = cpuRes.DecompressedSequenceMLen;
-            srt.inoutDecompressedSequenceOffs   = cpuRes.DecompressedSequenceOffs;
+            srt.inoutDecompressedSequences      = cpuRes.DecompressedSequences;
             srt.inoutPerSeqStreamFinalOffset1   = cpuRes.PerSeqStreamFinalOffset1;
             srt.inoutPerSeqStreamFinalOffset2   = cpuRes.PerSeqStreamFinalOffset2;
             srt.inoutPerSeqStreamFinalOffset3   = cpuRes.PerSeqStreamFinalOffset3;
@@ -681,7 +679,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
         {
             zstdgpu_FinaliseSequenceOffsets_SRT srt;
             zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ gpuReadbackRes.Counters->Seq_Streams_DecodedItems);
-            srt.inoutDecompressedSequenceOffs = cpuRes.DecompressedSequenceOffs;
+            srt.inoutDecompressedSequences = cpuRes.DecompressedSequences;
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams_DecodedItems; ++i)
             {
                 zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
@@ -693,21 +691,15 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             // NOTE(pamartis): After CPU data is computed, validate it against reference, and if it's broken, likely the inputs are wrong
             // NOTE(pamartis): Make sure that validation against reference see the same blocks as when validating GPU data
             uint32_t *CompressedData                = gpuReadbackRes.CompressedData;
-            uint32_t *DecompressedSequenceLLen      = gpuReadbackRes.DecompressedSequenceLLen;
-            uint32_t *DecompressedSequenceMLen      = gpuReadbackRes.DecompressedSequenceMLen;
-            uint32_t *DecompressedSequenceOffs      = gpuReadbackRes.DecompressedSequenceOffs;
+            uint32_t *DecompressedSequencesSaved    = gpuReadbackRes.DecompressedSequences;
 
             gpuReadbackRes.CompressedData           = cpuRes.CompressedData;
-            gpuReadbackRes.DecompressedSequenceLLen = cpuRes.DecompressedSequenceLLen;
-            gpuReadbackRes.DecompressedSequenceMLen = cpuRes.DecompressedSequenceMLen;
-            gpuReadbackRes.DecompressedSequenceOffs = cpuRes.DecompressedSequenceOffs;
+            gpuReadbackRes.DecompressedSequences    = cpuRes.DecompressedSequences;
 
             VALIDATE(DecompressedSequences, &gpuReadbackRes);
 
             gpuReadbackRes.CompressedData           = CompressedData;
-            gpuReadbackRes.DecompressedSequenceLLen = DecompressedSequenceLLen;
-            gpuReadbackRes.DecompressedSequenceMLen = DecompressedSequenceMLen;
-            gpuReadbackRes.DecompressedSequenceOffs = DecompressedSequenceOffs;
+            gpuReadbackRes.DecompressedSequences    = DecompressedSequencesSaved;
         }
 
     }
