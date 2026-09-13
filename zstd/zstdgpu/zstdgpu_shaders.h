@@ -386,6 +386,13 @@ static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) window
             uncompSize += 256;
         }
     }
+    else
+    {
+        // Frame_Content_Size is absent (Single_Segment_flag clear and
+        // Frame_Content_Size_flag == 0). This decoder needs the decompressed
+        // size up front to allocate output, so such a frame cannot be decoded.
+        statusFlag |= kzstdgpu_FrameStatusFlag_ContentSizeAbsent;
+    }
 
     ZSTDGPU_BRANCH if (0 != singleSegmentFlag)
     {
@@ -398,8 +405,6 @@ static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) window
 }
 
 // Map the frame-header flags + window size to a per-frame HRESULT status.
-// Content-checksum-present is intentionally NOT a failure (the decoder simply skips the checksum).
-// Precedence: spec violation (reserved bit) > unsupported feature (dictionary) > resource limit (window).
 static inline uint32_t zstdgpu_FrameStatusFromHeader(uint32_t statusFlag, uint64_t windowSize)
 {
     if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ReservedBitSet))
@@ -413,6 +418,10 @@ static inline uint32_t zstdgpu_FrameStatusFromHeader(uint32_t statusFlag, uint64
     if (windowSize > (1ull << kzstdgpu_SeqOffset_Encoded_BitBase) - 1ull)
     {
         return kzstdgpu_FrameStatus_WindowTooLarge;
+    }
+    if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ContentSizeAbsent))
+    {
+        return kzstdgpu_FrameStatus_MissingContentSize;
     }
     return kzstdgpu_FrameStatus_Success;
 }
@@ -434,6 +443,15 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
     zstdgpu_ParseFrameHeader(outFrameInfo.windowSize, outFrameInfo.uncompSize, outFrameInfo.dictionary, statusFlag, bits);
 
     const uint32_t frameStatus = zstdgpu_FrameStatusFromHeader(statusFlag, outFrameInfo.windowSize);
+
+    // A frame with no declared content size cannot be decoded here (the decoder
+    // needs the size to allocate output). Report the reject status but collect no
+    // blocks so the decode stages skip it entirely. Both the count and the real
+    // pass take this early return, so per-frame block counts stay consistent.
+    ZSTDGPU_BRANCH if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ContentSizeAbsent))
+    {
+        return frameStatus;
+    }
 
     //
     // "A frame encapsulates one or multiple blocks. Each block can be

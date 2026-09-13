@@ -189,13 +189,14 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outS
 /**
  *  @brief      Sets up the caller-supplied output resources for a decompression request.
  *
- *  @param[in]  frameStatus  A pointer to an ID3D12Resource (DEFAULT heap, UAV-capable) sized to hold
- *                           one UINT32 per input frame. The GPU frame parser writes an HRESULT-formatted
- *                           status per frame: kzstdgpu_FrameStatus_Success (S_OK) when the frame header is
- *                           well-formed and the frame is accepted for decompression, or a distinct
- *                           kzstdgpu_FrameStatus_* failure HRESULT when the frame is rejected
- *                           (bad magic, reserved bit set, dictionary required, window too large).
- *                           See zstdgpu_shared_structs.h for the status code definitions.
+ *  @param[in]  inPerRequestContext     A context holding necessary state per decompression request.
+ *  @param[in]  framesMemory            A pointer to a ID3D12Resource in GPU_UPLOAD or DEFAULT heap where the compressed Zstd frames are placed.
+ *  @param[in]  framesMemorySizeInBytes The total number of bytes the block with compressed Zstd frames contains (it is fine to have a buffer with non-adjacent Zstd frames)
+ *                                      NOTE: the size must a multiple of 4 bytes
+ *  @param[in]  frames                  A pointer to a ID3D12Resource in GPU_UPLOAD or DEFAULT heap where the offset (relative to `framesMemory` start) and the size of each Zstd frame are placed in the form of `zstdgpu_OffsetAndSize` structures.
+ *  @param[in]  frameCount              The total number `zstdgpu_OffsetAndSize` structures placed `frames` buffers.
+ *  @param[in]  frameStatus             A pointer to an ID3D12Resource (DEFAULT heap, UAV-capable) sized to hold one UINT32 per input frame which receives an HRESULT of the decompression status.
+ *                                      NOTE: See zstdgpu_shared_structs.h for the status code definitions.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *framesMemory, uint32_t framesMemorySizeInBytes, struct ID3D12Resource *frames, uint32_t frameCount, struct ID3D12Resource *frameStatus);
 

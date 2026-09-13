@@ -52,3 +52,4 @@ static const uint32_t kzstdgpu_FrameStatus_NotZstdFrame          = 0xA07A0001u; 
 static const uint32_t kzstdgpu_FrameStatus_ReservedBitSet        = 0xA07A0002u; // frame header reserved bit set (spec violation)
 static const uint32_t kzstdgpu_FrameStatus_DictionaryUnsupported = 0xA07A0003u; // frame requires a dictionary (unsupported by the GPU decoder)
 static const uint32_t kzstdgpu_FrameStatus_WindowTooLarge        = 0xA07A0004u; // window size exceeds the decoder maximum
+static const uint32_t kzstdgpu_FrameStatus_MissingContentSize    = 0xA07A0005u; // frame declares no content size (the GPU decoder needs it to size output)
