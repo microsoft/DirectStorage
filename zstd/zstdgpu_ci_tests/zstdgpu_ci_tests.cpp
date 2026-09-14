@@ -535,7 +535,8 @@ static void RunDemoOnBatch(const std::string& batchName,
             << " (exit " << result.exitCode << (result.timedOut ? ", TIMED OUT" : "")
             << ") but all " << files.size() << " file(s) passed individually. This points at a "
             << "batch-level issue (concatenated size / GPU memory / list loading), not a per-file "
-            << "decode error. Consider lowering --correctness-batch-mb.\n"
+            << "decode error. Consider lowering --correctness-batch-decompressed-mb (scratch is sized from\n"
+            << "decompressed bytes) or --correctness-batch-mb.\n"
             << "Batch command: " << result.commandLine;
     }
     else
@@ -557,8 +558,17 @@ static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
     const uint64_t budgetBytes = g_testConfig.correctnessBatchMB > 0 ? static_cast<uint64_t>(g_testConfig.correctnessBatchMB) * 1024u * 1024u : UINT64_MAX;
     const size_t countCap = g_testConfig.correctnessBatchCount > 0 ? static_cast<size_t>(g_testConfig.correctnessBatchCount) : SIZE_MAX;
 
+    // The cap that actually bounds GPU scratch. Single submission sizes its
+    // literal/sequence arena from DECOMPRESSED bytes, so the compressed-byte
+    // budget above does not bound it: highly compressible content passes a
+    // small compressed budget and still decodes to multiple GB.
+    const uint64_t decompressedBudgetBytes = g_testConfig.correctnessBatchDecompressedMB > 0
+        ? static_cast<uint64_t>(g_testConfig.correctnessBatchDecompressedMB) * 1024u * 1024u
+        : UINT64_MAX;
+
     std::vector<std::string> batch;
     uint64_t batchBytes = 0;
+    uint64_t batchDecompressedBytes = 0;
     size_t batchIdx = 0;
 
     auto runBatch = [&]()
@@ -566,11 +576,16 @@ static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
         if (batch.empty()) return;
 
         std::string batchName = "Batch_" + std::to_string(batchIdx);
-        
+
+        std::cout << "[BATCH] " << batchName << " budget: " << batch.size() << " file(s), "
+                  << batchBytes << " compressed bytes, " << batchDecompressedBytes
+                  << " decompressed bytes (scratch scales with the latter)\n";
+
         RunDemoOnBatch(batchName, batch, scenarioFlags);
         ++batchIdx;
         batch.clear();
         batchBytes = 0;
+        batchDecompressedBytes = 0;
     };
 
     for (const auto& f : allFiles)
@@ -597,14 +612,24 @@ static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
         uint64_t sz = std::filesystem::file_size(f, ec);
         if (ec) sz = 0;  // unreadable size: don't let it distort the budget math
 
+        // Decompressed size drives scratch. If it cannot be determined we cannot
+        // bound the batch, so charge the whole budget and let the file run alone
+        // rather than silently under-counting it into a batch that then overflows.
+        std::string dsErr;
+        uint64_t dsz = zstdframe::GetTotalDecompressedSizeFromFile(f, &dsErr);
+        if (dsz == 0) dsz = decompressedBudgetBytes;
+
         // Process the batch if it is at the batch limits and move on to the next one
-        if (!batch.empty() && (batch.size() >= countCap || batchBytes + sz > budgetBytes))
+        if (!batch.empty() && (batch.size() >= countCap
+                               || batchBytes + sz > budgetBytes
+                               || batchDecompressedBytes + dsz > decompressedBudgetBytes))
         {
             runBatch();
         }
 
         batch.push_back(f);
         batchBytes += sz;
+        batchDecompressedBytes += dsz;
     }
 
     // Finish running the final batch

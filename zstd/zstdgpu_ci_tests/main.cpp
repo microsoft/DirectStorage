@@ -126,6 +126,12 @@ static void PrintUsage(const char* exe)
               << "                          decompressed and exceed GPU/int32 limits. A value <= 0 disables the byte cap.\n"
               << "  --correctness-batch-count <N> Secondary cap: max number of files per correctness batch\n"
               << "                          (default: 64). A value <= 0 disables the count cap (size-bounded only).\n"
+              << "  --correctness-batch-decompressed-mb <N>  Max total DECOMPRESSED size in MB of clean files\n"
+              << "                          grouped into one batched correctness run (default: 512). This is the cap\n"
+              << "                          that actually bounds GPU scratch: single-submission sizes its arena from\n"
+              << "                          decompressed bytes, so a compressed-byte cap alone cannot bound it.\n"
+              << "                          A file whose decompressed size cannot be read is given its own batch.\n"
+              << "                          A value <= 0 disables this cap.\n"
               << "  --adversarial-manifest <path>   Optional JSON manifest of known-adversarial fuzz files.\n"
               << "                                  If NOT specified, the wrapper auto-discovers the manifest at\n"
               << "                                  <content-path>/adversarial_manifest.json. If found (either way),\n"
@@ -231,6 +237,12 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
             config.correctnessBatchCount = std::atoi(argv[++i]);
             if (config.correctnessBatchCount < 0)
                 config.correctnessBatchCount = 0;   // <= 0 = no count cap (size-only batching)
+        }
+        else if (std::strcmp(argv[i], "--correctness-batch-decompressed-mb") == 0 && i + 1 < argc)
+        {
+            config.correctnessBatchDecompressedMB = std::atoi(argv[++i]);
+            if (config.correctnessBatchDecompressedMB < 0)
+                config.correctnessBatchDecompressedMB = 0;   // <= 0 = no decompressed cap
         }
         else if (std::strcmp(argv[i], "--help-ci") == 0)
         {
