@@ -1615,6 +1615,19 @@ static int demoRun(void *demoCtx)
                     badArg = true;
                 }
             }
+            /*
+             *  Refuse the combinations whose reference decodes the whole frame. Without this the run
+             *  dies deep inside literal decoding on an opaque assert, and a validation flag that
+             *  reports a meaningless comparison is worse than one that refuses to run.
+             */
+            if (0 != blockLimitPerFrame && (chkCpu || chkGpu || simGpu))
+            {
+                debugPrint(L"[ERROR] '--blk-limit' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
+                           L"those compare against a reference that decodes whole frames, so the comparison is not "
+                           L"meaningful for a partially decoded frame.\n");
+                ctx->retv = 1;
+                return 0;
+            }
             if (1 == argc || badArg)
             {
                 debugPrint(L"USAGE:\n");
@@ -1639,6 +1652,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode. Uses exact block counts from the cheap block-header pre-scan plus a provable literal/sequence scratch bound derived from the decompressed size.\n");
                 debugPrint(L"\t--warmup                  [Optional] Runs a fixed warmup period (~10s) before measuring; warmup runs are excluded from the [PERF] stdout statistics.\n");
+                debugPrint(L"\t--blk-limit <count>       [Optional] Decodes only the first <count> blocks of every frame (0 = all). Cannot be combined with --chk-cpu/--chk-gpu/--sim-gpu, which compare against whole-frame references.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;

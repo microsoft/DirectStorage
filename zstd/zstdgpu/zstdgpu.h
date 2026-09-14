@@ -219,6 +219,13 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestCon
  *  than of the whole frame. Memory requirements are unaffected and remain sized for the whole frame,
  *  so a sliced decode never needs more memory than an unsliced one.
  *
+ *  With multiple frames each frame is truncated independently and its output still lands at that
+ *  frame's own destination.
+ *
+ *  NB: validating a partial decode requires a reference that truncates at the same block boundary.
+ *      Comparing against a whole-frame reference is not meaningful, so callers that validate must
+ *      leave this at 0.
+ *
  *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockLimitPerFrame);
