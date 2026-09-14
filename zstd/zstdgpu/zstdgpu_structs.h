@@ -270,16 +270,67 @@ static const uint32_t kzstdgpu_MinMatchLength = 3;
  *  and therefore no ordering dependency between the deliberately-overlapping literal and sequence
  *  dispatches. Safety reduces to the whole-batch bound
  *
- *      litBytes + kzstdgpu_ArenaGuardBytes + sequenceCount * 12  <=  arenaBytes
+ *      litBytes + kzstdgpu_ArenaGuardBytes + sequenceCount * 8  <=  arenaBytes
  *
  *  Growing sequences downwards (rather than literals downwards) is what keeps this cheap: it needs
  *  only the arena top, a constant known at sizing time, whereas the mirror image would need the
  *  total literal size, which is not known when the addresses are computed.
+ *
+ *  A record is two dwords. The three fields fit in exactly 64 bits, with nothing to spare:
+ *
+ *      llen  0..131071      17 bits   RFC 8878 maximum literals length
+ *      mlen  3..131074      17 bits   biased by -3; the minimum match is 3, so 0..131071
+ *      offs  0..0x3fffffff  30 bits   see below -- this is the *encoded* offset, not the resolved one
+ *
+ *  The offset field is 30 bits rather than the 29 a resolved offset needs (`windowSize <= 2^29 - 1`)
+ *  because records first hold the intermediate *encoded* repeat-offset form produced by
+ *  `zstdgpu_EncodeSeqRepeatOffset`: bit 29 marks "encoded", bits [28:27] carry the repeat type, and
+ *  bits [26:0] are deliberately all ones. `[Finalise Sequence Offsets]` later rewrites the field in
+ *  place with the resolved value.
+ *
+ *  `llen` and `mlen` together need 34 bits, so they cannot share one dword; `mlen` is split. `offs`
+ *  is kept wholly within dword 1's low 30 bits so that the in-place offset rewrite stays a
+ *  single-dword masked read-modify-write.
+ *
+ *      dword 0 : [16:0] llen, [31:17] biased mlen bits [14:0]
+ *      dword 1 : [29:0] offs, [31:30] biased mlen bits [16:15]
  */
-static const uint32_t kzstdgpu_SeqRecordDwordCount = 3;
-static const uint32_t kzstdgpu_SeqRecordDword_LLen = 0;
-static const uint32_t kzstdgpu_SeqRecordDword_MLen = 1;
-static const uint32_t kzstdgpu_SeqRecordDword_Offs = 2;
+static const uint32_t kzstdgpu_SeqRecordDwordCount = 2;
+static const uint32_t kzstdgpu_SeqRecordDword_0    = 0;
+static const uint32_t kzstdgpu_SeqRecordDword_1    = 1;
+
+/**
+ *  Bias applied to the match length before packing. Every sequence matches at least
+ *  `kzstdgpu_MinMatchLength` bytes, so subtracting it brings the 18-bit raw range 3..131074 into the
+ *  17 bits actually available. Bias on pack and unbias on unpack, never anywhere else -- consumers
+ *  that accumulate match lengths (block-size accounting) must see the true value.
+ */
+#define kzstdgpu_SeqMLenBias kzstdgpu_MinMatchLength
+
+#define kzstdgpu_SeqMaskLLen 0x0001ffffu
+#define kzstdgpu_SeqMaskOffs 0x3fffffffu
+
+/** Pack the two record dwords. `mlen` is the true (unbiased) match length. */
+#define zstdgpu_SeqPackDword0(llen, mlen)                                                    \
+    (((llen) & kzstdgpu_SeqMaskLLen)                                                         \
+     | ((((mlen) - kzstdgpu_SeqMLenBias) & 0x7fffu) << 17u))
+
+#define zstdgpu_SeqPackDword1(mlen, offs)                                                    \
+    (((offs) & kzstdgpu_SeqMaskOffs)                                                         \
+     | (((((mlen) - kzstdgpu_SeqMLenBias) >> 15u) & 0x3u) << 30u))
+
+/** Unpack. `zstdgpu_SeqUnpackMLen` returns the true (unbiased) match length. */
+#define zstdgpu_SeqUnpackLLen(d0)      ((d0) & kzstdgpu_SeqMaskLLen)
+#define zstdgpu_SeqUnpackMLen(d0, d1)  (((((d0) >> 17u) & 0x7fffu) | ((((d1) >> 30u) & 0x3u) << 15u)) + kzstdgpu_SeqMLenBias)
+#define zstdgpu_SeqUnpackOffs(d1)      ((d1) & kzstdgpu_SeqMaskOffs)
+
+/**
+ *  Replace the offset within an already-packed dword 1, preserving the match-length bits that share
+ *  it. `[Finalise Sequence Offsets]` resolves offsets by read-modify-writing this field, and plain
+ *  whole-dword arithmetic there would silently corrupt `mlen`'s high bits.
+ */
+#define zstdgpu_SeqReplaceOffs(d1, offs)                                                     \
+    (((d1) & ~kzstdgpu_SeqMaskOffs) | ((offs) & kzstdgpu_SeqMaskOffs))
 
 /**
  *  Slack between the top of the literal region and the lowest sequence record.
@@ -316,9 +367,8 @@ static const uint32_t kzstdgpu_ArenaGuardBytes = 64;
  */
 #define zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) ((arenaTopDwords) - ((seqIdx) + 1u) * kzstdgpu_SeqRecordDwordCount)
 
-#define zstdgpu_SeqRecordLLen(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_LLen)
-#define zstdgpu_SeqRecordMLen(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_MLen)
-#define zstdgpu_SeqRecordOffs(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_Offs)
+#define zstdgpu_SeqRecordDword0(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_0)
+#define zstdgpu_SeqRecordDword1(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_1)
 
 /**
  *  Ceiling on a single stage's scratch allocation. A request above this is reported as an invalid

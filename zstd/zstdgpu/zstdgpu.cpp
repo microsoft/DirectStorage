@@ -1497,25 +1497,38 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
 /**
  *  Arena bytes that provably suffice for ANY content decompressing to `size` bytes.
  *
- *  Per block `litRegen + 3 * nseq <= S`, so over the whole batch `lit + 3 * nseq <= size`.
- *  Multiplying by 4 gives `4 * lit + 12 * nseq <= 4 * size`, and since `lit >= 0` that implies
+ *  Per block `litRegen + 3 * nseq <= S`, so over the whole batch `lit + 3 * nseq <= size`. With a
+ *  record of `R` bytes, multiplying by `R/3` gives `(R/3) * lit + R * nseq <= (R/3) * size`, and
+ *  since `lit >= 0` and `R/3 >= 1` that implies
  *
- *      lit + 12 * nseq  <=  4 * size
+ *      lit + R * nseq  <=  (R / 3) * size
  *
  *  which is exactly the arena occupancy less the guard band and the literal region's dword
  *  rounding. Those add at most `kzstdgpu_ArenaGuardBytes + 3`, so one extra dword covers them.
  *
  *  This is the whole point of merging literals and sequences into one allocation: sizing the two
  *  regions separately has to assume `lit = size` AND `nseq = size / 3` simultaneously, which the
- *  inequality forbids, and costs 5x instead of 4x.
+ *  inequality forbids, and costs `1 + R/3` instead of `R/3`.
  *
- *  Computed in 64 bits and saturated: `4 * size` overflows a uint32 above 1 GiB, and a wrapped
- *  value would produce an arena far too small rather than a rejected request. The caller's
- *  `kzstdgpu_MaxScratchHeapByteCount` check then reports it as an unsatisfiable requirement.
+ *  `R` is derived from `kzstdgpu_SeqRecordDwordCount` rather than hard-coded, so narrowing the
+ *  record cannot leave this bound stale. At the current 8-byte record the factor is 8/3 = 2.67x.
+ *
+ *  Computed in 64 bits and saturated: `(R/3) * size` overflows a uint32 well below the 4 GiB
+ *  decompressed limit, and a wrapped value would produce an arena far too small rather than a
+ *  rejected request. The caller's `kzstdgpu_MaxScratchHeapByteCount` check then reports it as an
+ *  unsatisfiable requirement.
  */
 static uint32_t zstdgpu_DecompressedSizeToArenaByteCount(uint32_t size)
 {
-    const uint64_t bytes = (uint64_t)4u * (uint64_t)size
+    const uint64_t recordBytes = (uint64_t)kzstdgpu_SeqRecordDwordCount * (uint64_t)sizeof(uint32_t);
+
+    // Ceiling division: the bound must never round down. The result is then aligned up to a dword
+    // because the arena is also addressed through a dword (structured) view, whose size must be a
+    // whole number of elements.
+    const uint64_t bound = (recordBytes * (uint64_t)size + (uint64_t)(kzstdgpu_MinMatchLength - 1u))
+                             / (uint64_t)kzstdgpu_MinMatchLength;
+
+    const uint64_t bytes = ((bound + (uint64_t)(sizeof(uint32_t) - 1u)) & ~(uint64_t)(sizeof(uint32_t) - 1u))
                          + (uint64_t)kzstdgpu_ArenaGuardBytes
                          + (uint64_t)sizeof(uint32_t);
 

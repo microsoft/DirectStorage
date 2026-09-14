@@ -589,13 +589,13 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 
         mlenSum += mlen;
 
-        GRefSeqRecords[zstdgpu_SeqRecordLLen(GRefSeqRecordsTopDwords, seqOffs + seqId)] = llen;
-        GRefSeqRecords[zstdgpu_SeqRecordMLen(GRefSeqRecordsTopDwords, seqOffs + seqId)] = mlen;
-        GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + seqId)] = offs;
-
+        uint32_t offsStored = offs;
 #if ENABLE_OFFSET_PROPAGATION
-        GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
+        offsStored = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
 #endif
+
+        GRefSeqRecords[zstdgpu_SeqRecordDword0(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_SeqPackDword0(llen, mlen);
+        GRefSeqRecords[zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_SeqPackDword1(mlen, offsStored);
     }
     // NOTE(pamartis): accumulated match length are used to update the uncompressed size of compressed block
     zstdgpu_AppendLastBlockSize(mlenSum);
@@ -617,12 +617,16 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 #if ENABLE_OFFSET_PROPAGATION
     for (uint32_t seqId = 0; seqId < sequenceCount; ++seqId)
     {
-        uint32_t offset = GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + seqId)];
+        const uint32_t offsDword = zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + seqId);
+        const uint32_t packed = GRefSeqRecords[offsDword];
+        uint32_t offset = zstdgpu_SeqUnpackOffs(packed);
         if (zstdgpu_DecodeSeqRepeatOffsetEncoded(offset))
         {
-            GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
+            offset = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
         }
-        GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + seqId)] -= 3u;
+        offset -= 3u;
+        // Masked write-back: this dword also carries the match length's high bits.
+        GRefSeqRecords[offsDword] = zstdgpu_SeqReplaceOffs(packed, offset);
     }
 #endif
     GRecentOffset1 = recent1;
@@ -648,7 +652,7 @@ void zstdgpu_ReferenceStore_Report_ResolvedOffset(size_t offset)
     const uint32_t i = GSequenceStreamCount - 1u;
     const uint32_t seqOffs = GZstd.PerSeqStreamSeqStart[i];
 #if ENABLE_OFFSET_PROPAGATION
-    ZSTDGPU_ASSERT(GRefSeqRecords[zstdgpu_SeqRecordOffs(GRefSeqRecordsTopDwords, seqOffs + GResolvedOffsetIndex)] == offset);
+    ZSTDGPU_ASSERT(zstdgpu_SeqUnpackOffs(GRefSeqRecords[zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + GResolvedOffsetIndex)]) == offset);
 #else
     (void)offset;
 #endif

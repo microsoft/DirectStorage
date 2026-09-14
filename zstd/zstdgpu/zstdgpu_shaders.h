@@ -3240,9 +3240,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
                 ZSTDGPU_BACKWARD_BITBUF(Refill)(bitBuffer, 32u);
             }
 
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordLLen(srt.ArenaTopDwords, i)] = llen;
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordMLen(srt.ArenaTopDwords, i)] = mlen;
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, i)] = offs;
+            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword0(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword0(llen, mlen);
+            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword1(mlen, offs);
         }
 
         // Now handle the final (or only) sequence in the current block.
@@ -3261,9 +3260,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
             totalSize += llen + mlen;
             totalMLen += mlen;
 
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordLLen(srt.ArenaTopDwords, i)] = llen;
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordMLen(srt.ArenaTopDwords, i)] = mlen;
-            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, i)] = offs;
+            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword0(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword0(llen, mlen);
+            srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword1(mlen, offs);
         }
     }
 
@@ -3420,9 +3418,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
             packedFseElemMLen = ZSTDGPU_SS_FSE_MLEN(stateMLen);
         }
 
-        srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordLLen(srt.ArenaTopDwords, i)] = llen;
-        srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordMLen(srt.ArenaTopDwords, i)] = mlen;
-        srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, i)] = offs;
+        srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword0(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword0(llen, mlen);
+        srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, i)] = zstdgpu_SeqPackDword1(mlen, offs);
 
         if (isLastSeq)
         {
@@ -3899,9 +3896,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
                     const uint32_t mlen = zstdgpu_LdsLoadU32(GS_MLenCache + srcOffset);
                     const uint32_t offs = zstdgpu_LdsLoadU32(GS_OffsCache + srcOffset);
 
-                    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordLLen(srt.ArenaTopDwords, dstSeqIdx + seqIdxToStore)] = llen;
-                    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordMLen(srt.ArenaTopDwords, dstSeqIdx + seqIdxToStore)] = mlen;
-                    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, dstSeqIdx + seqIdxToStore)] = offs;
+                    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword0(srt.ArenaTopDwords, dstSeqIdx + seqIdxToStore)] = zstdgpu_SeqPackDword0(llen, mlen);
+                    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, dstSeqIdx + seqIdxToStore)] = zstdgpu_SeqPackDword1(mlen, offs);
                 }
             }
         }
@@ -3960,7 +3956,9 @@ static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstd
     if (seqIdx >= seqCnt)
         return;
 
-    uint32_t offset = srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, seqIdx)];
+    const uint32_t offsDword = zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, seqIdx);
+    uint32_t packed = srt.inoutDecompressedLiterals_Seqs[offsDword];
+    uint32_t offset = zstdgpu_SeqUnpackOffs(packed);
 
     // NOTE(pamartis): during "Sequence Decoding" we encode offsets so that they are either:
     //      - actual relative offsets (offset "N" means "-N" bytes relative to the current position in the output stream) with extra "+3" encoding.
@@ -3989,7 +3987,9 @@ static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstd
         offset = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, offset1, offset2, offset3);
     }
     offset -= 3u;
-    srt.inoutDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, seqIdx)] = offset;
+    // Masked write-back: the top two bits of this dword carry the match length, so plain
+    // whole-dword arithmetic here would silently corrupt it.
+    srt.inoutDecompressedLiterals_Seqs[offsDword] = zstdgpu_SeqReplaceOffs(packed, offset);
 }
 
 struct zstdgpu_Sequence
@@ -4002,9 +4002,11 @@ struct zstdgpu_Sequence
 static zstdgpu_Sequence zstdgpu_LoadSequence(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequences_SRT) srt, uint32_t seqIdx)
 {
     zstdgpu_Sequence seq;
-    seq.mlen = srt.inDecompressedLiterals_Seqs[zstdgpu_SeqRecordMLen(srt.ArenaTopDwords, seqIdx)];
-    seq.llen = srt.inDecompressedLiterals_Seqs[zstdgpu_SeqRecordLLen(srt.ArenaTopDwords, seqIdx)];
-    seq.offs = srt.inDecompressedLiterals_Seqs[zstdgpu_SeqRecordOffs(srt.ArenaTopDwords, seqIdx)];
+    const uint32_t d0 = srt.inDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword0(srt.ArenaTopDwords, seqIdx)];
+    const uint32_t d1 = srt.inDecompressedLiterals_Seqs[zstdgpu_SeqRecordDword1(srt.ArenaTopDwords, seqIdx)];
+    seq.mlen = zstdgpu_SeqUnpackMLen(d0, d1);
+    seq.llen = zstdgpu_SeqUnpackLLen(d0);
+    seq.offs = zstdgpu_SeqUnpackOffs(d1);
     return seq;
 }
 
