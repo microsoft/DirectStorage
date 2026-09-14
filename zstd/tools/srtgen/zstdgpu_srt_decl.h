@@ -149,6 +149,7 @@ ZSTDGPU_SRT_BEGIN(ParseFrames, Direct)
     ZSTDGPU_SRT_CONST(uint32_t                              , frameCount                    )
     ZSTDGPU_SRT_CONST(uint32_t                              , compressedBufferSizeInBytes   )
     ZSTDGPU_SRT_CONST(uint32_t                              , countBlocksOnly               )
+    ZSTDGPU_SRT_CONST(uint32_t                              , blockLimitPerFrame            )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(Memset, Indirect)

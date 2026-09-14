@@ -206,6 +206,24 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
+ *  @brief      Decode only the first `blockLimitPerFrame` blocks of every frame. 0 (the default)
+ *              means the whole frame.
+ *
+ *  This is the prefix case of intra-frame slicing. A slice that starts at block 0 needs no carried
+ *  state: its output cursor is 0 and its repeat offsets are the frame's initial ones. Resuming at a
+ *  later block additionally requires both to be carried in from the preceding slice, which this
+ *  entry point does not provide.
+ *
+ *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
+ *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
+ *  than of the whole frame. Memory requirements are unaffected and remain sized for the whole frame,
+ *  so a sliced decode never needs more memory than an unsliced one.
+ *
+ *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockLimitPerFrame);
+
+/**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.
  *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 1 uses these counts instead of
  *              reading from GPU counter readback, enabling stages 0 and 1 to be recorded into

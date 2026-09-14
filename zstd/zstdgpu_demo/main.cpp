@@ -812,7 +812,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* blockLimitPerFrame, the CPU reference always decodes whole frames */ 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -875,7 +875,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* blockLimitPerFrame, the CPU reference always decodes whole frames */ 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -1426,6 +1426,7 @@ static int demoRun(void *demoCtx)
     uint32_t minFrame = 0;
     uint32_t maxFrame = ~0u;
     uint32_t frameBatchCount = ~0u; // ~0u => one batch spanning the whole working set
+    uint32_t blockLimitPerFrame = 0; // 0 => decode every block of every frame
     uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
@@ -1441,6 +1442,7 @@ static int demoRun(void *demoCtx)
             bool nextMinFrame = false;
             bool nextMaxFrame = false;
             bool nextFrameBatchCount = false;
+    bool nextBlockLimit      = false;
             bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
@@ -1472,7 +1474,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1494,6 +1496,8 @@ static int demoRun(void *demoCtx)
                             frameBatchCount = value;
                         else if (nextZstdOffs)
                             zstdOffs = value;
+                        else if (nextBlockLimit)
+                            blockLimitPerFrame = value;
                     }
 
                     nextRepCount = false;
@@ -1502,6 +1506,7 @@ static int demoRun(void *demoCtx)
                     nextMaxFrame = false;
                     nextFrameBatchCount = false;
                     nextZstdOffs = false;
+                    nextBlockLimit = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -1576,6 +1581,10 @@ static int demoRun(void *demoCtx)
                 else if (0 == wcscmp(argv[argi], L"--frame-batch-count"))
                 {
                     nextFrameBatchCount = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--blk-limit"))
+                {
+                    nextBlockLimit = true;
                 }
                 else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
                 {
@@ -1949,6 +1958,7 @@ static int demoRun(void *demoCtx)
         {
             zstdgpu_SetupAllStageSubmission(perRequestContext);
         }
+        zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockLimitPerFrame);
         if (blkCnt)
         {
             // See the batched path below: the library rejects an all-zero block
@@ -2079,6 +2089,7 @@ static int demoRun(void *demoCtx)
             {
                 zstdgpu_SetupAllStageSubmission(perRequestContext);
             }
+            zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockLimitPerFrame);
             if (blkCnt)
             {
                 // A batch of only undecodable frames (e.g. bad magic) collects no

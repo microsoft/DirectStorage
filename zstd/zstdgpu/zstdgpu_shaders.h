@@ -437,7 +437,8 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
                                                   ZSTDGPU_RW_BUFFER(uint32_t) outRawBlockSizes,
                                                   ZSTDGPU_RW_BUFFER(uint32_t) outRleBlockSizes,
                                                   ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer) bits,
-                                                  uint32_t outputBlockInfo)
+                                                  uint32_t outputBlockInfo,
+                                                  uint32_t blockLimit)
 {
     uint32_t statusFlag;
     zstdgpu_ParseFrameHeader(outFrameInfo.windowSize, outFrameInfo.uncompSize, outFrameInfo.dictionary, statusFlag, bits);
@@ -462,6 +463,17 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
     // decompressed without waiting for its successor, allowing streaming
     // operations."
     uint32_t lastBlock = 0;
+
+    /*
+     *  Ordinal of the block about to be parsed, counted from the start of the frame and independent
+     *  of the per-type output cursors below. `blockLimit` of 0 means "the whole frame"; otherwise
+     *  only blocks `[0, blockLimit)` are emitted.
+     *
+     *  The walk itself always runs to the end of the frame. Block boundaries are only discoverable
+     *  sequentially, so stopping early would save no parsing -- and the loop's termination condition
+     *  is the last-block flag, which lives in the stream rather than in any count we hold.
+     */
+    uint32_t blockOrdinal = 0;
     do
     {
         // "Last_Block
@@ -494,7 +506,16 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
             zstdgpu_Forward_BitBuffer_Skip(bits, blockSize);
         }
 
-        if (0 != outputBlockInfo)
+        /*
+         *  A block outside the window is parsed (its boundary is needed to reach the next one) but
+         *  contributes nothing: no emitted record, and no advance of the per-type cursors, which
+         *  double as output indices. Advancing them would leave gaps that the consuming passes read
+         *  as uninitialised blocks.
+         */
+        const uint32_t inWindow = ((0u == blockLimit) || (blockOrdinal < blockLimit)) ? 1u : 0u;
+        ++blockOrdinal;
+
+        if (0 != outputBlockInfo && 0 != inWindow)
         {
             const uint32_t blockIndex = outFrameInfo.rawBlockStart
                                       + outFrameInfo.rleBlockStart
@@ -532,18 +553,18 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
         }
 
         // `Raw_Block` - this is an uncompressed block. `Block_Content` contains `Block_Size` bytes.
-        outFrameInfo.rawBlockStart += (isRaw) ? 1 : 0;
+        outFrameInfo.rawBlockStart += (isRaw && 0 != inWindow) ? 1 : 0;
 
         // `RLE_Block` - this is a single byte, repeated `Block_Size` times. `Block_Content` consists of a single byte.
         // On the decompression side, this byte must be repeated `Block_Size` times.
-        outFrameInfo.rleBlockStart += (isRle) ? 1 : 0;
+        outFrameInfo.rleBlockStart += (isRle && 0 != inWindow) ? 1 : 0;
 
         // `Compressed_Block` - this is a Zstandard compressed block. `Block_Size` is the length of `Block_Content`, the compressed data.
         // The decompressed size is not known, but its maximum possible value is guaranteed (see below).
-        outFrameInfo.cmpBlockStart += (isCmp) ? 1 : 0;
+        outFrameInfo.cmpBlockStart += (isCmp && 0 != inWindow) ? 1 : 0;
 
-        outFrameInfo.rawBlockBytesStart += (isRaw) ? blockSize : 0;
-        outFrameInfo.rleBlockBytesStart += (isRle) ? blockSize : 0;
+        outFrameInfo.rawBlockBytesStart += (isRaw && 0 != inWindow) ? blockSize : 0;
+        outFrameInfo.rleBlockBytesStart += (isRle && 0 != inWindow) ? blockSize : 0;
     }
     while (0 == lastBlock);
 
@@ -604,7 +625,8 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 srt.inoutRawBlockSizePrefix,
                 srt.inoutRleBlockSizePrefix,
                 bits,
-                srt.countBlocksOnly > 0 ? 0u : 1u
+                srt.countBlocksOnly > 0 ? 0u : 1u,
+                srt.blockLimitPerFrame
             );
 
             if (srt.countBlocksOnly > 0)

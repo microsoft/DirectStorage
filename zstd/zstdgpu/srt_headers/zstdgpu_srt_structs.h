@@ -37,6 +37,7 @@ typedef struct zstdgpu_ParseFrames_SRT
     uint32_t                                                frameCount;
     uint32_t                                                compressedBufferSizeInBytes;
     uint32_t                                                countBlocksOnly;
+    uint32_t                                                blockLimitPerFrame;
 } zstdgpu_ParseFrames_SRT;
 
 typedef struct zstdgpu_Memset_SRT

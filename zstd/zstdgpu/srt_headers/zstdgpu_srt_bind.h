@@ -832,7 +832,7 @@ static void zstdgpu_Bind_MemsetMemcpy_MemsetRLE_Stage2(ID3D12GraphicsCommandList
     cmdList->SetComputeRoot32BitConstant(8 /* Consts */, flags, 2 /* flags */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly)
+static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t blockLimitPerFrame)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -840,9 +840,10 @@ static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameCount, 0 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, compressedBufferSizeInBytes, 1 /* compressedBufferSizeInBytes */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, countBlocksOnly, 2 /* countBlocksOnly */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockLimitPerFrame, 3 /* blockLimitPerFrame */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly)
+static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t blockLimitPerFrame)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -850,6 +851,7 @@ static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameCount, 0 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, compressedBufferSizeInBytes, 1 /* compressedBufferSizeInBytes */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, countBlocksOnly, 2 /* countBlocksOnly */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockLimitPerFrame, 3 /* blockLimitPerFrame */);
 }
 
 static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t streamsPerGroup)
