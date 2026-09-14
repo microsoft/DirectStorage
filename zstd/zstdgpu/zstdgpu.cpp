@@ -2186,6 +2186,26 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         uint64_t dfltP, upldP, rdbkP;
         zstdgpu_GetAllStageGpuMemoryRequirementInternal(&dflt, &upld, &rdbk, req);
 
+        /*
+         *  The same ceiling the two public sizing entry points enforce (`:1586`, `:1659`).
+         *
+         *  This path allocates internally and so never calls either of them, which left the
+         *  single-submission internal-memory path with NO backstop for the saturating arena bound.
+         *  That is not merely an uninformative-error problem: above roughly 1.6 GB decompressed
+         *  `zstdgpu_DecompressedSizeToArenaByteCount` saturates to UINT32_MAX, i.e. it reports an
+         *  arena SMALLER than the content provably needs. If the oversized heap then happened to be
+         *  allocatable, the joint occupancy predicate would fire and silently skip the predicated
+         *  work -- wrong output with a success exit code, exactly the failure this whole effort
+         *  exists to eliminate. Rejecting here keeps saturation loud.
+         */
+        if (dflt > kzstdgpu_MaxScratchHeapByteCount)
+        {
+            ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
+                            "supported heap size. Reduce the batch size (fewer frames per request), "
+                            "or use staged submission so scratch can be sized from actual GPU counters.");
+            return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+        }
+
         dfltP = req->resData.gpuOnly_ByteCount[0]
               + req->resData.gpuOnly_ByteCount[1]
               + req->resData.gpuOnly_ByteCount[2];
