@@ -38,11 +38,12 @@ typedef struct zstdgpu_DecompressSequences_Consts
     uint32_t    tgOffset;
     uint32_t    workItemCount;
     uint32_t    fseArenaStreamCount;
+    uint32_t    ArenaTopDwords;
 } zstdgpu_DecompressSequences_Consts;
 
 ConstantBuffer<zstdgpu_DecompressSequences_Consts> ZstdConstants_DecompressSequences : register(b0);
 
-#define ZSTDGPU_SRT_RS_DecompressSequences ZSTDGPU_SRT_RS_BIND_GROUP_SequenceOutputs ", " ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", SRV(t8)" ", SRV(t9)" ", UAV(u0)" ", SRV(t10)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_DecompressSequences ZSTDGPU_SRT_RS_BIND_GROUP_SequenceOutputs ", " ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", SRV(t8)" ", SRV(t9)" ", UAV(u0)" ", SRV(t10)" ", RootConstants(b0, num32BitConstants=4)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt)
 {
@@ -64,6 +65,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT
     srt.tgOffset                = ZstdConstants_DecompressSequences.tgOffset;
     srt.workItemCount           = ZstdConstants_DecompressSequences.workItemCount;
     srt.fseArenaStreamCount     = ZstdConstants_DecompressSequences.fseArenaStreamCount;
+    srt.ArenaTopDwords          = ZstdConstants_DecompressSequences.ArenaTopDwords;
     // fixup code for executeIndirectWorkaround
     ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
     {
@@ -78,7 +80,8 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT
 static void zstdgpu_Srt_Fill(zstdgpu_DecompressSequences_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
                              uint32_t     tgOffset,
                              uint32_t     workItemCount,
-                             uint32_t     fseArenaStreamCount)
+                             uint32_t     fseArenaStreamCount,
+                             uint32_t     ArenaTopDwords)
 {
     zstdgpu_Srt_FillBindGroup_SequenceOutputs(srt, cpuRes);
     zstdgpu_Srt_FillBindGroup_FseProbsRead(srt, cpuRes);
@@ -98,6 +101,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_DecompressSequences_SRT &srt, const zstdgpu
     srt.tgOffset                = tgOffset;
     srt.workItemCount           = workItemCount;
     srt.fseArenaStreamCount     = fseArenaStreamCount;
+    srt.ArenaTopDwords          = ArenaTopDwords;
 }
 
 #endif

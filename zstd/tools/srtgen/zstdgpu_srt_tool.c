@@ -1216,7 +1216,11 @@ static void emitSrtHeader(const char *dir, int srtIdx)
         }
         else
         {
-            sb_Fmt(b, "cpuRes.%s", nameToCStr(points[i].name));
+            /** See emitHLSLResourceAssignment: an aliased view needs a cast on the CPU side. */
+            if (0 != strcmp("", nameToCStr(points[i].asfx)))
+                sb_Fmt(b, "(%s *)cpuRes.%s", nameToCStr(points[i].dataType), nameToCStr(points[i].name));
+            else
+                sb_Fmt(b, "cpuRes.%s", nameToCStr(points[i].name));
         }
         sb_StrLitEoL(b, ";");
     }

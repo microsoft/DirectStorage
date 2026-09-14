@@ -439,7 +439,7 @@ static const int16_t kzstdgpuFseProbsDefault[] =
 #include "srt_headers/ZstdGpuSrt_DecompressSequences.h"
 #include "srt_headers/ZstdGpuSrt_FinaliseSequenceOffsets.h"
 
-#define VALIDATE(name, data) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(data))
+#define VALIDATE(name, ...) ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(Validate_Success) == zstdgpu_ReferenceStore_Validate_##name(__VA_ARGS__))
 
 
 static void zstdgpu_Test_DecompressHuffmanWeights(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, bool chkGpu, bool simGpu)
@@ -602,7 +602,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
     }
 }
 
-static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, bool chkGpu, bool simGpu)
+static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, zstdgpu_ResourceDataCpu & gpuReadbackRes, uint32_t zstdDataBufferSize, uint32_t cpuArenaTopDwords, uint32_t gpuArenaTopDwords, bool chkGpu, bool simGpu)
 {
     ZSTDGPU_UNUSED(cpuRes);
     ZSTDGPU_UNUSED(gpuReadbackRes);
@@ -613,18 +613,22 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
     {
         uint32_t* tmp = gpuReadbackRes.CompressedData;
         gpuReadbackRes.CompressedData = cpuRes.CompressedData;
-        VALIDATE(DecompressedSequences, &gpuReadbackRes);
+        VALIDATE(DecompressedSequences, &gpuReadbackRes, gpuArenaTopDwords);
         gpuReadbackRes.CompressedData = tmp;
     }
 
     if (simGpu)
     {
+        // A zero top would wrap the top-relative record addressing into garbage rather than
+        // failing, so require the CPU reference arena to actually have been sized ('--chk-cpu').
+        ZSTDGPU_ASSERT(0 != cpuArenaTopDwords);
+
         // NOTE(pamartis): When GPU output data is potentially broken, compute it on CPU (to debug) using same inputs as on GPU
         {
             zstdgpu_DecompressSequences_SRT srt;
-            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0, /* fseArenaStreamCount */ 0);
+            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0, /* fseArenaStreamCount */ 0, cpuArenaTopDwords);
             srt.inCompressedData                = cpuRes.CompressedData;
-            srt.inoutDecompressedSequences      = cpuRes.DecompressedSequences;
+            srt.inoutDecompressedLiterals_Seqs  = (uint32_t *)cpuRes.DecompressedLiterals;
             srt.inoutPerSeqStreamFinalOffset1   = cpuRes.PerSeqStreamFinalOffset1;
             srt.inoutPerSeqStreamFinalOffset2   = cpuRes.PerSeqStreamFinalOffset2;
             srt.inoutPerSeqStreamFinalOffset3   = cpuRes.PerSeqStreamFinalOffset3;
@@ -678,8 +682,8 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
 
         {
             zstdgpu_FinaliseSequenceOffsets_SRT srt;
-            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ gpuReadbackRes.Counters->Seq_Streams_DecodedItems);
-            srt.inoutDecompressedSequences = cpuRes.DecompressedSequences;
+            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ gpuReadbackRes.Counters->Seq_Streams_DecodedItems, cpuArenaTopDwords);
+            srt.inoutDecompressedLiterals_Seqs = (uint32_t *)cpuRes.DecompressedLiterals;
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams_DecodedItems; ++i)
             {
                 zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
@@ -690,16 +694,19 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
         {
             // NOTE(pamartis): After CPU data is computed, validate it against reference, and if it's broken, likely the inputs are wrong
             // NOTE(pamartis): Make sure that validation against reference see the same blocks as when validating GPU data
+            // Sequence records now live inside the shared literal/sequence arena, so it is the
+            // arena pointer that has to be swapped in - and the CPU arena's own top that has to be
+            // used to locate records within it.
             uint32_t *CompressedData                = gpuReadbackRes.CompressedData;
-            uint32_t *DecompressedSequencesSaved    = gpuReadbackRes.DecompressedSequences;
+            uint8_t  *DecompressedLiteralsSaved     = gpuReadbackRes.DecompressedLiterals;
 
             gpuReadbackRes.CompressedData           = cpuRes.CompressedData;
-            gpuReadbackRes.DecompressedSequences    = cpuRes.DecompressedSequences;
+            gpuReadbackRes.DecompressedLiterals     = cpuRes.DecompressedLiterals;
 
-            VALIDATE(DecompressedSequences, &gpuReadbackRes);
+            VALIDATE(DecompressedSequences, &gpuReadbackRes, cpuArenaTopDwords);
 
             gpuReadbackRes.CompressedData           = CompressedData;
-            gpuReadbackRes.DecompressedSequences    = DecompressedSequencesSaved;
+            gpuReadbackRes.DecompressedLiterals     = DecompressedLiteralsSaved;
         }
 
     }
@@ -779,7 +786,7 @@ static uint32_t zstdgpu_Test_DecompressedDataPerBlockType(const uint32_t *gpuGlo
  *  @brief  This function executes GPU Decompression pipeline on CPU (by calling shader function on CPU)
  *          to give opportunity to catch errors early
  */
-static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCpu, const void *zstdGpuCompressedData, const zstdgpu_OffsetAndSize *zstdFrameRefs, uint32_t zstdFrameCount, uint32_t zstdCompressedFramesByteCount, uint64_t zstdUncompressedFramesByteCount)
+static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCpu, uint32_t *outArenaTopDwords, const void *zstdGpuCompressedData, const zstdgpu_OffsetAndSize *zstdFrameRefs, uint32_t zstdFrameCount, uint32_t zstdCompressedFramesByteCount, uint64_t zstdUncompressedFramesByteCount)
 {
     zstdgpu_ResourceInfo zstdInfo;
     zstdgpu_ResourceInfo_InitZero(&zstdInfo);
@@ -935,6 +942,10 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdgpu_ResourceInfo_Stage_2_Init(&zstdInfo, literalCount, sequenceCount, 0, 0);
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
+    // The CPU reference arena is sized independently of the GPU's, so its top has to travel with
+    // the data for later record lookups.
+    *outArenaTopDwords = zstdgpu_ArenaTopDwords(&zstdInfo);
+
     {
         zstdgpu_InitFseTable_SRT srt;
         zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseHufW), /* tableType */0);
@@ -995,7 +1006,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_DecompressSequences_SRT srt;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams), zstdInfo.FseArena_StreamCount);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams), zstdInfo.FseArena_StreamCount, zstdgpu_ArenaTopDwords(&zstdInfo));
         // Marks every FSE arena slot as free.
         memset(zstdCpu.FseArena, 0, zstdgpu_FseArena_HeaderDwCount(zstdInfo.FseArena_StreamCount) * sizeof(uint32_t));
         for (uint32_t i = 0; i < CNTRS(Seq_Streams); ++i)
@@ -1071,13 +1082,13 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     // so we "decode" them into "absolute"
     {
         zstdgpu_FinaliseSequenceOffsets_SRT srt;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams_DecodedItems));
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams_DecodedItems), zstdgpu_ArenaTopDwords(&zstdInfo));
         for (uint32_t i = 0; i < CNTRS(Seq_Streams_DecodedItems); ++i)
         {
             zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
         }
     }
-    VALIDATE(DecompressedSequences, &zstdCpu);
+    VALIDATE(DecompressedSequences, &zstdCpu, zstdgpu_ArenaTopDwords(&zstdInfo));
     #undef CNTRS
 }
 
@@ -1090,6 +1101,7 @@ static void zstdgpu_DefaultUploadCallback(void *zstdCompressedFramesBytes, uint3
 
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
 ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
+ZSTDGPU_API uint32_t zstdgpu_RetrieveArenaTopDwords(zstdgpu_PerRequestContext req);
 
 ZSTDGPU_API uint32_t zstdgpu_AreTimestampsEnabled(void);
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
@@ -1147,6 +1159,7 @@ struct DemoCtx
     ID3D12DescriptorHeap       *descriptorHeap[3];
     zstdgpu_ResourceDataCpu     zstdCpu;
     bool                        zstdCpuInit;
+    uint32_t                    zstdCpuArenaTopDwords;
 
     uint64_t                    freqGpuClocks;
     FILE                       *csvFile;
@@ -1877,7 +1890,7 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
 
         // NOTE(pamartis): We run GPU Decompression pipeline on CPU to catch possible errors/assert early
-        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, zstdData /** intentionally without zstdOffs */, zstdInFrameRefs, fbInfo.frameCount, zstdCompressedFramesMemorySizeInBytes, fbInfo.frameByteCount);
+        zstdgpu_Validate_GpuDecompressOnCpu(zstdCpu, &ctx->zstdCpuArenaTopDwords, zstdData /** intentionally without zstdOffs */, zstdInFrameRefs, fbInfo.frameCount, zstdCompressedFramesMemorySizeInBytes, fbInfo.frameByteCount);
         ctx->zstdCpuInit = true;
 
         if (!simGpu)
@@ -2323,7 +2336,7 @@ static int demoRun(void *demoCtx)
 
                         zstdgpu_Test_DecompressHuffmanWeights(zstdCpu, gpuData, zstdCompressedFramesMemorySizeInBytes, chkGpu, simGpu);
                         zstdgpu_Test_DecompressLiterals(zstdCpu, gpuData, zstdCompressedFramesMemorySizeInBytes, chkGpu, simGpu);
-                        zstdgpu_Test_DecompressSequences(zstdCpu, gpuData, zstdCompressedFramesMemorySizeInBytes, chkGpu, simGpu);
+                        zstdgpu_Test_DecompressSequences(zstdCpu, gpuData, zstdCompressedFramesMemorySizeInBytes, ctx->zstdCpuArenaTopDwords, zstdgpu_RetrieveArenaTopDwords(perRequestContext), chkGpu, simGpu);
 
                         if (chkCpu && chkGpu)
                             zstdgpu_Test_BlockPrefix(zstdCpu, gpuData);

@@ -58,11 +58,9 @@
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2() /* empty so far*/
 
 #define ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()                                                 \
-    ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          )   \
+    ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          ) \
     \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequences         )   \
-    \
-    ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        )   \
+    ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        ) \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_2() /* empty so far*/
@@ -380,15 +378,34 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
 
 static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
-    const uint32_t DecompressedLiterals_Count       = zstdgpu_AlignUp(literalCount, sizeof(uint32_t)); // align to a dword because this buffer is aliased with a view that access dwords
+    /*
+     *  Literals and sequence records share one allocation: literals occupy the base, sequence
+     *  records are addressed downwards from the top, and `kzstdgpu_ArenaGuardBytes` of slack
+     *  separates them so the wide (whole-dword) literal store path cannot reach the records.
+     *  The dword alignment matters because the same resource is also viewed as dwords.
+     */
+    const uint32_t DecompressedLiterals_Count       = zstdgpu_AlignUp(literalCount, sizeof(uint32_t))
+                                                    + kzstdgpu_ArenaGuardBytes
+                                                    + sequencesCount * kzstdgpu_SeqRecordDwordCount * (uint32_t)sizeof(uint32_t);
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
     const uint32_t UnCompressedFramesRefs_Count     = uncompressedFrameCount;
 
-    const uint32_t DecompressedSequences_Count      = sequencesCount * kzstdgpu_SeqRecordDwordCount;
-
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
+}
+
+/**
+ *  Dword index one past the top of the merged literal/sequence arena.
+ *
+ *  Sequence records are addressed downwards from here, so this must agree exactly with the size
+ *  computed in `zstdgpu_ResourceInfo_Stage_2_InitSize`. Deriving it from the recorded byte size
+ *  keeps the two in step: there is one definition of the arena top rather than a host copy and a
+ *  shader copy that can drift apart.
+ */
+static uint32_t zstdgpu_ArenaTopDwords(const zstdgpu_ResourceInfo *info)
+{
+    return info->DecompressedLiterals_ByteSize / (uint32_t)sizeof(uint32_t);
 }
 
 #undef  ZSTDGPU_BUFFER

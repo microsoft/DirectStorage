@@ -19,7 +19,7 @@
 
 #define ZSTDGPU_SRT_RS_BIND_GROUP_SequenceOutputs "DescriptorTable(UAV(u0, space=6, numDescriptors=5))"
 
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequences      : register(u0, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedLiterals_Seqs  : register(u0, space6);
 ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutBlockSizePrefix            : register(u1, space6);
 ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset1   : register(u2, space6);
 ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset2   : register(u3, space6);
@@ -28,7 +28,7 @@ ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset3   : register(u4, s
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_SequenceOutputs(ZSTDGPU_PARAM_INOUT(T) srt)
 {
-    srt.inoutDecompressedSequences      = ZstdInOutDecompressedSequences;
+    srt.inoutDecompressedLiterals_Seqs  = ZstdInOutDecompressedLiterals_Seqs;
     srt.inoutBlockSizePrefix            = ZstdInOutBlockSizePrefix;
     srt.inoutPerSeqStreamFinalOffset1   = ZstdInOutPerSeqStreamFinalOffset1;
     srt.inoutPerSeqStreamFinalOffset2   = ZstdInOutPerSeqStreamFinalOffset2;
@@ -40,7 +40,7 @@ static void zstdgpu_Srt_FillBindGroup_SequenceOutputs(ZSTDGPU_PARAM_INOUT(T) srt
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_SequenceOutputs(T &srt, const zstdgpu_ResourceDataCpu &cpuRes)
 {
-    srt.inoutDecompressedSequences      = cpuRes.DecompressedSequences;
+    srt.inoutDecompressedLiterals_Seqs  = (uint32_t *)cpuRes.DecompressedLiterals;
     srt.inoutBlockSizePrefix            = cpuRes.BlockSizePrefix;
     srt.inoutPerSeqStreamFinalOffset1   = cpuRes.PerSeqStreamFinalOffset1;
     srt.inoutPerSeqStreamFinalOffset2   = cpuRes.PerSeqStreamFinalOffset2;

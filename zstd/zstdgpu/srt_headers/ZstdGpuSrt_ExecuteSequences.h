@@ -24,12 +24,19 @@ ZSTDGPU_RO_BUFFER(zstdgpu_Counters)             ZstdInCounters                  
 ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInPerFrameBlockCountCMP         : register(t1);
 ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInBlockSizePrefix               : register(t2);
 ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInBlockDestOffs                 : register(t3);
-ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInDecompressedSequences         : register(t4);
+ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInDecompressedLiterals_Seqs     : register(t4);
 ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInGlobalBlockIndexPerCmpBlock   : register(t5);
 ZSTDGPU_RO_BUFFER(uint32_t)                     ZstdInPerSeqStreamSeqStart          : register(t6);
 ZSTDGPU_RO_BUFFER(zstdgpu_CompressedBlockData)  ZstdInCompressedBlocks              : register(t7);
 
-#define ZSTDGPU_SRT_RS_ExecuteSequences ZSTDGPU_SRT_RS_BIND_GROUP_LiteralBytes ", " ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)"
+typedef struct zstdgpu_ExecuteSequences_Consts
+{
+    uint32_t    ArenaTopDwords;
+} zstdgpu_ExecuteSequences_Consts;
+
+ConstantBuffer<zstdgpu_ExecuteSequences_Consts> ZstdConstants_ExecuteSequences : register(b0);
+
+#define ZSTDGPU_SRT_RS_ExecuteSequences ZSTDGPU_SRT_RS_BIND_GROUP_LiteralBytes ", " ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", RootConstants(b0, num32BitConstants=1)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequences_SRT) srt)
 {
@@ -40,15 +47,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequences_SRT) s
     srt.inPerFrameBlockCountCMP         = ZstdInPerFrameBlockCountCMP;
     srt.inBlockSizePrefix               = ZstdInBlockSizePrefix;
     srt.inBlockDestOffs                 = ZstdInBlockDestOffs;
-    srt.inDecompressedSequences         = ZstdInDecompressedSequences;
+    srt.inDecompressedLiterals_Seqs     = ZstdInDecompressedLiterals_Seqs;
     srt.inGlobalBlockIndexPerCmpBlock   = ZstdInGlobalBlockIndexPerCmpBlock;
     srt.inPerSeqStreamSeqStart          = ZstdInPerSeqStreamSeqStart;
     srt.inCompressedBlocks              = ZstdInCompressedBlocks;
+    srt.ArenaTopDwords                  = ZstdConstants_ExecuteSequences.ArenaTopDwords;
 }
 
 #else
 
-static void zstdgpu_Srt_Fill(zstdgpu_ExecuteSequences_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes)
+static void zstdgpu_Srt_Fill(zstdgpu_ExecuteSequences_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
+                             uint32_t     ArenaTopDwords)
 {
     zstdgpu_Srt_FillBindGroup_LiteralBytes(srt, cpuRes);
     zstdgpu_Srt_FillBindGroup_FrameOutput(srt, cpuRes);
@@ -57,10 +66,11 @@ static void zstdgpu_Srt_Fill(zstdgpu_ExecuteSequences_SRT &srt, const zstdgpu_Re
     srt.inPerFrameBlockCountCMP         = cpuRes.PerFrameBlockCountCMP;
     srt.inBlockSizePrefix               = cpuRes.BlockSizePrefix;
     srt.inBlockDestOffs                 = cpuRes.BlockDestOffs;
-    srt.inDecompressedSequences         = cpuRes.DecompressedSequences;
+    srt.inDecompressedLiterals_Seqs     = (uint32_t *)cpuRes.DecompressedLiterals;
     srt.inGlobalBlockIndexPerCmpBlock   = cpuRes.GlobalBlockIndexPerCmpBlock;
     srt.inPerSeqStreamSeqStart          = cpuRes.PerSeqStreamSeqStart;
     srt.inCompressedBlocks              = cpuRes.CompressedBlocks;
+    srt.ArenaTopDwords                  = ArenaTopDwords;
 }
 
 #endif

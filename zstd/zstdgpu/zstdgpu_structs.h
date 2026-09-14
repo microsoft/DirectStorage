@@ -261,26 +261,47 @@ static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
 static const uint32_t kzstdgpu_MinMatchLength = 3;
 
 /**
- *  Layout of one decoded sequence record in `DecompressedSequences`.
+ *  Layout of one decoded sequence record inside the merged literal/sequence arena.
  *
- *  Sequences are stored as interleaved records (AoS) rather than as three parallel arrays (SoA).
- *  The record address is a pure function of the global sequence index, so a record can be placed
- *  at a fixed stride from either end of a buffer without knowing the total sequence count. That
- *  is the property a merged literal/sequence arena needs: literals grow up from the base while
- *  sequence records occupy the top, with no shared allocation cursor and therefore no ordering
- *  dependency between the (deliberately overlapping) literal and sequence dispatches.
+ *  Sequences are stored as interleaved records (AoS) rather than as three parallel arrays (SoA),
+ *  and they grow *downwards* from the top of the arena while literals grow upwards from its base.
+ *  Both ends are pure functions of indices fixed before either dispatch starts (literal offsets and
+ *  the global sequence index both come from prefix sums), so there is no shared allocation cursor
+ *  and therefore no ordering dependency between the deliberately-overlapping literal and sequence
+ *  dispatches. Safety reduces to the whole-batch bound
+ *
+ *      litBytes + kzstdgpu_ArenaGuardBytes + sequenceCount * 12  <=  arenaBytes
+ *
+ *  Growing sequences downwards (rather than literals downwards) is what keeps this cheap: it needs
+ *  only the arena top, a constant known at sizing time, whereas the mirror image would need the
+ *  total literal size, which is not known when the addresses are computed.
  */
 static const uint32_t kzstdgpu_SeqRecordDwordCount = 3;
 static const uint32_t kzstdgpu_SeqRecordDword_LLen = 0;
 static const uint32_t kzstdgpu_SeqRecordDword_MLen = 1;
 static const uint32_t kzstdgpu_SeqRecordDword_Offs = 2;
 
-/** Dword index of sequence `seqIdx`'s record within `DecompressedSequences`. */
-#define zstdgpu_SeqRecordBase(seqIdx) ((seqIdx) * kzstdgpu_SeqRecordDwordCount)
+/**
+ *  Slack between the top of the literal region and the lowest sequence record.
+ *
+ *  The wide literal store path writes whole dwords and so overshoots the exact literal byte count.
+ *  With separate buffers that overshoot was harmless; in a merged arena it would land on sequence
+ *  records, so the arena must always be sized with this guard band included.
+ */
+static const uint32_t kzstdgpu_ArenaGuardBytes = 64;
 
-#define zstdgpu_SeqRecordLLen(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_LLen)
-#define zstdgpu_SeqRecordMLen(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_MLen)
-#define zstdgpu_SeqRecordOffs(seqIdx) (zstdgpu_SeqRecordBase(seqIdx) + kzstdgpu_SeqRecordDword_Offs)
+/**
+ *  Dword index of sequence `seqIdx`'s record, measured down from the arena top `arenaTopDwords`.
+ *
+ *  Both the GPU arena and the CPU reference store use this accessor, each passing its own top. A
+ *  run of sequences is therefore still contiguous (record `i` sits directly above record `i + 1`),
+ *  which is what lets the validator compare a whole sequence stream with a single `memcmp`.
+ */
+#define zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) ((arenaTopDwords) - ((seqIdx) + 1u) * kzstdgpu_SeqRecordDwordCount)
+
+#define zstdgpu_SeqRecordLLen(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_LLen)
+#define zstdgpu_SeqRecordMLen(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_MLen)
+#define zstdgpu_SeqRecordOffs(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_Offs)
 
 /**
  *  Ceiling on a single stage's scratch allocation. A request above this is reported as an invalid

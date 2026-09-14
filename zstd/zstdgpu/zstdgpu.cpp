@@ -3314,7 +3314,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // Same SRT as the default kernel: only the pipeline differs.
             zstdgpu_Srts srts = req->srts;
             srts.DecompressSequences = req->DecompressSequencesFseArena;
-            zstdgpu_Bind_DecompressSequences_Stage2(cmdList, srts, req->resData.gpuOnly, req->resInfo.FseArena_StreamCount);
+            zstdgpu_Bind_DecompressSequences_Stage2(cmdList, srts, req->resData.gpuOnly, req->resInfo.FseArena_StreamCount, zstdgpu_ArenaTopDwords(&req->resInfo));
 
             ZSTDGPU_KERNEL_SCOPE(DecompressSequences, cmdList,
                 zstdgpu_DispatchIndirect(cmdList, DecompressSequencesFseArena, DecompressSequences);
@@ -3322,7 +3322,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         }
         else
         {
-            zstdgpu_Bind_DecompressSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly, req->resInfo.FseArena_StreamCount);
+            zstdgpu_Bind_DecompressSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly, req->resInfo.FseArena_StreamCount, zstdgpu_ArenaTopDwords(&req->resInfo));
 
             ZSTDGPU_KERNEL_SCOPE(DecompressSequences, cmdList,
                 zstdgpu_DispatchIndirect(cmdList, DecompressSequences, DecompressSequences);
@@ -3346,20 +3346,15 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavSync(barriers, bc + 5, req->resData.gpuOnly.PerSeqStreamFinalOffset1Lookback);
         setResourceUavSync(barriers, bc + 6, req->resData.gpuOnly.PerSeqStreamFinalOffset2Lookback);
         setResourceUavSync(barriers, bc + 7, req->resData.gpuOnly.PerSeqStreamFinalOffset3Lookback);
-        // last written/updated by [Decompress Sequences]
+        // last written/updated by [Decompress Sequences] and by [Init Huffman Table and Decompress
+        // Literals]
         // next written/updated by [Finalise Sequence Offsets] (offset field), then read by
-        // [Execute Sequences]. Literal lengths, match lengths and offsets now share one resource,
-        // so this stays a UAV barrier here and is transitioned to SRV after [Finalise Sequence
-        // Offsets] - the last writer - rather than being split per field as it was when these
-        // were three separate buffers.
-        setResourceUavSync(barriers, bc + 8, req->resData.gpuOnly.DecompressedSequences);
+        // [Execute Sequences]. Literals and sequence records now share a single resource, so this
+        // must stay a UAV barrier: [Finalise Sequence Offsets] still writes the sequence half
+        // afterwards. The transition to SRV happens once, after that last writer, instead of
+        // literals transitioning here and sequences transitioning separately later.
+        setResourceUavSync(barriers, bc + 8, req->resData.gpuOnly.DecompressedLiterals);
         bc += 9;
-        // last written/updated by [Init Huffman Table and Decompress Literals]
-        // next read by [Execute Sequences]
-        {
-            setResourceUavToSrvSync(barriers, bc + 0, req->resData.gpuOnly.DecompressedLiterals);
-            bc += 1;
-        }
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
     }
@@ -3428,7 +3423,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Finalise Sequence Offsets]");
-        zstdgpu_Bind_FinaliseSequenceOffsets(cmdList, req->srts, req->resData.gpuOnly);
+        zstdgpu_Bind_FinaliseSequenceOffsets(cmdList, req->srts, req->resData.gpuOnly, zstdgpu_ArenaTopDwords(&req->resInfo));
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
 
         ZSTDGPU_KERNEL_SCOPE(FinaliseSequenceOffsets, cmdList,
@@ -3442,8 +3437,9 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier with Resources for [Memcpy RAW blocks, Memset RLE blocks] and [Execute Sequences]");
         D3D12_RESOURCE_BARRIER barriers[2];
         // last written/updated by [Finalise Sequence Offsets]
-        // next read by [Execute Sequences]
-        setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedSequences);
+        // next read by [Execute Sequences], through both the literal byte view and the sequence
+        // record view - one transition now covers both, since they share a resource
+        setResourceUavToSrvSync(barriers, 0, req->resData.gpuOnly.DecompressedLiterals);
         // last written by [Compute Dest Block Offsets]
         // next read by [Memcpy RAW blocks, Memset RLE blocks], [Execute Sequences], and [Compute Dest Sequence Offsets]
         setResourceUavToSrvSync(barriers, 1, req->resData.gpuOnly.BlockDestOffs);
@@ -3487,7 +3483,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Execute Sequences]");
-        zstdgpu_Bind_ExecuteSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly);
+        zstdgpu_Bind_ExecuteSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly, zstdgpu_ArenaTopDwords(&req->resInfo));
 
         ZSTDGPU_KERNEL_SCOPE(ExecuteSequences, cmdList,
             cmdList->Dispatch(req->zstdFrameCount, 1, 1);
@@ -3584,6 +3580,11 @@ ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuR
 ZSTDGPU_API uint32_t zstdgpu_AreTimestampsEnabled(void)
 {
     return ZSTDGPU_ENABLE_TIMESTAMPS ? 1u : 0u;
+}
+
+ZSTDGPU_API uint32_t zstdgpu_RetrieveArenaTopDwords(zstdgpu_PerRequestContext req)
+{
+    return zstdgpu_ArenaTopDwords(&req->resInfo);
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
