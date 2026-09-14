@@ -118,3 +118,100 @@ TEST(SeqRecordPacking, RecordsAreContiguousAndDescending)
         EXPECT_EQ(zstdgpu_SeqRecordDword1(top, i + 1u) + 1u, zstdgpu_SeqRecordDword0(top, i));
     }
 }
+
+
+/**
+ *  The arena bound saturates rather than wrapping, and the scratch ceiling rejects the saturated
+ *  value.
+ *
+ *  `(R/3) * size` exceeds a uint32 well below the 4 GiB decompressed limit. A wrapped value would
+ *  produce an arena far SMALLER than the content provably needs, the joint occupancy predicate
+ *  would fire, the predicated work would be silently skipped, and the decode would return wrong
+ *  output with exit code 0 -- the exact failure mode this scheme exists to eliminate. Saturation
+ *  turns that into an unsatisfiable requirement that every allocating path now checks.
+ *
+ *  These live in a unit test because the adversarial corpus no longer reaches this path: the file
+ *  that used to trip the ceiling (`public\fuzz\fail\fail_09_bad_blocksize.zst`) now sizes under it
+ *  since the record narrowed to 8 bytes. The behaviour is pure host arithmetic, so it does not need
+ *  a GPU or a corpus to pin.
+ */
+
+// Largest decompressed size whose arena bound still fits a uint32, found by bisection rather than
+// hard-coded, so narrowing the record cannot leave the expected threshold stale.
+static uint32_t LargestNonSaturatingSize()
+{
+    uint32_t lo = 1u;
+    uint32_t hi = 0xffffffffu;
+    while (lo < hi)
+    {
+        const uint32_t mid = lo + ((hi - lo + 1u) / 2u);
+        if (zstdgpu_DecompressedSizeToArenaByteCount(mid) != 0xffffffffu)
+        {
+            lo = mid;
+        }
+        else
+        {
+            hi = mid - 1u;
+        }
+    }
+    return lo;
+}
+
+TEST(ArenaBound, IsExactAndMonotonicBelowSaturation)
+{
+    const uint32_t last = LargestNonSaturatingSize();
+    ASSERT_GT(last, 0u);
+
+    // The documented factor: ceil(8 * size / 3), dword-aligned, plus guard and one spare dword.
+    for (uint32_t size : { 1u, 2u, 3u, 4u, 5u, 1024u, 1048576u, 1073741824u })
+    {
+        if (size > last)
+        {
+            continue;
+        }
+
+        const uint64_t recordBytes = (uint64_t)kzstdgpu_SeqRecordDwordCount * sizeof(uint32_t);
+        const uint64_t bound      = (recordBytes * size + (kzstdgpu_MinMatchLength - 1u)) / kzstdgpu_MinMatchLength;
+        const uint64_t expected   = ((bound + 3u) & ~(uint64_t)3u) + kzstdgpu_ArenaGuardBytes + sizeof(uint32_t);
+
+        EXPECT_EQ(expected, (uint64_t)zstdgpu_DecompressedSizeToArenaByteCount(size)) << "size " << size;
+    }
+
+    // Never rounds down: the bound must cover the worst case exactly, not approximately.
+    EXPECT_GE((uint64_t)zstdgpu_DecompressedSizeToArenaByteCount(3u),
+              (uint64_t)kzstdgpu_SeqRecordDwordCount * sizeof(uint32_t));
+
+    // Monotonic up to the saturation point, so a larger request can never ask for a smaller arena.
+    uint32_t prev = zstdgpu_DecompressedSizeToArenaByteCount(1u);
+    for (uint32_t size = 2u; size < 4096u; ++size)
+    {
+        const uint32_t cur = zstdgpu_DecompressedSizeToArenaByteCount(size);
+        EXPECT_GE(cur, prev) << "size " << size;
+        prev = cur;
+    }
+}
+
+TEST(ArenaBound, SaturatesInsteadOfWrapping)
+{
+    const uint32_t last = LargestNonSaturatingSize();
+
+    // Just below the threshold the value is a real bound; at and above it, it is the saturated
+    // sentinel. A wrapping implementation would instead return a small number here.
+    EXPECT_NE(0xffffffffu, zstdgpu_DecompressedSizeToArenaByteCount(last));
+    EXPECT_EQ(0xffffffffu, zstdgpu_DecompressedSizeToArenaByteCount(last + 1u));
+
+    for (uint32_t size : { last + 1u, 2000000000u, 3000000000u, 4000000000u, 0xfffffffeu, 0xffffffffu })
+    {
+        EXPECT_EQ(0xffffffffu, zstdgpu_DecompressedSizeToArenaByteCount(size)) << "size " << size;
+    }
+
+    // The sentinel is what makes the request rejectable. It sits one byte BELOW the ceiling, and
+    // only reaches it once rounded up to the 64 KiB heap alignment -- which is precisely why the
+    // ceiling comparison is inclusive. Pin both halves of that reasoning, since an exclusive test
+    // would leave rejection resting on the other stage buffers rather than on the check.
+    const uint64_t saturated = zstdgpu_DecompressedSizeToArenaByteCount(last + 1u);
+    const uint64_t aligned   = (saturated + 0xffffull) & ~0xffffull;
+
+    EXPECT_LT(saturated, kzstdgpu_MaxScratchHeapByteCount);
+    EXPECT_GE(aligned, kzstdgpu_MaxScratchHeapByteCount);
+}

@@ -1494,46 +1494,6 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
     return size / kzstdgpu_MinMatchLength;
 }
 
-/**
- *  Arena bytes that provably suffice for ANY content decompressing to `size` bytes.
- *
- *  Per block `litRegen + 3 * nseq <= S`, so over the whole batch `lit + 3 * nseq <= size`. With a
- *  record of `R` bytes, multiplying by `R/3` gives `(R/3) * lit + R * nseq <= (R/3) * size`, and
- *  since `lit >= 0` and `R/3 >= 1` that implies
- *
- *      lit + R * nseq  <=  (R / 3) * size
- *
- *  which is exactly the arena occupancy less the guard band and the literal region's dword
- *  rounding. Those add at most `kzstdgpu_ArenaGuardBytes + 3`, so one extra dword covers them.
- *
- *  This is the whole point of merging literals and sequences into one allocation: sizing the two
- *  regions separately has to assume `lit = size` AND `nseq = size / 3` simultaneously, which the
- *  inequality forbids, and costs `1 + R/3` instead of `R/3`.
- *
- *  `R` is derived from `kzstdgpu_SeqRecordDwordCount` rather than hard-coded, so narrowing the
- *  record cannot leave this bound stale. At the current 8-byte record the factor is 8/3 = 2.67x.
- *
- *  Computed in 64 bits and saturated: `(R/3) * size` overflows a uint32 well below the 4 GiB
- *  decompressed limit, and a wrapped value would produce an arena far too small rather than a
- *  rejected request. The caller's `kzstdgpu_MaxScratchHeapByteCount` check then reports it as an
- *  unsatisfiable requirement.
- */
-static uint32_t zstdgpu_DecompressedSizeToArenaByteCount(uint32_t size)
-{
-    const uint64_t recordBytes = (uint64_t)kzstdgpu_SeqRecordDwordCount * (uint64_t)sizeof(uint32_t);
-
-    // Ceiling division: the bound must never round down. The result is then aligned up to a dword
-    // because the arena is also addressed through a dword (structured) view, whose size must be a
-    // whole number of elements.
-    const uint64_t bound = (recordBytes * (uint64_t)size + (uint64_t)(kzstdgpu_MinMatchLength - 1u))
-                             / (uint64_t)kzstdgpu_MinMatchLength;
-
-    const uint64_t bytes = ((bound + (uint64_t)(sizeof(uint32_t) - 1u)) & ~(uint64_t)(sizeof(uint32_t) - 1u))
-                         + (uint64_t)kzstdgpu_ArenaGuardBytes
-                         + (uint64_t)sizeof(uint32_t);
-
-    return (bytes > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)bytes;
-}
 
 static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, uint32_t *outCntRle, uint32_t *outCntCmp, zstdgpu_PerRequestContext req)
 {
@@ -1709,7 +1669,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         // (This was originally a stopgap justified by literals and sequences being sized
         //  separately at ~6.33x the decompressed size, which was genuinely unallocatable. The
         //  merged arena at 4x removed that justification -- but not reason 1.)
-        if (req->resInfo.gpuOnly_ByteCount[stageIndex] > kzstdgpu_MaxScratchHeapByteCount)
+        if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: scratch requirement exceeds the maximum supported heap size. "
                             "Reduce the batch size (fewer frames per request), or use staged "
@@ -1782,7 +1742,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaul
         // See the matching check in `zstdgpu_GetGpuMemoryRequirement` for why this must stay: it is
         // both the report path for an oversized batch AND the backstop that makes the saturating
         // arena bound safe.
-        if (*outDefaultHeapByteCount > kzstdgpu_MaxScratchHeapByteCount)
+        if (*outDefaultHeapByteCount >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
                             "supported heap size. Reduce the batch size (fewer frames per request), "
@@ -2077,6 +2037,19 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
             zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, arenaBytes, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
         }
 
+        /*
+         *  The same ceiling `zstdgpu_GetGpuMemoryRequirement` (`:1586`) enforces. This path sizes
+         *  and allocates directly, so it never calls that entry point; without this check the guard
+         *  is present on the public sizing API but absent on both internal-memory submit paths,
+         *  which is worse than having none, because the guard then merely looks present.
+         */
+        if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
+        {
+            ZSTDGPU_ASSERT(!"zstdgpu: stage scratch requirement exceeds the maximum supported heap "
+                            "size. Reduce the batch size (fewer frames per request).");
+            return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+        }
+
         // NOTE(pamartis): if at least one heap from a given stage is too small, release all heaps and recreate
         // TODO(pamartis): consider releasing only single heap
         if (req->resData.gpuOnly_ByteCount[stageIndex] < req->resInfo.gpuOnly_ByteCount[stageIndex] ||
@@ -2198,7 +2171,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
          *  work -- wrong output with a success exit code, exactly the failure this whole effort
          *  exists to eliminate. Rejecting here keeps saturation loud.
          */
-        if (dflt > kzstdgpu_MaxScratchHeapByteCount)
+        if (dflt >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
                             "supported heap size. Reduce the batch size (fewer frames per request), "
