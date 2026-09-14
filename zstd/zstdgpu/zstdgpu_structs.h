@@ -291,6 +291,23 @@ static const uint32_t kzstdgpu_SeqRecordDword_Offs = 2;
 static const uint32_t kzstdgpu_ArenaGuardBytes = 64;
 
 /**
+ *  Arena bytes needed to hold `litByteCount` literal bytes and `seqElemCount` sequence records.
+ *
+ *  This is THE definition of arena occupancy. It is used in three places that must agree exactly:
+ *  host-side sizing (`zstdgpu_ResourceInfo_Stage_2_InitSize`), the derived arena top
+ *  (`zstdgpu_ArenaTopDwords`), and the GPU-side overflow check in `ZstdGpuUpdateDispatchArgs.hlsl`.
+ *  Hand-rolling the expression in any one of them is a silent-corruption risk, so all three call
+ *  this instead.
+ *
+ *  The dword alignment of the literal region matters because the same memory is also addressed
+ *  through a dword view.
+ */
+#define zstdgpu_ArenaBytesForCounts(litByteCount, seqElemCount)                              \
+    (zstdgpu_AlignUp((litByteCount), (uint32_t)sizeof(uint32_t))                             \
+     + kzstdgpu_ArenaGuardBytes                                                              \
+     + (seqElemCount) * kzstdgpu_SeqRecordDwordCount * (uint32_t)sizeof(uint32_t))
+
+/**
  *  Dword index of sequence `seqIdx`'s record, measured down from the arena top `arenaTopDwords`.
  *
  *  Both the GPU arena and the CPU reference store use this accessor, each passing its own top. A

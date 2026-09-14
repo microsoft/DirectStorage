@@ -376,17 +376,26 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
 }
 
-static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
+static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
     /*
      *  Literals and sequence records share one allocation: literals occupy the base, sequence
      *  records are addressed downwards from the top, and `kzstdgpu_ArenaGuardBytes` of slack
      *  separates them so the wide (whole-dword) literal store path cannot reach the records.
-     *  The dword alignment matters because the same resource is also viewed as dwords.
+     *
+     *  `arenaByteCount` of 0 means "size exactly to `literalCount` and `sequencesCount`", which is
+     *  what a caller that has read the real counters back from the GPU wants. A non-zero value is a
+     *  *jointly* sized arena, used when only the decompressed size is known: sizing from the two
+     *  maxima independently costs 5x the decompressed size because it assumes the worst case of
+     *  both at once, whereas `litBytes + 3 * seqCount <= decompressedBytes` means they cannot both
+     *  be maximal and the joint bound is 4x. It is still floored at the per-count minimums so the
+     *  allocation is never empty.
      */
-    const uint32_t DecompressedLiterals_Count       = zstdgpu_AlignUp(literalCount, sizeof(uint32_t))
-                                                    + kzstdgpu_ArenaGuardBytes
-                                                    + sequencesCount * kzstdgpu_SeqRecordDwordCount * (uint32_t)sizeof(uint32_t);
+    const uint32_t DecompressedLiterals_Count       = (0 == arenaByteCount)
+                                                    ? zstdgpu_ArenaBytesForCounts(literalCount, sequencesCount)
+                                                    : zstdgpu_MaxU32(arenaByteCount,
+                                                                     zstdgpu_ArenaBytesForCounts(kzstdgpu_MinCount_UncompressedLitBytes,
+                                                                                                 kzstdgpu_MinCount_UncompressedSeqElems));
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
@@ -529,9 +538,9 @@ static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uin
 }
 
 
-static void zstdgpu_ResourceInfo_Stage_2_Init(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
+static void zstdgpu_ResourceInfo_Stage_2_Init(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
-    zstdgpu_ResourceInfo_Stage_2_InitSize(outInfo, literalCount, sequencesCount, uncompressedFramesByteCount, uncompressedFrameCount);
+    zstdgpu_ResourceInfo_Stage_2_InitSize(outInfo, literalCount, sequencesCount, arenaByteCount, uncompressedFramesByteCount, uncompressedFrameCount);
     outInfo->UnCompressedFramesData_ByteSizeInternal = 0;
     outInfo->UnCompressedFramesRefs_ByteSizeInternal = 0;
     zstdgpu_ResourceInfo_Stage_2_InitOffsetGpuOnly(outInfo);

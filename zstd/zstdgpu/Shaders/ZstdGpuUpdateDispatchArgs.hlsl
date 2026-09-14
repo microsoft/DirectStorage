@@ -90,9 +90,17 @@ void main()
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixSequenceOffsets,    srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PrefixSequenceOffsets, executeIndirectWorkaround);
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex,        srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PropagateFseIndex, executeIndirectWorkaround);
 
+        // Bits 3 and 4 are canaries, not guards. Each maximum is individually provable (literal
+        // bytes are output bytes; every sequence emits at least 3 output bytes), but the arena is
+        // sized from the JOINT bound, because the two cannot both be maximal at once. So neither
+        // check alone says the arena is big enough -- bit 5 does. Bits 3/4 are kept because they
+        // are the only signal if one of those premises is ever violated.
+        const uint32_t arenaBytesNeeded = zstdgpu_ArenaBytesForCounts(litByteCount, seqElemCount);
+
         const uint32_t predicateMask = 0
                                      | (litByteCount > srt.litByteCountMax ? (1u << 3u) : 0u)
-                                     | (seqElemCount > srt.seqElemCountMax ? (1u << 4u) : 0u);
+                                     | (seqElemCount > srt.seqElemCountMax ? (1u << 4u) : 0u)
+                                     | (arenaBytesNeeded > srt.arenaByteCount ? (1u << 5u) : 0u);
 
         srt.inoutPredicate[2] = srt.inoutPredicate[2] | predicateMask; // lower 32-bits of Stage 2 predicate
     }

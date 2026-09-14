@@ -96,7 +96,7 @@ void zstdgpu_ReferenceStore_AllocateMemory(void)
 {
     zstdgpu_ResourceInfo_Stage_0_Init(&GZstdInfo, GFrameCount, GZstdDataSize, 0);
     zstdgpu_ResourceInfo_Stage_1_Init(&GZstdInfo, GBlockCountRAW, GBlockCountRLE, GBlockCountCMP, /* fseArenaStreamCapacity */ 0);
-    zstdgpu_ResourceInfo_Stage_2_Init(&GZstdInfo, 4 * 1024 * 1024 /*literal count*/, 4 * 1024 * 1024 /*sequence count*/, 0, 0);
+    zstdgpu_ResourceInfo_Stage_2_Init(&GZstdInfo, 4 * 1024 * 1024 /*literal count*/, 4 * 1024 * 1024 /*sequence count*/, 0 /*arena bytes: size exactly to the counts above*/, 0, 0);
 
     zstdgpu_ResourceDataCpu_InitZero(&GZstd);
     zstdgpu_ResourceDataCpu_InitFromHeap(&GZstd, &GZstdInfo);

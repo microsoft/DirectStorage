@@ -130,6 +130,7 @@ typedef struct zstdgpu_UpdateDispatchArgs_SRT
     uint32_t                                                litByteCountMax;
     uint32_t                                                seqElemCountMax;
     uint32_t                                                executeIndirectWorkaround;
+    uint32_t                                                arenaByteCount;
 } zstdgpu_UpdateDispatchArgs_SRT;
 
 typedef struct zstdgpu_DecompressHuffmanWeights_SRT
