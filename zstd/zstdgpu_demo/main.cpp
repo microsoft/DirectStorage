@@ -1445,6 +1445,7 @@ static int demoRun(void *demoCtx)
     uint32_t blockStartPerFrame = 0; // first block ordinal decoded in every frame
     uint32_t blockDstOffset     = 0; // bytes already decoded by preceding slices, added to every frame's destination
     uint32_t blockSlice         = 0; // 0 => one dispatch per batch; N => decode N blocks per dispatch, resuming across dispatches
+    uint64_t planBudgetBytes    = 0; // 0 => no planning; N => per-DISPATCH decompressed byte budget, packing whole frames alongside slice pieces
     uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
@@ -1465,6 +1466,7 @@ static int demoRun(void *demoCtx)
     bool nextBlockDstOfs     = false;
     bool nextBlockSlice      = false;
     bool nextSliceMb         = false;
+            bool nextPlanMb          = false;
             bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
@@ -1496,7 +1498,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs || nextBlockSlice || nextSliceMb)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs || nextBlockSlice || nextSliceMb || nextPlanMb)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1536,9 +1538,20 @@ static int demoRun(void *demoCtx)
                              */
                             blockSlice = zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)value * 1024ull * 1024ull);
                         }
+                        else if (nextPlanMb)
+                        {
+                            /*
+                             *  Unlike --slice-mb, this budget is PER DISPATCH, not per frame: the
+                             *  planner packs as many whole frames as fit and only slices a frame that
+                             *  does not. That is the axis a caller actually has, because scratch is
+                             *  sized from the batch's decompressed size, not from any one frame's.
+                             */
+                            planBudgetBytes = (uint64_t)value * 1024ull * 1024ull;
+                        }
                     }
 
                     nextSliceMb = false;
+                    nextPlanMb = false;
                     nextRepCount = false;
                     nextPrfLevel = false;
                     nextMinFrame = false;
@@ -1644,6 +1657,10 @@ static int demoRun(void *demoCtx)
                 {
                     nextSliceMb = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--plan-mb"))
+                {
+                    nextPlanMb = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
                 {
                     nextZstdOffs = true;
@@ -1678,9 +1695,9 @@ static int demoRun(void *demoCtx)
              *  dies deep inside literal decoding on an opaque assert, and a validation flag that
              *  reports a meaningless comparison is worse than one that refuses to run.
              */
-            if ((0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockSlice) && (chkCpu || chkGpu || simGpu))
+            if ((0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockSlice || 0 != planBudgetBytes) && (chkCpu || chkGpu || simGpu))
             {
-                debugPrint(L"[ERROR] '--blk-limit'/'--blk-start'/'--blk-slice' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
+                debugPrint(L"[ERROR] '--blk-limit'/'--blk-start'/'--blk-slice'/'--plan-mb' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
                            L"those compare against a reference that decodes whole frames, so the comparison is not "
                            L"meaningful for a partially decoded frame.\n");
                 ctx->retv = 1;
@@ -1696,6 +1713,20 @@ static int demoRun(void *demoCtx)
             {
                 debugPrint(L"[ERROR] '--blk-slice' cannot be combined with '--blk-limit', '--blk-start' or '--blk-dst-ofs': "
                            L"it drives the block window itself, and the carried output cursor already positions each slice.\n");
+                ctx->retv = 1;
+                return 0;
+            }
+            /*
+             *  --plan-mb and --blk-slice are alternative ways to drive the same per-frame window and
+             *  resume machinery, and they disagree about what the budget means: --blk-slice gives
+             *  EVERY frame the same block count per dispatch, while --plan-mb bounds the DISPATCH.
+             *  Accepting both would silently let one overwrite the other.
+             */
+            if (0 != planBudgetBytes && (0 != blockSlice || 0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockDstOffset))
+            {
+                debugPrint(L"[ERROR] '--plan-mb' cannot be combined with '--blk-slice', '--slice-mb', '--blk-limit', "
+                           L"'--blk-start' or '--blk-dst-ofs': it plans every frame's window itself from a per-dispatch "
+                           L"decompressed byte budget.\n");
                 ctx->retv = 1;
                 return 0;
             }
@@ -1728,6 +1759,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
                 debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of exactly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are plain arithmetic (0, K, 2K, ...); every block ordinal is a legal cut. Forces one frame per batch. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
                 debugPrint(L"\t--slice-mb <MB>           [Optional] Same as --blk-slice but stated as a per-slice DECOMPRESSED megabyte budget, converted by zstdgpu_SliceBlockCountForDecompressedBudget. This is the axis a caller actually has, since scratch is sized from decompressed size.\n");
+                debugPrint(L"\t--plan-mb <MB>            [Optional] Per-DISPATCH decompressed megabyte budget. Unlike --slice-mb (which gives every frame the same block count), the planner packs as many whole frames into a dispatch as fit and slices only a frame that does not, so a large frame no longer monopolises a dispatch. Cannot be combined with --blk-slice/--slice-mb.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;
@@ -1931,9 +1963,12 @@ static int demoRun(void *demoCtx)
      *  different slice indices, so each carries its own cursor and each gets its own window --
      *  which is exactly what `zstdgpu_SetupBlockWindowPerFrame` exists to express.
      */
-    uint32_t *frameSliceStart = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
-    uint32_t *frameBlockCount = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
-    uint32_t *blockWindowCpu  = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * maxBatchFrames) : NULL;
+    const bool slicing = (0 != blockSlice) || (0 != planBudgetBytes);
+
+    uint32_t *frameSliceStart = slicing ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
+    uint32_t *frameBlockCount = slicing ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
+    uint32_t *frameAdvance    = slicing ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
+    uint32_t *blockWindowCpu  = slicing ? (uint32_t *)malloc(sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * maxBatchFrames) : NULL;
 
     debugPrint(L"[INFO] Working set: frames [%u..%u] (%u frames), %u batch(es) of up to %u frames each.\n",
                workingLo, workingHi, workingFrames, numBatches, effBatchFrames);
@@ -2101,10 +2136,14 @@ static int demoRun(void *demoCtx)
      */
     d3d12aid_MappedBuffer zstdFrameResumeState = {};
     d3d12aid_MappedBuffer zstdBlockWindowPerFrame = {};
-    if (0 != blockSlice)
+    if (slicing)
     {
         d3d12aid_MappedBuffer_Create(&zstdFrameResumeState, device, 1, sizeof(uint32_t) * kzstdgpu_FrameResumeDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_READBACK);
-        d3d12aid_MappedBuffer_Create(&zstdBlockWindowPerFrame, device, 1, sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_UPLOAD);
+        // Sized for one frame more than the largest batch for the same reason as
+        // maxRefsSizeInBytes above: an append that EXACTLY fills a MappedBuffer takes the
+        // CopyResource path, which does not reset the append cursor, so the next dispatch's
+        // append overflows. One spare frame keeps it on the resettable CopyBufferRegion path.
+        d3d12aid_MappedBuffer_Create(&zstdBlockWindowPerFrame, device, 1, sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * (maxBatchFrames + 1), D3D12_HEAP_TYPE_UPLOAD);
     }
 
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
@@ -2172,12 +2211,13 @@ static int demoRun(void *demoCtx)
              */
             uint32_t sliceFramesLeft = 0;
             bool     sliceLastForBatch = true;
+            uint64_t slicePeakPlannedBytes = 0;
 
             uint32_t sliceStart = 0;
             uint32_t sliceIdx = 0;
             for (;;)
             {
-            if (0 != blockSlice)
+            if (slicing)
             {
                 // The per-frame window supersedes the scalar one; leave the scalar at "whole frame"
                 // so the two cannot disagree.
@@ -2223,12 +2263,10 @@ static int demoRun(void *demoCtx)
             // frames (and terminal bad frame) to the GPU parser.
             zstdgpu_Demo_MakeFramesTolerant(&fbInfo, batchInRefs, batchFrameInfo, stagedPtr, batchSpan);
 
-            if (0 != blockSlice)
+            if (slicing)
             {
                 const uint32_t batchBlockCount = fbInfo.rawBlockCount + fbInfo.rleBlockCount + fbInfo.cmpBlockCount;
 
-                sliceFramesLeft = 0;
-                sliceLastForBatch = true;
                 for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
                 {
                     const uint32_t thisStart = batchFrameInfo[j].rawBlockStart + batchFrameInfo[j].rleBlockStart + batchFrameInfo[j].cmpBlockStart;
@@ -2239,6 +2277,28 @@ static int demoRun(void *demoCtx)
 
                     if (0 == sliceIdx)
                         frameSliceStart[j] = 0;
+                }
+
+                /*
+                 *  Choose this dispatch's window for every frame, and record how far each frame
+                 *  advances so the advance step below does not have to re-derive it (the planner
+                 *  gives different frames different amounts).
+                 *
+                 *  --blk-slice gives every unfinished frame the same K blocks. --plan-mb instead
+                 *  bounds the DISPATCH: it packs whole frames until the budget is spent and slices
+                 *  only a frame that does not fit, which is what stops one large frame from
+                 *  monopolising a dispatch. A window of k block ordinals can regenerate at most
+                 *  `k * kzstdgpu_MaxCount_LiteralBytes`, so the budget maps to ordinals with no
+                 *  parse; a frame's own decompressed size caps that bound where it is known.
+                 */
+                uint64_t budgetLeft   = planBudgetBytes;
+                uint32_t anyAdvance   = 0;
+                uint64_t plannedBytes = 0;
+
+                sliceFramesLeft = 0;
+                for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
+                {
+                    frameAdvance[j] = 0;
 
                     // A frame that has run out of blocks stays in the batch (a batch is a
                     // contiguous frame range) but must decode nothing, which an ordinary window
@@ -2247,15 +2307,96 @@ static int demoRun(void *demoCtx)
                     {
                         blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = kzstdgpu_BlockWindowSkipFrame;
                         blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = 0;
+                        continue;
+                    }
+
+                    const uint32_t remBlocks = frameBlockCount[j] - frameSliceStart[j];
+                    uint32_t       windowLimit;
+
+                    if (0 == planBudgetBytes)
+                    {
+                        windowLimit = blockSlice;
                     }
                     else
                     {
-                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = frameSliceStart[j];
-                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = blockSlice;
-                        ++sliceFramesLeft;
-                        if (frameSliceStart[j] + blockSlice < frameBlockCount[j])
-                            sliceLastForBatch = false;
+                        uint64_t remBytes = (uint64_t)remBlocks * (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+                        if (0 != batchFrameInfo[j].uncompSize && batchFrameInfo[j].uncompSize < remBytes)
+                            remBytes = batchFrameInfo[j].uncompSize;
+
+                        if (remBytes <= budgetLeft)
+                        {
+                            // Fits whole: `limit == 0` means "to the end of the frame".
+                            windowLimit = 0;
+                            budgetLeft -= remBytes;
+                        }
+                        else
+                        {
+                            uint64_t k = budgetLeft / (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+                            if (k > (uint64_t)remBlocks)
+                                k = (uint64_t)remBlocks;
+
+                            if (0 == k)
+                            {
+                                // No budget left for even one block of this frame; it waits for a
+                                // later dispatch. Smaller frames after it may still fit, so the
+                                // walk continues rather than stopping here.
+                                blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = kzstdgpu_BlockWindowSkipFrame;
+                                blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = 0;
+                                continue;
+                            }
+
+                            windowLimit = (uint32_t)k;
+                            budgetLeft -= k * (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+                        }
                     }
+
+                    blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = frameSliceStart[j];
+                    blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = windowLimit;
+                    frameAdvance[j] = (0 == windowLimit) ? remBlocks : windowLimit;
+                    if (frameAdvance[j] > remBlocks)
+                        frameAdvance[j] = remBlocks;
+                    anyAdvance += frameAdvance[j];
+
+                    // Upper bound on what this frame contributes to THIS dispatch -- the quantity the
+                    // arena is sized from, and the one --plan-mb bounds while --blk-slice does not.
+                    {
+                        uint64_t b64 = (uint64_t)frameAdvance[j] * (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+                        if (0 != batchFrameInfo[j].uncompSize && batchFrameInfo[j].uncompSize < b64)
+                            b64 = batchFrameInfo[j].uncompSize;
+                        plannedBytes += b64;
+                    }
+                    ++sliceFramesLeft;
+                }
+
+                /*
+                 *  A dispatch that advances nothing would loop forever. It can only happen when the
+                 *  budget is smaller than a single block, so give the first unfinished frame one
+                 *  block -- the same rounding-up rule `zstdgpu_SliceBlockCountForDecompressedBudget`
+                 *  applies to a sub-block budget.
+                 */
+                if (0 == anyAdvance)
+                {
+                    for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
+                    {
+                        if (frameSliceStart[j] < frameBlockCount[j])
+                        {
+                            blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = frameSliceStart[j];
+                            blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = 1u;
+                            frameAdvance[j] = 1u;
+                            ++sliceFramesLeft;
+                            break;
+                        }
+                    }
+                }
+
+                if (plannedBytes > slicePeakPlannedBytes)
+                    slicePeakPlannedBytes = plannedBytes;
+
+                sliceLastForBatch = true;
+                for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
+                {
+                    if (frameSliceStart[j] + frameAdvance[j] < frameBlockCount[j])
+                        sliceLastForBatch = false;
                 }
 
                 d3d12aid_MappedBuffer_Append(&zstdBlockWindowPerFrame, 0, (void *)blockWindowCpu,
@@ -2289,7 +2430,7 @@ static int demoRun(void *demoCtx)
                 zstdgpu_SetupAllStageSubmission(perRequestContext);
             }
             zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
-            if (0 != blockSlice)
+            if (slicing)
             {
                 zstdgpu_SetupBlockWindowPerFrame(perRequestContext, zstdBlockWindowPerFrame.bufGpu);
                 zstdgpu_SetupResumeState(perRequestContext, zstdFrameResumeState.bufGpu, (0 == sliceIdx) ? 1u : 0u);
@@ -2368,7 +2509,7 @@ static int demoRun(void *demoCtx)
                 d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesRefs, 0);
                 d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &zstdUnCompressedFramesRefs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-                if (0 != blockSlice)
+                if (slicing)
                 {
                     if (dispatchIdx > 0)
                     {
@@ -2658,7 +2799,7 @@ static int demoRun(void *demoCtx)
                  *  slice's contents -- a correct prefix with a stale tail, which is
                  *  indistinguishable from a decode that lost its last slice.
                  */
-                if (sweep == 0 && outFrm && (0 == blockSlice || sliceLastForBatch))
+                if (sweep == 0 && outFrm && (!slicing || sliceLastForBatch))
                 {
                     const int bufferSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%s.frame_%u", zstFilePath, workingHi) + 1);
                     wchar_t *buffer = (wchar_t *)malloc(bufferSize * sizeof(wchar_t));
@@ -2889,7 +3030,7 @@ static int demoRun(void *demoCtx)
 
             ++sliceIdx;
             sliceStart += blockLimitPerFrame;
-            if (0 == blockSlice)
+            if (!slicing)
                 break;
             if (!windowOpen)
                 break;
@@ -2901,18 +3042,18 @@ static int demoRun(void *demoCtx)
                 uint32_t framesLeft = 0;
                 for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
                 {
+                    frameSliceStart[j] += frameAdvance[j];
                     if (frameSliceStart[j] < frameBlockCount[j])
-                    {
-                        frameSliceStart[j] += blockSlice;
-                        if (frameSliceStart[j] < frameBlockCount[j])
-                            ++framesLeft;
-                    }
+                        ++framesLeft;
                 }
                 sliceFramesLeft = framesLeft;
             }
             if (0 == sliceFramesLeft)
                 break;
             }
+
+            if (slicing && 0 == sweep)
+                debugPrint(L"[SLICE] batch=%u frames=%u dispatches=%u peak_dispatch_decomp_bytes=%llu\n", b, fbInfo.frameCount, sliceIdx, (unsigned long long)slicePeakPlannedBytes);
 
             if (!windowOpen)
                 break;
@@ -3006,6 +3147,7 @@ static int demoRun(void *demoCtx)
     free(batchFrameInfo);
     free(frameSliceStart);
     free(frameBlockCount);
+    free(frameAdvance);
     free(blockWindowCpu);
 
     debugPrint(L"Finished.\n");
