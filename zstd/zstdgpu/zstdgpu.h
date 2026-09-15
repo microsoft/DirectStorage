@@ -206,13 +206,31 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
- *  @brief      Decode only the first `blockLimitPerFrame` blocks of every frame. 0 (the default)
- *              means the whole frame.
+ *  @brief      Decode only blocks `[blockStartPerFrame, blockStartPerFrame + blockLimitPerFrame)` of
+ *              every frame. A limit of 0 means "to the end of the frame", so the default
+ *              `(0, 0)` is the whole frame.
  *
- *  This is the prefix case of intra-frame slicing. A slice that starts at block 0 needs no carried
- *  state: its output cursor is 0 and its repeat offsets are the frame's initial ones. Resuming at a
- *  later block additionally requires both to be carried in from the preceding slice, which this
- *  entry point does not provide.
+ *  This is intra-frame slicing. A slice starting at block 0 needs no carried state, so it is correct
+ *  as-is. A slice starting later needs two things carried in from the preceding slice:
+ *
+ *      - the output cursor, which the caller supplies by advancing that frame's destination offset
+ *        in `zstdgpu_SetupOutputs` by the number of bytes already decoded. Match history is read
+ *        through absolute destination addresses, so shifting the destination is also what lets
+ *        matches reach back into the previous slice's output.
+ *      - the repeat offsets, which are NOT yet carried. This is the remaining gap.
+ *
+ *  It also requires that the preceding slices' output is still present in the destination buffer,
+ *  because matches read it as history. A slice decoded into a fresh buffer sees zeros there.
+ *
+ *  Consequently a slice starting after block 0 is currently correct only for blocks that reference
+ *  no history and no repeat offsets -- in practice RAW and RLE blocks. For
+ *  compressed blocks the caller must decode the preceding slices into the same buffer first, and
+ *  even then the repeat offsets are not yet carried across the boundary.
+ *
+ *  NB: the byte count a slice produces is not known to the caller in advance -- a compressed block's
+ *      decompressed size is only discovered by decoding it -- so for compressed content the cursor
+ *      cannot be computed host-side and needs to be carried on the GPU. That is the resume record
+ *      still to come.
  *
  *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
  *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
@@ -228,7 +246,7 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestCon
  *
  *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockLimitPerFrame);
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame);
 
 /**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.

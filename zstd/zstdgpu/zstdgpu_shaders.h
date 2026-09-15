@@ -438,6 +438,7 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
                                                   ZSTDGPU_RW_BUFFER(uint32_t) outRleBlockSizes,
                                                   ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer) bits,
                                                   uint32_t outputBlockInfo,
+                                                  uint32_t blockStart,
                                                   uint32_t blockLimit)
 {
     uint32_t statusFlag;
@@ -466,12 +467,14 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
 
     /*
      *  Ordinal of the block about to be parsed, counted from the start of the frame and independent
-     *  of the per-type output cursors below. `blockLimit` of 0 means "the whole frame"; otherwise
-     *  only blocks `[0, blockLimit)` are emitted.
+     *  of the per-type output cursors below. The emitted window is
+     *  `[blockStart, blockStart + blockLimit)`, with `blockLimit == 0` meaning "to the end of the
+     *  frame"; the default `blockStart == 0, blockLimit == 0` is the whole frame.
      *
-     *  The walk itself always runs to the end of the frame. Block boundaries are only discoverable
-     *  sequentially, so stopping early would save no parsing -- and the loop's termination condition
-     *  is the last-block flag, which lives in the stream rather than in any count we hold.
+     *  The walk itself always runs from the first block to the last. Block boundaries are only
+     *  discoverable sequentially, so neither skipping ahead nor stopping early saves any parsing --
+     *  and the loop's termination condition is the last-block flag, which lives in the stream rather
+     *  than in any count we hold.
      */
     uint32_t blockOrdinal = 0;
     do
@@ -512,7 +515,9 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
          *  double as output indices. Advancing them would leave gaps that the consuming passes read
          *  as uninitialised blocks.
          */
-        const uint32_t inWindow = ((0u == blockLimit) || (blockOrdinal < blockLimit)) ? 1u : 0u;
+        const uint32_t atOrAfterStart = (blockOrdinal >= blockStart) ? 1u : 0u;
+        const uint32_t beforeEnd      = ((0u == blockLimit) || (blockOrdinal < blockStart + blockLimit)) ? 1u : 0u;
+        const uint32_t inWindow       = (0 != atOrAfterStart && 0 != beforeEnd) ? 1u : 0u;
         ++blockOrdinal;
 
         if (0 != outputBlockInfo && 0 != inWindow)
@@ -626,6 +631,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 srt.inoutRleBlockSizePrefix,
                 bits,
                 srt.countBlocksOnly > 0 ? 0u : 1u,
+                srt.blockStartPerFrame,
                 srt.blockLimitPerFrame
             );
 

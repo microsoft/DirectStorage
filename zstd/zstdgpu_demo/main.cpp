@@ -812,7 +812,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* blockLimitPerFrame, the CPU reference always decodes whole frames */ 0);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -875,7 +875,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* blockLimitPerFrame, the CPU reference always decodes whole frames */ 0);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -1427,6 +1427,8 @@ static int demoRun(void *demoCtx)
     uint32_t maxFrame = ~0u;
     uint32_t frameBatchCount = ~0u; // ~0u => one batch spanning the whole working set
     uint32_t blockLimitPerFrame = 0; // 0 => decode every block of every frame
+    uint32_t blockStartPerFrame = 0; // first block ordinal decoded in every frame
+    uint32_t blockDstOffset     = 0; // bytes already decoded by preceding slices, added to every frame's destination
     uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
@@ -1443,6 +1445,8 @@ static int demoRun(void *demoCtx)
             bool nextMaxFrame = false;
             bool nextFrameBatchCount = false;
     bool nextBlockLimit      = false;
+    bool nextBlockStart      = false;
+    bool nextBlockDstOfs     = false;
             bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
@@ -1474,7 +1478,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1498,6 +1502,10 @@ static int demoRun(void *demoCtx)
                             zstdOffs = value;
                         else if (nextBlockLimit)
                             blockLimitPerFrame = value;
+                        else if (nextBlockStart)
+                            blockStartPerFrame = value;
+                        else if (nextBlockDstOfs)
+                            blockDstOffset = value;
                     }
 
                     nextRepCount = false;
@@ -1507,6 +1515,8 @@ static int demoRun(void *demoCtx)
                     nextFrameBatchCount = false;
                     nextZstdOffs = false;
                     nextBlockLimit = false;
+                    nextBlockStart = false;
+                    nextBlockDstOfs = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -1586,6 +1596,14 @@ static int demoRun(void *demoCtx)
                 {
                     nextBlockLimit = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--blk-start"))
+                {
+                    nextBlockStart = true;
+                }
+                else if (0 == wcscmp(argv[argi], L"--blk-dst-ofs"))
+                {
+                    nextBlockDstOfs = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
                 {
                     nextZstdOffs = true;
@@ -1620,9 +1638,9 @@ static int demoRun(void *demoCtx)
              *  dies deep inside literal decoding on an opaque assert, and a validation flag that
              *  reports a meaningless comparison is worse than one that refuses to run.
              */
-            if (0 != blockLimitPerFrame && (chkCpu || chkGpu || simGpu))
+            if ((0 != blockLimitPerFrame || 0 != blockStartPerFrame) && (chkCpu || chkGpu || simGpu))
             {
-                debugPrint(L"[ERROR] '--blk-limit' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
+                debugPrint(L"[ERROR] '--blk-limit'/'--blk-start' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
                            L"those compare against a reference that decodes whole frames, so the comparison is not "
                            L"meaningful for a partially decoded frame.\n");
                 ctx->retv = 1;
@@ -1653,6 +1671,8 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode. Uses exact block counts from the cheap block-header pre-scan plus a provable literal/sequence scratch bound derived from the decompressed size.\n");
                 debugPrint(L"\t--warmup                  [Optional] Runs a fixed warmup period (~10s) before measuring; warmup runs are excluded from the [PERF] stdout statistics.\n");
                 debugPrint(L"\t--blk-limit <count>       [Optional] Decodes only the first <count> blocks of every frame (0 = all). Cannot be combined with --chk-cpu/--chk-gpu/--sim-gpu, which compare against whole-frame references.\n");
+                debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
+                debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;
@@ -1752,7 +1772,14 @@ static int demoRun(void *demoCtx)
         uint32_t vcnt = 0;
         for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
         {
-            zstdOutFrameRefs[i].offs = offs;
+            /*
+             *  A mid-frame slice writes at the frame's base plus the bytes its predecessors already
+             *  decoded. Carrying the output cursor this way needs no new GPU state: the destination
+             *  offset IS the cursor, and because match history is read through absolute destination
+             *  addresses, shifting the destination is also what lets matches reach back into the
+             *  previous slice's output.
+             */
+            zstdOutFrameRefs[i].offs = offs + blockDstOffset;
             zstdOutFrameRefs[i].size = (uint32_t)zstdFrameInfo[i].uncompSize;
 
             offs += zstdOutFrameRefs[i].size;
@@ -1972,7 +1999,7 @@ static int demoRun(void *demoCtx)
         {
             zstdgpu_SetupAllStageSubmission(perRequestContext);
         }
-        zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockLimitPerFrame);
+        zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
         if (blkCnt)
         {
             // See the batched path below: the library rejects an all-zero block
@@ -2083,7 +2110,9 @@ static int demoRun(void *demoCtx)
                 uint32_t offs = 0;
                 for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
                 {
-                    batchOutRefs[j].offs = offs;
+                    // See the note on the non-batched path: the destination offset IS the carried
+                    // output cursor for a mid-frame slice.
+                    batchOutRefs[j].offs = offs + blockDstOffset;
                     batchOutRefs[j].size = (uint32_t)batchFrameInfo[j].uncompSize;
                     offs += batchOutRefs[j].size;
                     offs  = zstdgpu_AlignUp(offs, 256);
@@ -2103,7 +2132,7 @@ static int demoRun(void *demoCtx)
             {
                 zstdgpu_SetupAllStageSubmission(perRequestContext);
             }
-            zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockLimitPerFrame);
+            zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
             if (blkCnt)
             {
                 // A batch of only undecodable frames (e.g. bad magic) collects no
