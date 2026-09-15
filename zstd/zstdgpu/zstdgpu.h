@@ -291,6 +291,30 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame);
 
 /**
+ *  @brief      Converts a per-slice DECOMPRESSED byte budget into the number of block ordinals a
+ *              slice may span, for use as `blockLimitPerFrame`.
+ *
+ *  The budget is in decompressed bytes because that is the axis the caller actually has: scratch is
+ *  sized from decompressed size, so a caller with a scratch ceiling converts it to a decompressed
+ *  budget and slices against that. It never has to count the frame's blocks, and no block header is
+ *  read on the host.
+ *
+ *  THE IDENTITY THAT REMOVES THE HOST PARSE: a zstd block decodes to at most 128 KiB, so a slice
+ *  spanning K block ordinals decodes at most `K * 128 KiB` -- whatever the content is. K is
+ *  therefore derivable from the byte budget alone, and slice boundaries are plain arithmetic
+ *  (`0, K, 2K, ...`). This is the same kind of provable bound the scratch sizing uses, and for the
+ *  same reason: a compressed block's decompressed size is only discoverable by decoding it.
+ *
+ *  A budget below one block rounds up to one, since a block is the indivisible unit of slicing.
+ *
+ *  NB: the bound is on the SLICE, not on the frame. The number of slices a frame needs is
+ *      `ceil(blockCount / K)`, and `zstdgpu_CountFramesAndBlocks` yields that block count exactly,
+ *      so a caller that wants it never has to estimate. Alternatively just iterate until a slice
+ *      reports it reached the end of the frame.
+ */
+ZSTDGPU_API uint32_t zstdgpu_SliceBlockCountForDecompressedBudget(uint64_t decompressedByteBudget);
+
+/**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.
  *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 1 uses these counts instead of
  *              reading from GPU counter readback, enabling stages 0 and 1 to be recorded into

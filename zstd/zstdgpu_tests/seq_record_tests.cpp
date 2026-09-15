@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include "zstdgpu_structs.h"
+#include "zstdgpu.h"
 
 namespace
 {
@@ -214,4 +215,58 @@ TEST(ArenaBound, SaturatesInsteadOfWrapping)
 
     EXPECT_LT(saturated, kzstdgpu_MaxScratchHeapByteCount);
     EXPECT_GE(aligned, kzstdgpu_MaxScratchHeapByteCount);
+}
+
+/***********************************************************************************************************************
+ *  Slice block-count bound.
+ *
+ *  A slice's block window is derived from a DECOMPRESSED byte budget rather than from any parse of
+ *  the frame, which is what lets a caller slice without ever counting blocks. The bound is the same
+ *  kind of provable statement as the arena bound: a zstd block regenerates at most
+ *  `kzstdgpu_MaxCount_LiteralBytes`, so K blocks regenerate at most K times that.
+ *
+ *  Pinned here rather than left to end-to-end decode coverage because an over-large K is
+ *  silent-corruption class -- it would hand the caller a slice that overruns the scratch its budget
+ *  paid for, and nothing downstream re-derives the number to catch it.
+ **********************************************************************************************************************/
+TEST(SliceBudget, IsTheDecompressedBoundDivided)
+{
+    // The defining property: K blocks must never be able to regenerate more than the budget.
+    for (uint64_t budget : { (uint64_t)kzstdgpu_MaxCount_LiteralBytes,
+                             (uint64_t)kzstdgpu_MaxCount_LiteralBytes * 7ull,
+                             1ull << 20, 1ull << 24, 1ull << 30, 1ull << 34 })
+    {
+        const uint64_t k = zstdgpu_SliceBlockCountForDecompressedBudget(budget);
+        EXPECT_LE(k * (uint64_t)kzstdgpu_MaxCount_LiteralBytes, budget) << "budget " << budget;
+    }
+
+    EXPECT_EQ(1u, zstdgpu_SliceBlockCountForDecompressedBudget(kzstdgpu_MaxCount_LiteralBytes));
+    EXPECT_EQ(8u, zstdgpu_SliceBlockCountForDecompressedBudget(1ull << 20));         // 1 MiB
+    EXPECT_EQ(64u, zstdgpu_SliceBlockCountForDecompressedBudget(8ull << 20));        // 8 MiB
+}
+
+TEST(SliceBudget, SubBlockBudgetStillBuysOneBlock)
+{
+    // A block is the indivisible unit of slicing, so rounding down to zero would produce a slice
+    // that decodes nothing and a planner loop that never advances.
+    for (uint64_t budget : { 0ull, 1ull, 4095ull, (uint64_t)kzstdgpu_MaxCount_LiteralBytes - 1ull })
+    {
+        EXPECT_EQ(1u, zstdgpu_SliceBlockCountForDecompressedBudget(budget)) << "budget " << budget;
+    }
+}
+
+TEST(SliceBudget, IsMonotonicAndSaturates)
+{
+    uint32_t prev = 0;
+    for (uint64_t budget = 0; budget < (1ull << 28); budget += 9973ull * 1024ull)
+    {
+        const uint32_t k = zstdgpu_SliceBlockCountForDecompressedBudget(budget);
+        EXPECT_GE(k, prev);
+        prev = k;
+    }
+
+    // A 64-bit budget can name more blocks than a uint32 window can hold. Clamping keeps the
+    // returned window an upper bound; wrapping would silently make it far too small.
+    EXPECT_EQ(0xffffffffu, zstdgpu_SliceBlockCountForDecompressedBudget(0xffffffffffffffffull));
+    EXPECT_EQ(0xffffffffu, zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)kzstdgpu_MaxCount_LiteralBytes * 0x100000000ull));
 }

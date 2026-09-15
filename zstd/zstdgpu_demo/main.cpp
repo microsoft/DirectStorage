@@ -1654,6 +1654,7 @@ static int demoRun(void *demoCtx)
     bool nextBlockStart      = false;
     bool nextBlockDstOfs     = false;
     bool nextBlockSlice      = false;
+    bool nextSliceMb         = false;
             bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
@@ -1685,7 +1686,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs || nextBlockSlice)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs || nextBlockSlice || nextSliceMb)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1715,8 +1716,19 @@ static int demoRun(void *demoCtx)
                             blockDstOffset = value;
                         else if (nextBlockSlice)
                             blockSlice = value;
+                        else if (nextSliceMb)
+                        {
+                            /*
+                             *  The caller states a DECOMPRESSED byte budget -- the axis it actually
+                             *  has, since scratch is sized from decompressed size -- and the library
+                             *  converts it to a block count. No block header is read here, and the
+                             *  demo never counts the frame's blocks.
+                             */
+                            blockSlice = zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)value * 1024ull * 1024ull);
+                        }
                     }
 
+                    nextSliceMb = false;
                     nextRepCount = false;
                     nextPrfLevel = false;
                     nextMinFrame = false;
@@ -1818,6 +1830,10 @@ static int demoRun(void *demoCtx)
                 {
                     nextBlockSlice = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--slice-mb"))
+                {
+                    nextSliceMb = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
                 {
                     nextZstdOffs = true;
@@ -1901,6 +1917,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
                 debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of roughly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are snapped to block ordinals that start a fresh zstd entropy context, so a slice may be longer than <count>. Forces one frame per batch. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
+                debugPrint(L"\t--slice-mb <MB>           [Optional] Same as --blk-slice but stated as a per-slice DECOMPRESSED megabyte budget, converted by zstdgpu_SliceBlockCountForDecompressedBudget. This is the axis a caller actually has, since scratch is sized from decompressed size.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;

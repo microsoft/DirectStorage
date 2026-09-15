@@ -1442,6 +1442,32 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext r
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
+uint32_t zstdgpu_SliceBlockCountForDecompressedBudget(uint64_t decompressedByteBudget)
+{
+    /*
+     *  A zstd block regenerates at most `kzstdgpu_MaxCount_LiteralBytes` bytes, so K blocks
+     *  regenerate at most K times that whatever the content is. Dividing is therefore a sound
+     *  bound and not an estimate -- the same footing as the arena bound, and the reason no block
+     *  header has to be read on the host to slice a frame.
+     *
+     *  Saturating rather than truncating matters: a 64-bit budget can exceed UINT32_MAX blocks, and
+     *  a wrapped K would silently produce a SHORTER slice than the caller paid for, which is a
+     *  correctness-neutral but confusing under-use. Clamp instead.
+     */
+    const uint64_t k = decompressedByteBudget / (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+
+    if (k < 1u)
+    {
+        /** A block is the indivisible unit of slicing, so a sub-block budget still buys one. */
+        return 1u;
+    }
+    if (k > 0xfffffffful)
+    {
+        return 0xfffffffful;
+    }
+    return (uint32_t)k;
+}
+
 ZSTDGPU_ENUM(Status) zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
 {
     uint32_t proceed = 1;
