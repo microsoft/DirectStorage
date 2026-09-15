@@ -54,6 +54,7 @@ groupshared uint32_t Lds[kzstdgpu_DecompressSequences_MultiStream_LdsOutCache_Ld
 
 [RootSignature(ZSTDGPU_SRT_RS_DecompressSequences)]
 [numthreads(kzstdgpu_TgSizeX_DecompressSequences, 1, 1)]
+[wavesize(32)] // TEST
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_DecompressSequences_SRT srt;

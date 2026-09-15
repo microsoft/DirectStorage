@@ -664,8 +664,15 @@ static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
 #if SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS
 static uint32_t zstdgpu_ConcatenatedWaveReadLaneAt(uint32_t2 v2, uint32_t flatIdx)
 {
+#if SEQ_CODE_INFO_READ_UNIFORM_INDEX
     uint32_t v = flatIdx < 32 ? v2.x : v2.y;    // NOTE: this v_cndmask_b32 needs all lanes active.
     return WaveReadLaneAt(v, flatIdx & 31);     // Also undefined in HLSL to read from an inactive lane.
+#else
+    // MultiStream_LdsOutCache: this still wont work because not all lanes will be active;
+    // there are no early returns, but the loop exit condition is non-uniform.
+    uint32_t2 r2 = WaveReadLaneAt(v2, flatIdx & 31);
+    return flatIdx < 32 ? r2.x : r2.y;
+#endif
 }
 #endif
 
