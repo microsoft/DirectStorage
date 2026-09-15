@@ -241,26 +241,38 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *              `(0, 0)` is the whole frame.
  *
  *  This is intra-frame slicing. A slice starting at block 0 needs no carried state, so it is correct
- *  as-is. A slice starting later needs two things carried in from the preceding slice:
+ *  as-is. A slice starting later requires all three of the following:
  *
- *      - the output cursor, which the caller supplies by advancing that frame's destination offset
- *        in `zstdgpu_SetupOutputs` by the number of bytes already decoded. Match history is read
- *        through absolute destination addresses, so shifting the destination is also what lets
- *        matches reach back into the previous slice's output.
- *      - the repeat offsets, which are NOT yet carried. This is the remaining gap.
+ *      - the output cursor and the repeat offsets, both carried on the GPU via
+ *        `zstdgpu_SetupResumeState`. Neither can be supplied host-side: a compressed block's
+ *        decompressed size is only discovered by decoding it, and zstd's `1/4/8` repeat-offset
+ *        defaults apply only at the true start of a frame. (Advancing the frame's destination
+ *        offset in `zstdgpu_SetupOutputs` is an alternative way to carry the cursor, but only for
+ *        content whose decoded size the caller already knows, i.e. RAW and RLE blocks.)
+ *      - the preceding slices' output still being present in the destination buffer, because
+ *        matches read it as history through absolute destination addresses. A slice decoded into a
+ *        fresh buffer sees zeros there.
+ *      - a slice boundary that does not break zstd's entropy-table reuse. See below; this one is
+ *        the caller's responsibility and it is not checked.
  *
- *  It also requires that the preceding slices' output is still present in the destination buffer,
- *  because matches read it as history. A slice decoded into a fresh buffer sees zeros there.
+ *  ENTROPY-TABLE REUSE -- NOT EVERY BLOCK BOUNDARY IS A LEGAL CUT.
  *
- *  Consequently a slice starting after block 0 is currently correct only for blocks that reference
- *  no history and no repeat offsets -- in practice RAW and RLE blocks. For
- *  compressed blocks the caller must decode the preceding slices into the same buffer first, and
- *  even then the repeat offsets are not yet carried across the boundary.
+ *  zstd reuses entropy tables across blocks within a frame: a sequences section may select FSE
+ *  `Repeat_Mode`, and a `Treeless_Literals_Block` reuses the Huffman table of the last
+ *  `Compressed_Literals_Block`. A slice that begins at such a block has no such table. It does not
+ *  fail -- it decodes against whatever the freshly allocated buffers contain, producing wrong output
+ *  with a success status.
  *
- *  NB: the byte count a slice produces is not known to the caller in advance -- a compressed block's
- *      decompressed size is only discovered by decoding it -- so for compressed content the cursor
- *      cannot be computed host-side and needs to be carried on the GPU. That is the resume record
- *      still to come.
+ *  The legality rule is stronger than "block B defines its own tables": a block *after* B may repeat
+ *  a table defined *before* B, and that block is then undecodable in any slice. B is a valid cut
+ *  only if a forward walk from B to the end of the frame never hits an unmet requirement.
+ *
+ *  Determining that needs a host-side parse of the block and section headers. The library does not
+ *  expose one yet, so callers must scan themselves; `zstdgpu_demo` demonstrates it
+ *  (`demoScanFrameEntropyDeps` / `demoComputeValidCuts` / `demoPlanSliceEnd`). Growing a slice until
+ *  a legal cut exists is always safe; cutting illegally is not. Note that legality is a property of
+ *  an individual frame while this window is uniform across the batch, so slicing real content in
+ *  general means one frame per batch.
  *
  *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
  *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
