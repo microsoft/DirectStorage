@@ -384,7 +384,14 @@ static void loadFileAligned(void **outData, uint32_t *outDataSize, uint32_t *out
     *outBufferSize = bufferSize;
 }
 
-static void saveFile(const wchar_t *fileName, const void *data, uint32_t dataSize)
+/*
+ *  Returns false when the file was not written in full.
+ *
+ *  A failed save used to be a log line only. That is worse than it sounds: the previous contents of
+ *  the file survive, so a caller comparing the dump against a reference sees a plausible-looking
+ *  mismatch and blames the decoder. Report it so the caller can fail loudly instead.
+ */
+static bool saveFile(const wchar_t *fileName, const void *data, uint32_t dataSize)
 {
     FILE *file = NULL;
     _wfopen_s(&file, fileName, L"wb");
@@ -397,11 +404,13 @@ static void saveFile(const wchar_t *fileName, const void *data, uint32_t dataSiz
         }
         fflush(file);
         fclose(file);
+
+        return writtenByteCount == dataSize;
     }
-    else
-    {
-        debugPrint(L"[IO] Saving '%s' failed. Couldn't open file.\n", fileName);
-    }
+
+    debugPrint(L"[IO] Saving '%s' failed. Couldn't open file.\n", fileName);
+
+    return false;
 }
 
 /***********************************************************************************************************************
@@ -2762,14 +2771,23 @@ static int demoRun(void *demoCtx)
                     }
                 }
 
-                if (sweep == 0 && outFrm /** output decompressed frame data to files if requested via command line */)
+                /*
+                 *  Dump only once the frame is complete. Writing after every slice rewrites the
+                 *  same file N times, and if one of those writes fails the file keeps the previous
+                 *  slice's contents -- a correct prefix with a stale tail, which is
+                 *  indistinguishable from a decode that lost its last slice.
+                 */
+                if (sweep == 0 && outFrm && (0 == blockSlice || sliceStart + blockLimitPerFrame >= sliceBlockCount))
                 {
                     const int bufferSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%s.frame_%u", zstFilePath, workingHi) + 1);
                     wchar_t *buffer = (wchar_t *)malloc(bufferSize * sizeof(wchar_t));
                     for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
                     {
                         ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(buffer, bufferSize, L"%s.frame_%u", zstFilePath, bLo + i));
-                        saveFile(buffer, (char*)zstdUnCompressedFramesMemory.bufMem[0] + batchOutRefs[i].offs, batchOutRefs[i].size);
+                        if (!saveFile(buffer, (char*)zstdUnCompressedFramesMemory.bufMem[0] + batchOutRefs[i].offs, batchOutRefs[i].size))
+                        {
+                            ctx->retv = 1;
+                        }
                     }
                     free(buffer);
                 }
