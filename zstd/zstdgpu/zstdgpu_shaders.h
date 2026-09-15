@@ -3078,11 +3078,11 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
         zstdgpu_HuffmanStream_InitWithSegment(stream, CompressedData, compressedLiteral.src, bitsMax);
         do
         {
-            const uint32_t state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            const uint32_t state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_HuffmanStream_ConditionalFetch(stream); // place to maximize instructions overlapping the fetch
             uint32_t symbol = 0;
             uint32_t bitcnt = 0;
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
-
             // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
             // and then to memory. At least try small LDS cache of 32-dwords per literal
             zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
@@ -3145,27 +3145,28 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
     // Handle head bytes (up to 3 bytes before the first dword-aligned address)
     ZSTDGPU_BRANCH if (byteAlignedBeg < dwordAlignedBeg)
     {
-        state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+        state = zstdgpu_HuffmanStream_GetFromFetched(stream);
         zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
         zstdgpu_TypedStoreU8(DecompressedLiterals, byteAlignedBeg ++, symbol);
         zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
         ZSTDGPU_BRANCH if (byteAlignedBeg < dwordAlignedBeg)
         {
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             zstdgpu_TypedStoreU8(DecompressedLiterals, byteAlignedBeg ++, symbol);
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
             ZSTDGPU_BRANCH if (byteAlignedBeg < dwordAlignedBeg)
             {
-                state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+                state = zstdgpu_HuffmanStream_GetFromFetched(stream);
                 zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
                 zstdgpu_TypedStoreU8(DecompressedLiterals, byteAlignedBeg ++, symbol);
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
             }
         }
     }
+    zstdgpu_HuffmanStream_ConditionalFetch(stream);
 
     const uint32_t kStoreCacheBankCount = 32;
     const uint32_t kStoreCacheBankMask = kStoreCacheBankCount - 1u;
@@ -3189,22 +3190,23 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
         for (; dwordIdx < dwordIdxBatchEnd; ++dwordIdx)
         {
             uint32_t dword = 0;
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             dword |= symbol;
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             dword |= symbol << 8;
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             dword |= symbol << 16;
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_HuffmanStream_ConditionalFetch(stream); // place to maximize instructions overlapping the fetch
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             dword |= symbol << 24;
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
@@ -3236,26 +3238,30 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
     }
     while (WaveActiveAnyTrue(dwordIdx < dwordIdxEnd));
 
+    // zstdgpu_HuffmanStream_ConditionalFetch(stream) is not needed here:
+    //      - It is after the 0-3 head aligmnent decodes.
+    //      - It is at the bottom of the 4x loop; that exit condition is per-thread, but so is the fetch condition.
+
     // Handle tail bytes (up to 3 bytes after the last dword-aligned address)
     ZSTDGPU_BRANCH if (dwordAlignedEnd < byteAlignedEnd)
     {
         uint32_t tailByte = dwordAlignedEnd;
 
-        state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+        state = zstdgpu_HuffmanStream_GetFromFetched(stream);
         zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
         zstdgpu_TypedStoreU8(DecompressedLiterals, tailByte ++, symbol);
         zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
         ZSTDGPU_BRANCH if (tailByte < byteAlignedEnd)
         {
-            state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
             zstdgpu_TypedStoreU8(DecompressedLiterals, tailByte ++, symbol);
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
             ZSTDGPU_BRANCH if (tailByte < byteAlignedEnd)
             {
-                state = zstdgpu_HuffmanStream_RefillAndPeek(stream);
+                state = zstdgpu_HuffmanStream_GetFromFetched(stream);
                 zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
                 zstdgpu_TypedStoreU8(DecompressedLiterals, tailByte ++, symbol);
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
@@ -4202,8 +4208,8 @@ static void zstdgpu_ExecuteSequences_Lit(ZSTDGPU_PARAM_INOUT(zstdgpu_ExecuteSequ
         // NOTE(pamartis): these are still uniform variables HLSL has no way of enforcing....
         zstdgpu_Sequence seq = zstdgpu_LoadSequence(srt, seqIdx);
 
-        // NOTE: Process 2 sequences at a time to optimize execution.  Execution is not VGPR limited. 
-        // Sequence k's match copy and k+1's literal copy are independent: different source buffers, non-overlapping destinations.        
+        // NOTE: Process 2 sequences at a time to optimize execution.  Execution is not VGPR limited.
+        // Sequence k's match copy and k+1's literal copy are independent: different source buffers, non-overlapping destinations.
         ZSTDGPU_LOOP for (; seqIdx + 1u < seqEnd; seqIdx += 2u)
         {
             const uint32_t nextSeqIdx = seqIdx + 1u;
