@@ -511,16 +511,28 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
 
         /*
          *  A block outside the window is parsed (its boundary is needed to reach the next one) but
-         *  contributes nothing: no emitted record, and no advance of the per-type cursors, which
-         *  double as output indices. Advancing them would leave gaps that the consuming passes read
-         *  as uninitialised blocks.
+         *  normally contributes nothing: no emitted record, and no advance of the per-type cursors,
+         *  which double as output indices. Advancing them would leave gaps that the consuming
+         *  passes read as uninitialised blocks.
+         *
+         *  The one exception is a COMPRESSED block BEFORE the window. zstd lets a block reuse the
+         *  previous block's Huffman table (`Treeless_Literals_Block`) or FSE tables
+         *  (`Repeat_Mode`), so an in-window block can depend on a table defined by an earlier one.
+         *  Those blocks are therefore still emitted, flagged "entropy only": they are parsed for
+         *  their table descriptors alone and produce no literals, no sequences and no output bytes,
+         *  which is what makes every block ordinal a legal slice boundary.
+         *
+         *  Blocks AFTER the window need no such treatment -- table definitions only ever flow
+         *  forwards, so nothing past the window can be required inside it.
          */
         const uint32_t atOrAfterStart = (blockOrdinal >= blockStart) ? 1u : 0u;
         const uint32_t beforeEnd      = ((0u == blockLimit) || (blockOrdinal < blockStart + blockLimit)) ? 1u : 0u;
         const uint32_t inWindow       = (0 != atOrAfterStart && 0 != beforeEnd) ? 1u : 0u;
+        const uint32_t entropyOnly    = (isCmp && 0 == atOrAfterStart) ? 1u : 0u;
+        const uint32_t emitBlock      = (0 != inWindow || 0 != entropyOnly) ? 1u : 0u;
         ++blockOrdinal;
 
-        if (0 != outputBlockInfo && 0 != inWindow)
+        if (0 != outputBlockInfo && 0 != emitBlock)
         {
             const uint32_t blockIndex = outFrameInfo.rawBlockStart
                                       + outFrameInfo.rleBlockStart
@@ -549,7 +561,7 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
             ZSTDGPU_BRANCH if (isCmp)
             {
                 outBlocksCMPRefs[outFrameInfo.cmpBlockStart].offs = blockOffs;
-                outBlocksCMPRefs[outFrameInfo.cmpBlockStart].size = blockSize;
+                outBlocksCMPRefs[outFrameInfo.cmpBlockStart].size = zstdgpu_EncodeEntropyOnlyIntoBlockSize(blockSize, entropyOnly);
 
                 outGlobalBlockIndexPerCmpBlock[outFrameInfo.cmpBlockStart] = blockIndex;
             }
@@ -566,7 +578,9 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
 
         // `Compressed_Block` - this is a Zstandard compressed block. `Block_Size` is the length of `Block_Content`, the compressed data.
         // The decompressed size is not known, but its maximum possible value is guaranteed (see below).
-        outFrameInfo.cmpBlockStart += (isCmp && 0 != inWindow) ? 1 : 0;
+        // Entropy-only blocks take a slot here too: they must reach `ParseCompressedBlocks` to have
+        // their tables built, and their zero-byte output leaves the block size prefix sum unchanged.
+        outFrameInfo.cmpBlockStart += (isCmp && 0 != emitBlock) ? 1 : 0;
 
         outFrameInfo.rawBlockBytesStart += (isRaw && 0 != inWindow) ? blockSize : 0;
         outFrameInfo.rleBlockBytesStart += (isRle && 0 != inWindow) ? blockSize : 0;
@@ -1091,7 +1105,17 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         return;
 
     zstdgpu_Forward_BitBuffer buffer;
-    zstdgpu_Forward_BitBuffer_InitWithSegment(buffer, srt.inCompressedData, srt.inBlocksCMPRefs[threadId], srt.compressedBufferSizeInBytes);
+    zstdgpu_OffsetAndSize blockRef = srt.inBlocksCMPRefs[threadId];
+
+    /*
+     *  An entropy-only block sits before the decoded window and exists solely so the tables it
+     *  defines are available to in-window blocks that reuse them. Its headers are parsed in full --
+     *  that is the point -- but it emits no literal streams, no sequences and no output bytes.
+     */
+    const uint32_t entropyOnly = zstdgpu_DecodeBlockIsEntropyOnly(blockRef.size);
+    blockRef.size = zstdgpu_DecodeBlockSize(blockRef.size);
+
+    zstdgpu_Forward_BitBuffer_InitWithSegment(buffer, srt.inCompressedData, blockRef, srt.compressedBufferSizeInBytes);
 
     zstdgpu_CompressedBlockData outBlockData;
     zstdgpu_Init_CompressedBlockData(outBlockData);
@@ -1126,7 +1150,9 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     const uint32_t literalBlockSzFmt = zstdgpu_Forward_BitBuffer_GetNoRefill(buffer, 2);
 
     #ifdef __hlsl_dx_compiler
-        const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
+        const uint32_t hufLitStreamCount = (0 != entropyOnly)
+                                         ? 0u
+                                         : ((literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u);
         const uint32_t hufLitStreamStart = zstdgpu_OrderedAppendIndex(srt.inoutLitStreamCountPrefixLookback, hufLitStreamCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
     #else
         const uint32_t hufLitStreamStart = srt.inoutCounters[0].HUF_Streams;
@@ -1167,17 +1193,17 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         if (literalBlockType == 0)
         {
             outBlockData.literal.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
-            outBlockData.literal.size = zstdgpu_EncodeRawLitTypeIntoLitSize(regeneratedSize);
+            outBlockData.literal.size = zstdgpu_EncodeRawLitTypeIntoLitSize((0 != entropyOnly) ? 0u : regeneratedSize);
             zstdgpu_Forward_BitBuffer_Skip(buffer, regeneratedSize);
         }
         else
         {
             outBlockData.literal.offs = zstdgpu_Forward_BitBuffer_Get(buffer, 8);
-            outBlockData.literal.size = zstdgpu_EncodeRleLitTypeIntoLitSize(regeneratedSize);
+            outBlockData.literal.size = zstdgpu_EncodeRleLitTypeIntoLitSize((0 != entropyOnly) ? 0u : regeneratedSize);
         }
 
-        const uint32_t rawStreamCountPerWave = WaveActiveCountBits(literalBlockType == 0);
-        const uint32_t rleStreamCountPerWave = WaveActiveCountBits(literalBlockType == 1);
+        const uint32_t rawStreamCountPerWave = WaveActiveCountBits((literalBlockType == 0) && (0 == entropyOnly));
+        const uint32_t rleStreamCountPerWave = WaveActiveCountBits((literalBlockType == 1) && (0 == entropyOnly));
         if (WaveIsFirstLane())
         {
             InterlockedAdd(srt.inoutCounters[0].RAW_Streams, rawStreamCountPerWave);
@@ -1229,8 +1255,11 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             ZSTDGPU_BREAK(); // Corruption
         }
 
-        const uint32_t streamCountPerWave = WaveActiveSum(streamCount);
-        const uint32_t regeneratedSizePerWave = WaveActiveSum(regeneratedSize);
+        const uint32_t emittedStreamCount = (0 != entropyOnly) ? 0u : streamCount;
+        const uint32_t emittedRegenSize   = (0 != entropyOnly) ? 0u : regeneratedSize;
+
+        const uint32_t streamCountPerWave = WaveActiveSum(emittedStreamCount);
+        const uint32_t regeneratedSizePerWave = WaveActiveSum(emittedRegenSize);
 
         uint32_t regeneratedOffsetPerWave = 0;
         if (WaveIsFirstLane())
@@ -1238,10 +1267,10 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             InterlockedAdd(srt.inoutCounters[0].HUF_Streams, streamCountPerWave);
             InterlockedAdd(srt.inoutCounters[0].HUF_Streams_DecodedBytes, regeneratedSizePerWave, regeneratedOffsetPerWave);
         }
-        const uint32_t regeneratedOffset = WaveReadLaneFirst(regeneratedOffsetPerWave) + WavePrefixSum(regeneratedSize);
+        const uint32_t regeneratedOffset = WaveReadLaneFirst(regeneratedOffsetPerWave) + WavePrefixSum(emittedRegenSize);
 
         outBlockData.literal.offs = regeneratedOffset;
-        outBlockData.literal.size = zstdgpu_EncodeCmpLitTypeIntoLitSize(regeneratedSize);
+        outBlockData.literal.size = zstdgpu_EncodeCmpLitTypeIntoLitSize(emittedRegenSize);
         outBlockData.litStreamIndex = hufLitStreamStart;
 
         //  Note: `Compressed_Size` includes the size of the Huffman Tree description when it is present.
@@ -1360,7 +1389,17 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
             fseTableIndexHufW = kzstdgpu_FseProbTableIndex_Repeat;
         }
 
-        if (1 == streamCount)
+        if (0 != entropyOnly)
+        {
+            /*
+             *  Entropy-only: the Huffman table description above has been captured (that is the
+             *  whole reason this block is here), but no literal streams are emitted. Step over the
+             *  payload in one go to reach the sequences section. `compressedSize` has already had
+             *  the tree description subtracted, so it covers the 4-stream jump table too.
+             */
+            zstdgpu_Forward_BitBuffer_Skip(buffer, compressedSize);
+        }
+        else if (1 == streamCount)
         {
             srt.inoutLitRefs[hufLitStreamStart].src.offs = zstdgpu_Forward_BitBuffer_GetByteOffset(buffer);
             srt.inoutLitRefs[hufLitStreamStart].src.size = compressedSize;
@@ -1492,8 +1531,16 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     const bool seqStreamPresent = 0 != seqCount;
 
+    /*
+     *  An entropy-only block still takes a sequence-stream SLOT when it has a sequences section,
+     *  because that slot is what carries its FSE table ids into the `Repeat_Mode` lookback chain
+     *  that in-window blocks resolve against. It contributes zero SEQUENCES, so it consumes no
+     *  arena space and decodes nothing.
+     */
+    const uint32_t emittedSeqCount = (0 != entropyOnly) ? 0u : seqCount;
+
     const uint32_t waveSeqStreamCount = WaveActiveCountBits(seqStreamPresent);
-    const uint32_t waveSeqCount = WaveActiveSum(seqCount);
+    const uint32_t waveSeqCount = WaveActiveSum(emittedSeqCount);
 
     uint32_t fseTableIndexLLen = kzstdgpu_FseProbTableIndex_Unused;
     uint32_t fseTableIndexOffs = kzstdgpu_FseProbTableIndex_Unused;
@@ -1512,7 +1559,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
     #ifdef __hlsl_dx_compiler
         const uint32_t seqStreamIndex = zstdgpu_OrderedAppendIndex(srt.inoutBlockSeqCountPrefixLookback, seqStreamPresent, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
-        const uint32_t seqIndex = zstdgpu_OrderedAppendIndex(srt.inoutSeqCountPrefixLookback, seqCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
+        const uint32_t seqIndex = zstdgpu_OrderedAppendIndex(srt.inoutSeqCountPrefixLookback, emittedSeqCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
     #endif
 
     //  `if (Number_of_Sequences == 0)` : there are no sequences.
@@ -1575,6 +1622,13 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
         // NOTE(pamartis): given the prefix sum (exclusive) of compressed block counts in each frame (srt.inPerFrameBlockCountCMP)
         // each threadId (compressed block index) does a binary search of its ZSTD frame index
         // when the frame index is found, the minimal index across all sequence streams in a frame is stored
+        //
+        // Entropy-only streams are EXCLUDED from both. The minimum names the stream that seeds the
+        // frame's repeat offsets (from the resume record, or the frame-start constants) and the
+        // maximum names the stream whose final offsets are written back. An entropy-only stream sits
+        // before the window and decodes nothing, so letting it win either would seed or persist the
+        // repeat-offset chain at the wrong end of the frame -- silently, and with plausible output.
+        if (0 == entropyOnly)
         {
             const uint32_t frameIndex = zstdgpu_BinarySearch(srt.inPerFrameBlockCountCMP, 0, srt.frameCount, threadId);
 
@@ -3184,6 +3238,39 @@ static void zstdgpu_ReadExtraBitsAndUpdateState(ZSTDGPU_PARAM_INOUT(zstdgpu_Back
     stateOffs = zstdgpu_FseElem_NState(fseElemOffs) + restOffs;
 }
 
+/**
+ *  A sequence stream with no sequences belongs to an "entropy only" block -- one that sits before
+ *  the decoded window and was parsed solely so the entropy tables it defines are available to
+ *  in-window blocks that reuse them. Its slot exists only to carry those FSE table ids into the
+ *  `Repeat_Mode` lookback chain; its sequence bitstream must not be touched, and it produces no
+ *  output bytes.
+ *
+ *  Writing the freshly initialised offsets is not a formality. They are the encoded "repeat 1/2/3"
+ *  triple, which `zstdgpu_DecodeSeqRepeatOffsetsAndApplyPreviousOffsets` resolves to exactly the
+ *  predecessor's offsets -- i.e. the pass-through the repeat-offset chain needs in order to survive
+ *  an empty stream. Leaving the slot unwritten would instead feed stale values into every following
+ *  stream in the frame.
+ *
+ *  Returns 1 when the stream was empty and has been fully handled by this call.
+ */
+static uint32_t zstdgpu_DecompressSequences_HandleEmptyStream(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt,
+                                                              uint32_t seqStreamIdx,
+                                                              uint32_t seqStreamCnt)
+{
+    const zstdgpu_OffsetAndSize seqRange = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
+    if (0 != seqRange.size)
+        return 0u;
+
+    uint32_t passThrough1, passThrough2, passThrough3;
+    zstdgpu_SequenceOffsets_Init(passThrough1, passThrough2, passThrough3);
+
+    srt.inoutPerSeqStreamFinalOffset1[seqStreamIdx] = passThrough1;
+    srt.inoutPerSeqStreamFinalOffset2[seqStreamIdx] = passThrough2;
+    srt.inoutPerSeqStreamFinalOffset3[seqStreamIdx] = passThrough3;
+
+    return 1u;
+}
+
 static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t streamsPerGroup)
 {
     const uint32_t seqStreamIdx = groupId * streamsPerGroup + threadId;
@@ -3191,6 +3278,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
     if (seqStreamIdx >= seqStreamCnt)
+        return;
+
+    if (0 != zstdgpu_DecompressSequences_HandleEmptyStream(srt, seqStreamIdx, seqStreamCnt))
         return;
 
     const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
@@ -3339,6 +3429,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
     if (seqStreamIdx >= seqStreamCnt)
+        return;
+
+    if (0 != zstdgpu_DecompressSequences_HandleEmptyStream(srt, seqStreamIdx, seqStreamCnt))
         return;
 
     const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);

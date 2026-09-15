@@ -241,7 +241,7 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *              `(0, 0)` is the whole frame.
  *
  *  This is intra-frame slicing. A slice starting at block 0 needs no carried state, so it is correct
- *  as-is. A slice starting later requires all three of the following:
+ *  as-is. A slice starting later requires both of the following:
  *
  *      - the output cursor and the repeat offsets, both carried on the GPU via
  *        `zstdgpu_SetupResumeState`. Neither can be supplied host-side: a compressed block's
@@ -252,33 +252,24 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *      - the preceding slices' output still being present in the destination buffer, because
  *        matches read it as history through absolute destination addresses. A slice decoded into a
  *        fresh buffer sees zeros there.
- *      - a slice boundary that does not break zstd's entropy-table reuse. See below; this one is
- *        the caller's responsibility and it is not checked.
  *
- *  ENTROPY-TABLE REUSE -- NOT EVERY BLOCK BOUNDARY IS A LEGAL CUT.
+ *  EVERY BLOCK ORDINAL IS A LEGAL CUT -- no host-side legality scan is needed.
  *
  *  zstd reuses entropy tables across blocks within a frame: a sequences section may select FSE
  *  `Repeat_Mode`, and a `Treeless_Literals_Block` reuses the Huffman table of the last
- *  `Compressed_Literals_Block`. A slice that begins at such a block has no such table. It does not
- *  fail -- it decodes against whatever the freshly allocated buffers contain, producing wrong output
- *  with a success status.
+ *  `Compressed_Literals_Block`. A slice beginning at such a block has none of those tables in its
+ *  own dispatch.
  *
- *  The legality rule is stronger than "block B defines its own tables": a block *after* B may repeat
- *  a table defined *before* B, and that block is then undecodable in any slice. B is a valid cut
- *  only if a forward walk from B to the end of the frame never hits an unmet requirement.
+ *  The library resolves this itself. Compressed blocks *before* the window are carried through the
+ *  parse as "entropy only": their section headers are parsed so their Huffman weights and FSE tables
+ *  are built, and their literal payloads are skipped outright. They emit zero literals, zero
+ *  sequences and zero output bytes, so they consume no arena scratch and contribute nothing to any
+ *  destination offset -- they exist solely so in-window blocks can resolve `Repeat_Mode` and
+ *  `Treeless` against them. Only blocks before the window need this, because table definitions flow
+ *  forwards; blocks after the window are still skipped entirely.
  *
- *  Determining that needs a host-side parse of the block and section headers. The library does not
- *  expose one yet, so callers must scan themselves; `zstdgpu_demo` demonstrates it
- *  (`demoScanFrameEntropyDeps` / `demoComputeValidCuts` / `demoPlanSliceEnd`). Growing a slice until
- *  a legal cut exists is always safe; cutting illegally is not. Note that legality is a property of
- *  an individual frame while this window is uniform across the batch, so slicing real content in
- *  general means one frame per batch.
- *
- *  NB: this restriction is an artifact of resolving table reuse by dispatch-local lookback, and is
- *      intended to be removed rather than formalised. Resolving `Repeat_Mode` and `Treeless` to the
- *      owning block's descriptor offset instead -- so an in-slice block rebuilds its tables from
- *      compressed bytes that are resident anyway -- makes every block ordinal a legal cut and
- *      retires the host scan entirely. Do not build a caller-visible legality API on top of this.
+ *  The cost is bounded by table size (FSE <= 512 entries, Huffman <= 256), not by payload size, and
+ *  grows with the slice's start ordinal within its frame.
  *
  *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
  *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
@@ -287,6 +278,10 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *
  *  With multiple frames each frame is truncated independently and its output still lands at that
  *  frame's own destination.
+ *
+ *  NB: this window is a single scalar applied uniformly to every frame in the batch. There is no
+ *      way to slice one frame while decoding its neighbours whole, so slicing in practice means one
+ *      frame per batch until a per-frame window exists.
  *
  *  NB: validating a partial decode requires a reference that truncates at the same block boundary.
  *      Comparing against a whole-frame reference is not meaningful, so callers that validate must

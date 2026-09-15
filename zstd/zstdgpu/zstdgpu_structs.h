@@ -992,6 +992,33 @@ static inline uint32_t zstdgpu_EncodeCmpLitTypeIntoLitSize(uint32_t x)
     return (x & ~0xc0000000u) | 0xc0000000u;
 }
 
+/**
+ *  An "entropy-only" compressed block sits BEFORE the decoded window (`blockOrdinal < blockStart`).
+ *  It is parsed solely so that the entropy tables it defines exist for the in-window blocks that
+ *  reuse them via `Treeless_Literals_Block` or FSE `Repeat_Mode`; it emits no literals, no
+ *  sequences, and no output bytes.
+ *
+ *  The flag rides in the top bit of the block-reference `size` field, which is free because a zstd
+ *  block header carries `Block_Size` in 21 bits and the payload can never exceed
+ *  `kzstdgpu_MaxCount_LiteralBytes` (128 KiB). Same trick, and same justification, as the literal
+ *  type packing above.
+ */
+static inline uint32_t zstdgpu_EncodeEntropyOnlyIntoBlockSize(uint32_t x, uint32_t entropyOnly)
+{
+    ZSTDGPU_ASSERT(x <= ~0x80000000u);
+    return (x & ~0x80000000u) | (0 != entropyOnly ? 0x80000000u : 0u);
+}
+
+static inline uint32_t zstdgpu_DecodeBlockIsEntropyOnly(uint32_t x)
+{
+    return (0 != (x & 0x80000000u)) ? 1u : 0u;
+}
+
+static inline uint32_t zstdgpu_DecodeBlockSize(uint32_t x)
+{
+    return x & ~0x80000000u;
+}
+
 static inline uint32_t zstdgpu_DecodeLitType(uint32_t x)
 {
     const uint32_t type = x & 0xc0000000u;
