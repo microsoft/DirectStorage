@@ -2595,6 +2595,17 @@ static int demoRun(void *demoCtx)
                     cmdList->ResourceBarrier(1u, &barrier);
 
                     d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesMemory, 0 /** works only when submissions aren't overlapped*/);
+
+                    /*
+                     *  BeginTransfer leaves the destination in COPY_SOURCE and d3d12aid has no
+                     *  matching "end" for a readback buffer, so every later submission would
+                     *  declare UNORDERED_ACCESS as the previous state while the resource is
+                     *  actually in COPY_SOURCE. That matters here because a sliced decode both
+                     *  writes the destination and reads it back as match history.
+                     */
+                    D3D12_RESOURCE_BARRIER backToUav;
+                    d3d12aid_Resource_TransitionBarrier(&backToUav, zstdUnCompressedFramesMemory.bufGpu, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    cmdList->ResourceBarrier(1u, &backToUav);
                 }
                 zstdgpu_ReadbackTimestamps(perRequestContext, cmdList);
                 if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation)
