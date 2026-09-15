@@ -631,11 +631,38 @@ struct zstdgpu_SeqCodeInfoContext
     uint32_t2 mlenVgpr;
 };
 
-static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
+#if SEQ_CODE_INFO_USE_LDS && SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
+#error "Cannot have both SEQ_CODE_INFO_USE_LDS and SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS defined nonzero".
+#endif
+
+#if SEQ_CODE_INFO_USE_LDS
+groupshared uint32_t LdsSeqCodeInfoLLen[SEQ_LLEN_CODE_INFO_END];
+groupshared uint32_t LdsSeqCodeInfoMLen[SEQ_MLEN_CODE_INFO_END];
+#endif
+
+static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext(uint32_t threadId, uint32_t numThreads)
 {
     zstdgpu_SeqCodeInfoContext ctx;
 
-#if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
+    ZSTDGPU_UNUSED(threadId);
+    ZSTDGPU_UNUSED(numThreads);
+
+#if SEQ_CODE_INFO_USE_LDS
+
+    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_LLEN_CODE_INFO_END, threadId, numThreads)
+    {
+        LdsSeqCodeInfoLLen[i] = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[i];
+    }
+
+    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_MLEN_CODE_INFO_END, threadId, numThreads)
+    {
+        LdsSeqCodeInfoMLen[i] = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[i];
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+#elif SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
+
     if (WaveGetLaneCount() >= 32)
     {
         const uint32_t laneIdx = WaveGetLaneIndex();
@@ -656,6 +683,7 @@ static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
             }
         }
     }
+
 #endif
 
     return ctx;
@@ -3334,6 +3362,16 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
 
     uint32_t llenInfo;
     uint32_t mlenInfo;
+
+#if SEQ_CODE_INFO_USE_LDS
+
+    // Depending on the compiler, using WaveReadLaneFirst(info) or WaveReadLaneAt(info, 0)
+    // may not be recommended or needed/helpful.
+    llenInfo = LdsSeqCodeInfoLLen[symbolLLen];
+    mlenInfo = LdsSeqCodeInfoMLen[symbolMLen];
+
+#else
+
 #if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
     if (WaveGetLaneCount() >= 32)
     {
@@ -3347,6 +3385,8 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
         llenInfo = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[symbolLLen];
         mlenInfo = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[symbolMLen];
     }
+
+#endif
 
     const uint32_t bitcntLLen = llenInfo & 31;
     const uint32_t bitcntOffs = symbolOffs_Clamped;
@@ -3415,10 +3455,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
+    // This may need to preceed any early thread returns:
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(threadId, streamsPerGroup);
 
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
-    // Some implementations of zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress
-    // may require all lanes active, but this variant cannot satisfy that.
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
@@ -3570,7 +3609,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
     // An implementation of this may require all threads in the group to active (before any return):
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(threadId, tgSize);
     // NOTE: This is group-uniform, so it is okay for SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS:
     if (seqStreamIdx >= seqStreamCnt)
         return;
@@ -3578,7 +3617,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
 
      // NOTE: the final block size will be computed as SUM(literalSize, totalMLen)
-    const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId];
+    const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId]; // Should be the only VMEM load (becuase UAV (not SRV)).
     // uint32_t totalSize = 0;
     uint32_t totalMLen = 0;
 
@@ -3774,8 +3813,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
-    // zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress may require all lanes active (no early return):
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(threadId, tgSize);
 
     const zstdgpu_OffsetAndSize seqRefDst = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
 
