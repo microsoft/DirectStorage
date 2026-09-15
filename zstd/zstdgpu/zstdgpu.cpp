@@ -940,10 +940,13 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             // AMD
             ZSTDGPU_KERNEL_MAP(DecompressLiterals, DecompressLiterals_LdsStoreCache64_16);
             context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = 16;
-
+#if 0
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
-
+#else
+            ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_8);
+            context->DecompressSequences_StreamsPerGroup = 8;
+#endif
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
         }
         else if (desc.VendorId == 0x10de)

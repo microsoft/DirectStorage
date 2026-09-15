@@ -23,6 +23,7 @@
 #   error 'kzstdgpu_DecompressSequences_StreamsPerTG' must be defined before including this '.hlsli'
 #endif
 
+#define SEQ_CODE_INFO_USE_LDS 1
 #include "../zstdgpu_shaders.h"
 
 #include "../.generated/ZstdGpuSrt_DecompressSequences.h"
