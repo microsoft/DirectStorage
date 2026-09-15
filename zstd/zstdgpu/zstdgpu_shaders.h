@@ -444,11 +444,12 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
 
     const uint32_t frameStatus = zstdgpu_FrameStatusFromHeader(statusFlag, outFrameInfo.windowSize);
 
-    // A frame with no declared content size cannot be decoded here (the decoder
-    // needs the size to allocate output). Report the reject status but collect no
-    // blocks so the decode stages skip it entirely. Both the count and the real
-    // pass take this early return, so per-frame block counts stay consistent.
-    ZSTDGPU_BRANCH if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ContentSizeAbsent))
+    // Any unsupported frame (missing content size, dictionary required, reserved
+    // bit set, or window too large) reports its reject status and collects no
+    // blocks, so the decode stages skip it entirely and it cannot drive
+    // out-of-range work. Both the count and the real pass take this early return,
+    // so per-frame block counts stay consistent.
+    ZSTDGPU_BRANCH if (kzstdgpu_FrameStatus_Success != frameStatus)
     {
         return frameStatus;
     }
@@ -643,10 +644,20 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
         }
         else
         {
-            // Input is not a zstd frame (bad / absent magic). The count pass leaves the slot
-            // untouched; the real pass writes every frame exactly once.
-            if (srt.countBlocksOnly == 0)
+            // Input is not a zstd frame (bad / absent magic).
+            if (srt.countBlocksOnly > 0)
             {
+                // Count pass: this frame contributes no blocks. Write zero explicitly so the
+                // block-count prefix sum can't pick up stale counts -- these buffers are reused
+                // across requests and only their lookback regions are cleared at init.
+                srt.inoutPerFrameBlockCountRAW[threadId] = 0;
+                srt.inoutPerFrameBlockCountRLE[threadId] = 0;
+                srt.inoutPerFrameBlockCountCMP[threadId] = 0;
+                srt.inoutPerFrameBlockCountAll[threadId] = 0;
+            }
+            else
+            {
+                // Real pass: record the reject status (written exactly once per frame).
                 srt.inoutFrameStatus[threadId] = kzstdgpu_FrameStatus_NotZstdFrame;
             }
         }
