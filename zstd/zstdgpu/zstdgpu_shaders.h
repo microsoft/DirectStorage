@@ -635,7 +635,7 @@ static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
 {
     zstdgpu_SeqCodeInfoContext ctx;
 
-#if SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS
+#if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
     if (WaveGetLaneCount() >= 32)
     {
         const uint32_t laneIdx = WaveGetLaneIndex();
@@ -661,18 +661,14 @@ static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
     return ctx;
 }
 
-#if SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS
+#if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
 static uint32_t zstdgpu_ConcatenatedWaveReadLaneAt(uint32_t2 v2, uint32_t flatIdx)
 {
-#if SEQ_CODE_INFO_READ_UNIFORM_INDEX
-    uint32_t v = flatIdx < 32 ? v2.x : v2.y;    // NOTE: this v_cndmask_b32 needs all lanes active.
+    // Since flatIdx should be uniform across the wave, we can do select before WaveReadLaneAt.
+    // Even if we change that order, DecompressSequences_MultiStream_LdsOutCache cannot work
+    // with this VGPR method, since not all lanes are active in every loop iteration.
+    uint32_t v = flatIdx < 32 ? v2.x : v2.y;    // NOTE: this "v_cndmask_b32" needs all lanes active.
     return WaveReadLaneAt(v, flatIdx & 31);     // Also undefined in HLSL to read from an inactive lane.
-#else
-    // MultiStream_LdsOutCache: this still wont work because not all lanes will be active;
-    // there are no early returns, but the loop exit condition is non-uniform.
-    uint32_t2 r2 = WaveReadLaneAt(v2, flatIdx & 31);
-    return flatIdx < 32 ? r2.x : r2.y;
-#endif
 }
 #endif
 
@@ -3338,7 +3334,7 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
 
     uint32_t llenInfo;
     uint32_t mlenInfo;
-#if SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS
+#if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
     if (WaveGetLaneCount() >= 32)
     {
         llenInfo = zstdgpu_ConcatenatedWaveReadLaneAt(ctx.llenVgpr, symbolLLen);
@@ -3575,7 +3571,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 
     // An implementation of this may require all threads in the group to active (before any return):
     const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
-    // NOTE: This is group-uniform:
+    // NOTE: This is group-uniform, so it is okay for SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS:
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
@@ -3620,10 +3616,10 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     #endif
 #endif
 
-    // zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress may require all lanes active.
+    // SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS requires all lanes active.
     // On RDNA, if wave32 is used (which it should for a [numthreads(32,1,1)] shader),
     // keeping uneeded active lanes on is usually fine, especially if the amount of VALU instructions is low.
-#if !SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS
+#if !SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
     if (threadId != 0)
     {
         return;

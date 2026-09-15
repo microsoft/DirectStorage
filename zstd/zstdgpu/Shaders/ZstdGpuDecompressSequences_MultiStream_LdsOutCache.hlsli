@@ -43,7 +43,6 @@
 #   error 'kzstdgpu_DecompressSequences_ThreadsPerStream' must be a power of 2
 #endif
 
-#define SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS 1
 #include "../zstdgpu_shaders.h"
 
 #include "../.generated/ZstdGpuSrt_DecompressSequences.h"
@@ -54,7 +53,6 @@ groupshared uint32_t Lds[kzstdgpu_DecompressSequences_MultiStream_LdsOutCache_Ld
 
 [RootSignature(ZSTDGPU_SRT_RS_DecompressSequences)]
 [numthreads(kzstdgpu_TgSizeX_DecompressSequences, 1, 1)]
-[wavesize(32)] // TEST
 void main(uint32_t2 groupId2 : SV_GroupId, uint i : SV_GroupThreadId)
 {
     zstdgpu_DecompressSequences_SRT srt;
