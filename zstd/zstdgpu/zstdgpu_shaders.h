@@ -386,6 +386,13 @@ static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) window
             uncompSize += 256;
         }
     }
+    else
+    {
+        // Frame_Content_Size is absent (Single_Segment_flag clear and
+        // Frame_Content_Size_flag == 0). This decoder needs the decompressed
+        // size up front to allocate output, so such a frame cannot be decoded.
+        statusFlag |= kzstdgpu_FrameStatusFlag_ContentSizeAbsent;
+    }
 
     ZSTDGPU_BRANCH if (0 != singleSegmentFlag)
     {
@@ -395,10 +402,31 @@ static inline void zstdgpu_ParseFrameHeader(ZSTDGPU_PARAM_INOUT(uint64_t) window
         // 2^64-1 bytes (16 EB)."
         windowSize = uncompSize;
     }
-    ZSTDGPU_ASSERT(windowSize <= (1ull << kzstdgpu_SeqOffset_Encoded_BitBase) - 1ull);
 }
 
-static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_FrameInfo) outFrameInfo,
+// Map the frame-header flags + window size to a per-frame HRESULT status.
+static inline uint32_t zstdgpu_FrameStatusFromHeader(uint32_t statusFlag, uint64_t windowSize)
+{
+    if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ReservedBitSet))
+    {
+        return kzstdgpu_FrameStatus_ReservedBitSet;
+    }
+    if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_DictionaryUsed))
+    {
+        return kzstdgpu_FrameStatus_DictionaryUnsupported;
+    }
+    if (windowSize > (1ull << kzstdgpu_SeqOffset_Encoded_BitBase) - 1ull)
+    {
+        return kzstdgpu_FrameStatus_WindowTooLarge;
+    }
+    if (0 != (statusFlag & kzstdgpu_FrameStatusFlag_ContentSizeAbsent))
+    {
+        return kzstdgpu_FrameStatus_MissingContentSize;
+    }
+    return kzstdgpu_FrameStatus_Success;
+}
+
+static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_FrameInfo) outFrameInfo,
                                                   ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRAWRefs,
                                                   ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksRLERefs,
                                                   ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize) outBlocksCMPRefs,
@@ -413,6 +441,18 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
 {
     uint32_t statusFlag;
     zstdgpu_ParseFrameHeader(outFrameInfo.windowSize, outFrameInfo.uncompSize, outFrameInfo.dictionary, statusFlag, bits);
+
+    const uint32_t frameStatus = zstdgpu_FrameStatusFromHeader(statusFlag, outFrameInfo.windowSize);
+
+    // Any unsupported frame (missing content size, dictionary required, reserved
+    // bit set, or window too large) reports its reject status and collects no
+    // blocks, so the decode stages skip it entirely and it cannot drive
+    // out-of-range work. Both the count and the real pass take this early return,
+    // so per-frame block counts stay consistent.
+    ZSTDGPU_BRANCH if (kzstdgpu_FrameStatus_Success != frameStatus)
+    {
+        return frameStatus;
+    }
 
     //
     // "A frame encapsulates one or multiple blocks. Each block can be
@@ -512,6 +552,8 @@ static inline void zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgpu_Fr
         zstdgpu_Forward_BitBuffer_Refill(bits, 32);
         zstdgpu_Forward_BitBuffer_Pop(bits, 32);
     }
+
+    return frameStatus;
 }
 
 static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt, uint32_t threadId)
@@ -550,7 +592,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 frameInfo.cmpBlockStart = srt.inoutPerFrameBlockCountCMP[threadId];
             }
 
-            zstdgpu_ShaderEntry_ParseFrame(
+            const uint32_t frameStatus = zstdgpu_ShaderEntry_ParseFrame(
                 frameInfo,
                 srt.inoutBlocksRAWRefs,
                 srt.inoutBlocksRLERefs,
@@ -593,6 +635,30 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                     InterlockedAdd(srt.inoutCounters[0].Frames, frameCount);
                     InterlockedAdd(srt.inoutCounters[0].Frames_UncompressedByteSize, uncompSize);
                 }
+            }
+            else
+            {
+                // Real (block-output) pass: record this frame's accept/reject status.
+                srt.inoutFrameStatus[threadId] = frameStatus;
+            }
+        }
+        else
+        {
+            // Input is not a zstd frame (bad / absent magic).
+            if (srt.countBlocksOnly > 0)
+            {
+                // Count pass: this frame contributes no blocks. Write zero explicitly so the
+                // block-count prefix sum can't pick up stale counts -- these buffers are reused
+                // across requests and only their lookback regions are cleared at init.
+                srt.inoutPerFrameBlockCountRAW[threadId] = 0;
+                srt.inoutPerFrameBlockCountRLE[threadId] = 0;
+                srt.inoutPerFrameBlockCountCMP[threadId] = 0;
+                srt.inoutPerFrameBlockCountAll[threadId] = 0;
+            }
+            else
+            {
+                // Real pass: record the reject status (written exactly once per frame).
+                srt.inoutFrameStatus[threadId] = kzstdgpu_FrameStatus_NotZstdFrame;
             }
         }
     }

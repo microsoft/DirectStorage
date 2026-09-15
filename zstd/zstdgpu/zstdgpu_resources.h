@@ -34,7 +34,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLE         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMP         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountAll         )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )
+    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameStatus                   )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
@@ -288,6 +289,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameBlockCountCMPLookback_Count = PerFrameBlockCountRAWLookback_Count;
     const uint32_t PerFrameBlockCountAllLookback_Count = PerFrameBlockCountRAWLookback_Count;
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
+    const uint32_t FrameStatus_Count = frameCount;
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
     const uint32_t Predicate_Count = 2;
@@ -473,6 +475,10 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
         outInfo->FramesRefs_ByteSizeInternal     = 0;
     }
 
+    // NOTE: FrameStatus is always a caller-supplied (external) resource, so it never
+    // gets internal storage; only its element count / byte size are used for the UAV view.
+    outInfo->FrameStatus_ByteSizeInternal = 0;
+
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpuOnly(outInfo);
     zstdgpu_ResourceInfo_Stage_0_InitOffsetCpu2Gpu(outInfo);
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpu2Cpu(outInfo);
@@ -584,6 +590,21 @@ static void zstdgpu_ResourceDataGpu_ReInitOutputsExternal(zstdgpu_ResourceDataGp
 
         outResData->gpuOnly.UnCompressedFramesRefs = uncompressedFramesRefs;
         outResData->gpuOnly.UnCompressedFramesRefs->AddRef();
+    }
+}
+
+static void zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(zstdgpu_ResourceDataGpu *outResData, ID3D12Resource *frameStatus)
+{
+    // NOTE: FrameStatus is bound as a UAV in the ParseFrames bind group (stage 0 / stage 1),
+    // so the caller-supplied resource must be swapped into gpuOnly before those bind groups
+    // are initialised - i.e. earlier than the stage-2 uncompressed outputs above.
+    ZSTDGPU_ASSERT(NULL != frameStatus);
+    if (NULL != frameStatus && frameStatus != outResData->gpuOnly.FrameStatus)
+    {
+        D3D12AID_SAFE_RELEASE(outResData->gpuOnly.FrameStatus);
+
+        outResData->gpuOnly.FrameStatus = frameStatus;
+        outResData->gpuOnly.FrameStatus->AddRef();
     }
 }
 

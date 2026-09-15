@@ -46,6 +46,7 @@ namespace Decompression
         ID3D12Resource* outputBuffer,
         uint32_t outputBufferSizeBytes,
         ID3D12Resource* outputOffsetsAndSizes, // buffer of <OffsetAndSize> entries
+        ID3D12Resource* frameStatus,           // buffer of one UINT32 (HRESULT) per frame
         uint32_t totalOffsetsAndSizes,
         uint32_t* totalStageCount);
 
@@ -124,6 +125,7 @@ namespace Decompression
             ID3D12Resource* outputBuffer,
             uint32_t outputBufferSizeBytes,
             ID3D12Resource* outputOffsetsAndSizes,
+            ID3D12Resource* frameStatus,
             uint32_t totalOffsetsAndSizes,
             uint32_t* totalStageCount)
         {
@@ -136,6 +138,7 @@ namespace Decompression
                 outputBuffer,
                 outputBufferSizeBytes,
                 outputOffsetsAndSizes,
+                frameStatus,
                 totalOffsetsAndSizes,
                 totalStageCount));
         }
@@ -208,6 +211,7 @@ namespace Decompression
             ID3D12Resource* outputBuffer,
             uint32_t outputBufferSizeBytes,
             ID3D12Resource* outputOffsetsAndSizes,
+            ID3D12Resource* frameStatus,
             uint32_t totalOffsetsAndSizes,
             uint32_t* totalStageCount)
         {
@@ -219,6 +223,7 @@ namespace Decompression
                 outputBuffer,
                 outputBufferSizeBytes,
                 outputOffsetsAndSizes,
+                frameStatus,
                 totalOffsetsAndSizes,
                 totalStageCount);
         }

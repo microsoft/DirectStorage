@@ -863,6 +863,11 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             prefix += count;
         }
     }
+    // FrameStatus is a caller-supplied (external) resource on GPU, so InitFromHeap never
+    // allocates it. The real ParseFrames pass writes one HRESULT per frame, so the CPU
+    // emulation supplies throwaway scratch storage to receive those writes.
+    uint32_t *cpuFrameStatusScratch = (uint32_t *)malloc(sizeof(uint32_t) * zstdFrameCount);
+    zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
         zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0);
@@ -872,6 +877,8 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_ParseFrames(srt, i);
         }
     }
+    zstdCpu.FrameStatus = NULL;
+    free(cpuFrameStatusScratch);
     VALIDATE(Blocks, &zstdCpu);
 
     {
@@ -1153,6 +1160,7 @@ struct DemoCtx
     d3d12aid_MappedBuffer       zstdCompressedFramesRefs;
     d3d12aid_MappedBuffer       zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer       zstdUnCompressedFramesRefs;
+    d3d12aid_MappedBuffer       zstdFrameStatus;
     ID3D12Heap                 *readbackHeap[3];
     ID3D12Heap                 *uploadHeap[3];
     ID3D12Heap                 *defaultHeap[3];
@@ -1199,6 +1207,8 @@ static void demoCleanup(DemoCtx *ctx)
         d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesMemory);
     if (NULL != ctx->zstdUnCompressedFramesRefs.bufGpu)
         d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesRefs);
+    if (NULL != ctx->zstdFrameStatus.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdFrameStatus);
 
     if (NULL != ctx->timestamps.heap)
         d3d12aid_Timestamps_Release(&ctx->timestamps);
@@ -1269,10 +1279,105 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lp
     return asserted ? 1 : ctx.retv;
 }
 
+// -----------------------------------------------------------------------------
+// Tolerant frame enumeration for malformed / undecodable input.
+//
+// The library's CountFramesAndBlocks/CollectFrames stop at the first byte
+// sequence that is not a valid zstd frame and never emit that region as a frame.
+// For diagnostics we still want every input -- including corrupt ones -- routed
+// to the GPU frame parser, which records a per-frame accept/reject status. This
+// post-processor rewrites the collected frames so that:
+//
+//   * The first frame that carries no decompressed size (Frame_Content_Size
+//     absent) becomes the terminal frame: its span is extended to the end of the
+//     input and no later frames are reported. This decoder needs the size to
+//     allocate output, so that frame -- and anything after it -- cannot be
+//     decoded; the parser reports kzstdgpu_FrameStatus_MissingContentSize.
+//
+//   * Otherwise, if parsing stopped before consuming all input (a non-zstd byte
+//     sequence: bad or absent magic), the unparsed remainder [lastEnd, dataSize)
+//     is emitted as a single trailing "bad frame". The parser reports
+//     kzstdgpu_FrameStatus_NotZstdFrame. Valid trailing skippable frames (as used
+//     by e.g. the zstd seekable format) are consumed first, mirroring the parser,
+//     so a well-formed file is never misreported as corrupt.
+//
+// In both cases enumeration does not look for frame boundaries past the offending
+// frame (e.g. 1 good, 2 bad, 3 good -> two frames: 1 good, 2 bad+rest). 'frames'
+// and 'frameInfos' must hold at least (collected frame count + 1) entries.
+// 'memoryBlock' is the scanned buffer the frame offsets are relative to.
+// Returns the resulting frame count, also written into info->frameCount.
+static uint32_t zstdgpu_Demo_ReadLE32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t zstdgpu_Demo_MakeFramesTolerant(zstdgpu_CountFramesAndBlocksInfo *info,
+                                                zstdgpu_OffsetAndSize            *frames,
+                                                zstdgpu_FrameInfo                *frameInfos,
+                                                const void                       *memoryBlock,
+                                                uint32_t                          contentSizeInBytes)
+{
+    for (uint32_t i = 0; i < info->frameCount; ++i)
+    {
+        if (frameInfos[i].uncompSize == 0)
+        {
+            frames[i].size = contentSizeInBytes - frames[i].offs;
+            info->frameCount = i + 1;
+            return info->frameCount;
+        }
+    }
+
+    uint32_t lastEnd = 0;
+    if (info->frameCount > 0)
+    {
+        const uint32_t last = info->frameCount - 1;
+        lastEnd = frames[last].offs + frames[last].size;
+    }
+
+    // Consume any trailing skippable frames (magic 0x184D2A50..0x184D2A5F) the way
+    // the library scanner does, so their bytes are not mistaken for corrupt data.
+    const uint8_t *base = (const uint8_t *)memoryBlock;
+    for (;;)
+    {
+        if ((uint64_t)lastEnd + 8u > contentSizeInBytes) break;
+        const uint32_t magic = zstdgpu_Demo_ReadLE32(base + lastEnd);
+        if (magic < 0x184D2A50u || magic > 0x184D2A5Fu) break;
+        const uint32_t frameSize = zstdgpu_Demo_ReadLE32(base + lastEnd + 4);
+        const uint64_t next = (uint64_t)lastEnd + 8u + frameSize;
+        if (next > contentSizeInBytes) break; // truncated skippable frame -> corrupt tail
+        lastEnd = (uint32_t)next;
+    }
+
+    if (lastEnd < contentSizeInBytes)
+    {
+        const uint32_t i = info->frameCount;
+        frames[i].offs = lastEnd;
+        frames[i].size = contentSizeInBytes - lastEnd;
+        memset(&frameInfos[i], 0, sizeof(frameInfos[i]));
+        info->frameCount = i + 1;
+    }
+
+    return info->frameCount;
+}
+
+// Human-readable name for a per-frame status HRESULT (for the status summary).
+static const wchar_t *zstdgpu_Demo_FrameStatusName(uint32_t status)
+{
+    switch (status)
+    {
+    case kzstdgpu_FrameStatus_Success:               return L"S_OK";
+    case kzstdgpu_FrameStatus_NotZstdFrame:          return L"NotZstdFrame";
+    case kzstdgpu_FrameStatus_ReservedBitSet:        return L"ReservedBitSet";
+    case kzstdgpu_FrameStatus_DictionaryUnsupported: return L"DictionaryUnsupported";
+    case kzstdgpu_FrameStatus_WindowTooLarge:        return L"WindowTooLarge";
+    case kzstdgpu_FrameStatus_MissingContentSize:    return L"MissingContentSize";
+    default:                                         return L"Unknown";
+    }
+}
+
 static int demoRun(void *demoCtx)
 {
     DemoCtx *ctx = (DemoCtx *)demoCtx;
-
 #ifndef _GAMING_XBOX
     int        argc = ctx->argc;
     wchar_t  **argv = ctx->argv;
@@ -1295,6 +1400,7 @@ static int demoRun(void *demoCtx)
     d3d12aid_MappedBuffer      &zstdCompressedFramesRefs     = ctx->zstdCompressedFramesRefs;
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesMemory = ctx->zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesRefs   = ctx->zstdUnCompressedFramesRefs;
+    d3d12aid_MappedBuffer      &zstdFrameStatus              = ctx->zstdFrameStatus;
     ID3D12Heap                *(&readbackHeap)[3]            = ctx->readbackHeap;
     ID3D12Heap                *(&uploadHeap)[3]              = ctx->uploadHeap;
     ID3D12Heap                *(&defaultHeap)[3]             = ctx->defaultHeap;
@@ -1566,17 +1672,35 @@ static int demoRun(void *demoCtx)
     zstdgpu_CountFramesAndBlocksInfo fbInfo;
     zstdgpu_CountFramesAndBlocks(&fbInfo, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
 
+    // Frame buffers carry one extra slot: the tolerant enumeration below may append
+    // a synthetic trailing "bad frame" so corrupt input is still routed to the GPU
+    // parser (which records a per-frame status) instead of being dropped here.
+    // 'frameCapacity' also bounds how many frames any single batch's re-scan can
+    // collect, since a batch span is always a subset of the whole input.
+    const uint32_t frameCapacity = fbInfo.frameCount + 1;
+
+    zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * frameCapacity);
+    zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
+    zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
+    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+
+    // Route corrupt / undecodable input to the GPU parser: append a trailing bad
+    // frame for any unparsed bytes, or make the first frame lacking a content size
+    // the terminal frame. Enumeration stops there (no boundary discovery past it).
+    zstdgpu_Demo_MakeFramesTolerant(&fbInfo, zstdInFrameRefs, zstdFrameInfo, (char *)zstdData + zstdOffs, zstdDataSize);
+
     if (fbInfo.frameCount == 0)
     {
-        debugPrint(L"[FAIL] No valid ZSTD frames was discovered in '%s'. Early Out.\n", zstFilePath);
+        debugPrint(L"[FAIL] No data to decompress in '%s'. Early Out.\n", zstFilePath);
         ctx->retv = 1;
         return 0;
     }
 
-    zstdFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * fbInfo.frameCount);
-    zstdInFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
-    zstdOutFrameRefs = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
-    zstdgpu_CollectFrames(zstdInFrameRefs, zstdFrameInfo, fbInfo.frameCount, (char *)zstdData + zstdOffs, zstdCompressedFramesMemorySizeInBytes - zstdOffs, zstdDataSize);
+    // Set when one or more frames cannot be decoded (no declared content size or a
+    // synthetic bad frame). Such input has no reference decompression to validate
+    // against, so the reference decode and output comparison are skipped; the GPU
+    // parser's per-frame status buffer is the verdict instead.
+    bool skipRefValidation = false;
 
     const uint32_t endFrame = fbInfo.frameCount - 1;
 
@@ -1614,11 +1738,15 @@ static int demoRun(void *demoCtx)
         }
         zstdUnCompressedFramesMemorySizeInBytes = offs;
 
+        // Frames without a decompressed size (or the synthetic bad frame) cannot be
+        // decoded and have no reference output to compare against. Instead of the
+        // former early-out, route them to the GPU parser for a per-frame status
+        // verdict and skip reference validation. The status readback still reports
+        // and, on any rejected frame, fails the run (exit code 1).
         if (fbInfo.frameCount != vcnt)
         {
-            debugPrint(L"[FAIL] Some frames don't carry uncompressed size. Early Out.\n");
-            ctx->retv = 1;
-            return 0;
+            skipRefValidation = true;
+            debugPrint(L"[INFO] %u/%u frame(s) carry no decompressed size; routing to the GPU parser for status only (reference validation skipped).\n", fbInfo.frameCount - vcnt, fbInfo.frameCount);
         }
     }
 
@@ -1679,12 +1807,18 @@ static int demoRun(void *demoCtx)
         if (decomp    > maxBatchDecompBytes) maxBatchDecompBytes = decomp;
     }
 
-    // Reusable per-batch host buffers (sized to the largest batch). The staging
-    // buffer is unused for the in-place whole-buffer run.
+    // An all-undecodable working set (e.g. a single bad-magic frame) decompresses
+    // to zero bytes; keep a non-empty readback allocation so resource creation and
+    // the library's output binding stay valid.
+    if (maxBatchDecompBytes == 0) maxBatchDecompBytes = 256;
+
+    // Reusable per-batch host buffers. Capacity is 'frameCapacity' (not the batch
+    // frame count) because a batch re-scan may collect more frames than it finally
+    // dispatches before the tolerant post-processor truncates the list.
     char                  *batchStaging   = isWholeBufferRun ? NULL : (char *)malloc(maxBatchSpanAligned);
-    zstdgpu_OffsetAndSize *batchInRefs    = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * maxBatchFrames);
-    zstdgpu_OffsetAndSize *batchOutRefs   = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * maxBatchFrames);
-    zstdgpu_FrameInfo     *batchFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * maxBatchFrames);
+    zstdgpu_OffsetAndSize *batchInRefs    = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
+    zstdgpu_OffsetAndSize *batchOutRefs   = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
+    zstdgpu_FrameInfo     *batchFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * frameCapacity);
 
     debugPrint(L"[INFO] Working set: frames [%u..%u] (%u frames), %u batch(es) of up to %u frames each.\n",
                workingLo, workingHi, workingFrames, numBatches, effBatchFrames);
@@ -1731,7 +1865,7 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] Option '--sim-gpu' was set. Enabling '--chk-cpu' automatically (required by '--sim-gpu').\n");
     }
 
-    if (chkCpu || chkGpu)
+    if ((chkCpu || chkGpu) && !skipRefValidation)
     {
         debugPrint(L"[INFO] Running Reference Decompression and building Reference Uncompressed data ('--chk-cpu' or '--chk-gpu' was set).\n");
 
@@ -1750,7 +1884,7 @@ static int demoRun(void *demoCtx)
         debugPrint(L"[INFO] ZSTD_decompress  input size: %d  output size: %d   result: %d\n", zstdDataSize, zstdReferenceUncompressedDataSize, r); 
     }
 
-    if (chkCpu)
+    if (chkCpu && !skipRefValidation)
     {
         debugPrint(L"[INFO] Running GPU Decompression code on CPU ('--chk-cpu' option was set).\n");
 
@@ -1802,6 +1936,7 @@ static int demoRun(void *demoCtx)
         d3d12aid_MappedBuffer_Create(&zstdCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, zstdFramesRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1u, zstdUnCompressedFramesMemorySizeInBytes, D3D12_HEAP_TYPE_READBACK);
+        d3d12aid_MappedBuffer_Create(&zstdFrameStatus, device, 1u, frameCapacity * (uint32_t)sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK);
 
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesMemory, 0, (void *)zstdData, zstdOffs + zstdDataSize);
         d3d12aid_MappedBuffer_Append(&zstdCompressedFramesRefs, 0, (void *)zstdInFrameRefs, zstdFramesRefsSizeInBytes);
@@ -1815,7 +1950,13 @@ static int demoRun(void *demoCtx)
         }
         if (blkCnt)
         {
-            zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
+            // See the batched path below: the library rejects an all-zero block
+            // count, so pass a minimal non-zero count for undecodable input.
+            uint32_t rawBlockCount = fbInfo.rawBlockCount;
+            uint32_t rleBlockCount = fbInfo.rleBlockCount;
+            uint32_t cmpBlockCount = fbInfo.cmpBlockCount;
+            if (rawBlockCount + rleBlockCount + cmpBlockCount == 0) rawBlockCount = 1;
+            zstdgpu_SetupFrameInfoConstants(perRequestContext, rawBlockCount, rleBlockCount, cmpBlockCount);
             if (seqCnt)
             {
                 zstdgpu_CountLiteralAndSequenceInfo blkInfo;
@@ -1823,7 +1964,7 @@ static int demoRun(void *demoCtx)
                 zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.decodedLiteralsByteCount, blkInfo.sequenceCount);
             }
         }
-        zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
+        zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount, zstdFrameStatus.bufGpu);
     }
     else
     {
@@ -1832,6 +1973,7 @@ static int demoRun(void *demoCtx)
         // we only create the reusable GPU-side resources sized to the largest batch.
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesRefs, device, 1u, maxRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
         d3d12aid_MappedBuffer_Create(&zstdUnCompressedFramesMemory, device, 1, maxBatchDecompBytes, D3D12_HEAP_TYPE_READBACK);
+        d3d12aid_MappedBuffer_Create(&zstdFrameStatus, device, 1u, frameCapacity * (uint32_t)sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK);
     }
 
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
@@ -1901,6 +2043,10 @@ static int demoRun(void *demoCtx)
 
             zstdgpu_CountFramesAndBlocks(&fbInfo, stagedPtr, batchSpanAl, batchSpan);
             zstdgpu_CollectFrames(batchInRefs, batchFrameInfo, fbInfo.frameCount, stagedPtr, batchSpanAl, batchSpan);
+            // Apply the same tolerant enumeration used for the whole-input scan so a
+            // batch that contains the corrupt / undecodable frame dispatches the same
+            // frames (and terminal bad frame) to the GPU parser.
+            zstdgpu_Demo_MakeFramesTolerant(&fbInfo, batchInRefs, batchFrameInfo, stagedPtr, batchSpan);
 
             {
                 uint32_t offs = 0;
@@ -1911,7 +2057,9 @@ static int demoRun(void *demoCtx)
                     offs += batchOutRefs[j].size;
                     offs  = zstdgpu_AlignUp(offs, 256);
                 }
-                zstdUnCompressedFramesMemorySizeInBytes = offs;
+                // A batch of only undecodable frames produces no output; keep a
+                // non-empty size so the output binding stays valid.
+                zstdUnCompressedFramesMemorySizeInBytes = offs != 0 ? offs : 256;
             }
             zstdCompressedFramesMemorySizeInBytes = batchSpanAl;
 
@@ -1926,7 +2074,17 @@ static int demoRun(void *demoCtx)
             }
             if (blkCnt)
             {
-                zstdgpu_SetupFrameInfoConstants(perRequestContext, fbInfo.rawBlockCount, fbInfo.rleBlockCount, fbInfo.cmpBlockCount);
+                // A batch of only undecodable frames (e.g. bad magic) collects no
+                // blocks. zstdgpu_SetupFrameInfoConstants rejects an all-zero count,
+                // and the library clamps each kind to kzstdgpu_MinCount_Blocks anyway,
+                // so pass a minimal non-zero count. Decode work is still dispatched
+                // from the GPU's own (zero) block counters, so this only affects the
+                // conservative allocation, not what actually runs.
+                uint32_t rawBlockCount = fbInfo.rawBlockCount;
+                uint32_t rleBlockCount = fbInfo.rleBlockCount;
+                uint32_t cmpBlockCount = fbInfo.cmpBlockCount;
+                if (rawBlockCount + rleBlockCount + cmpBlockCount == 0) rawBlockCount = 1;
+                zstdgpu_SetupFrameInfoConstants(perRequestContext, rawBlockCount, rleBlockCount, cmpBlockCount);
                 if (seqCnt)
                 {
                     zstdgpu_CountLiteralAndSequenceInfo blkInfo;
@@ -1934,7 +2092,7 @@ static int demoRun(void *demoCtx)
                     zstdgpu_SetupBlockInfoConstants(perRequestContext, blkInfo.decodedLiteralsByteCount, blkInfo.sequenceCount);
                 }
             }
-            zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount);
+            zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, fbInfo.frameCount, zstdFrameStatus.bufGpu);
 
             perBatchFrames[b] = fbInfo.frameCount;
             perBatchBytes[b]  = zstdUnCompressedFramesMemorySizeInBytes;
@@ -2095,7 +2253,7 @@ static int demoRun(void *demoCtx)
                     d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesMemory, 0 /** works only when submissions aren't overlapped*/);
                 }
                 zstdgpu_ReadbackTimestamps(perRequestContext, cmdList);
-                if ((simGpu || chkGpu) && sweep == 0)
+                if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation)
                 {
                     zstdgpu_ReadbackGpuResults(perRequestContext, cmdList);
                 }
@@ -2103,7 +2261,52 @@ static int demoRun(void *demoCtx)
                 d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
                 d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
 
-                if ((simGpu || chkGpu) && sweep == 0)
+                if (sweep == 0)
+                {
+                    // Read back the per-frame status buffer written by the ParseFrames real pass
+                    // and report a per-frame accept/reject summary. The GPU is idle here, so bufGpu
+                    // has decayed to COMMON and COMMON->COPY_SOURCE is a valid transition regardless
+                    // of which stage produced the writes.
+                    cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0 /** cmdListId */);
+                    {
+                        D3D12_RESOURCE_BARRIER barrier;
+                        d3d12aid_MappedBuffer_BeginTransfer(&barrier, &zstdFrameStatus, D3D12_RESOURCE_STATE_COMMON);
+                        cmdList->ResourceBarrier(1u, &barrier);
+                        d3d12aid_MappedBuffer_Transfer(cmdList, &zstdFrameStatus, 0);
+                    }
+                    d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
+                    d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+
+                    const uint32_t *frameStatus = (const uint32_t *)zstdFrameStatus.bufMem[0];
+                    uint32_t statusFailCount = 0;
+                    for (uint32_t i = 0; i < fbInfo.frameCount; ++i)
+                    {
+                        if (frameStatus[i] != kzstdgpu_FrameStatus_Success)
+                        {
+                            ++statusFailCount;
+                            if (statusFailCount <= 16)
+                            {
+                                debugPrint(L"[FAIL] Frame status: local %u (global %u) = %s (0x%08X).\n",
+                                           i, bLo + i, zstdgpu_Demo_FrameStatusName(frameStatus[i]), frameStatus[i]);
+                            }
+                        }
+                    }
+                    if (statusFailCount > 0)
+                    {
+                        if (statusFailCount > 16)
+                        {
+                            debugPrint(L"[FAIL] Frame status: ... and %u more rejected frame(s).\n", statusFailCount - 16);
+                        }
+                        debugPrint(L"[FAIL] Frame status summary: %u/%u frame(s) rejected (sweep %u, batch %u).\n", statusFailCount, fbInfo.frameCount, sweep, b);
+                        ctx->retv = 1;
+                    }
+                    else
+                    {
+                        debugPrint(L"[INFO] Frame status summary: all %u frame(s) accepted / S_OK (sweep %u, batch %u).\n", fbInfo.frameCount, sweep, b);
+                    }
+                }
+
+                if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation)
                 {
                     zstdgpu_ResourceDataCpu gpuData;
                     zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);

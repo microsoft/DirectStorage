@@ -232,6 +232,37 @@ bool ValidateUncompressedFrames(ZstFileInfo& fileInfo, Frames& decompressedFrame
     return validationPassed;
 }
 
+// Every well-formed frame in the good corpus must report kzstdgpu_FrameStatus_Success (S_OK)
+// in the per-frame status buffer written by the parse shader.
+bool ValidateFrameStatusAllSuccess(ZstFileInfo& fileInfo, const std::vector<uint32_t>& frameStatus)
+{
+    bool validationPassed = true;
+    if (frameStatus.size() != fileInfo.ReferenceDecompressedFrames.size())
+    {
+        GTEST_LOG_FAILURE_MESSAGE(
+            "Frame status count mismatch found in '%s'. Expected: %zu, Actual: %zu",
+            fileInfo.ZSTFilePath.string().c_str(),
+            fileInfo.ReferenceDecompressedFrames.size(),
+            frameStatus.size());
+        return false;
+    }
+
+    for (size_t frameIndex = 0; frameIndex < frameStatus.size(); ++frameIndex)
+    {
+        if (frameStatus[frameIndex] != kzstdgpu_FrameStatus_Success)
+        {
+            GTEST_LOG_FAILURE_MESSAGE(
+                "Frame status failure in '%s' at frame index %zu: 0x%08X (expected S_OK).",
+                fileInfo.ZSTFilePath.string().c_str(),
+                frameIndex,
+                frameStatus[frameIndex]);
+            validationPassed = false;
+        }
+    }
+
+    return validationPassed;
+}
+
 static std::filesystem::path FindFirstContentPath(bool isInternal)
 {
     const char* drives[3] = {"C:\\", "D:\\", "E:\\"};
@@ -334,9 +365,14 @@ struct ZstdDecompressionTests : public ::testing::Test
                     continue;
                 }
 
+                std::vector<uint32_t> frameStatus;
                 auto decompressedFrames =
-                    gpuWork->Decompress(zstFileData.FrameDataAligned, zstFileData.FrameOffsetsAndSizes);
+                    gpuWork->Decompress(zstFileData.FrameDataAligned, zstFileData.FrameOffsetsAndSizes, &frameStatus);
                 if (!ValidateUncompressedFrames(zstFileData, decompressedFrames))
+                {
+                    filesFailed++;
+                }
+                if (!ValidateFrameStatusAllSuccess(zstFileData, frameStatus))
                 {
                     filesFailed++;
                 }
@@ -386,4 +422,63 @@ TEST_F(ZstdDecompressionTests, InternalContentCorrectnessTest)
 TEST_F(ZstdDecompressionTests, PublicContentCorrectnessTest)
 {
     ContentCorrectnessTest(false /* Use public content folder location */);
+}
+
+// Verifies the per-frame status buffer reports a rejection HRESULT for a frame whose header
+// sets the reserved bit (a spec violation).  A real corpus frame is used with the reserved bit
+// injected: this leaves the frame structurally valid so the decode pipeline still runs, while
+// the header parse must flag it as rejected.  Only the status is asserted (not the output).
+TEST_F(ZstdDecompressionTests, MalformedFrameReservedBitStatusTest)
+{
+    std::filesystem::path contentPath = FindFirstContentPath(true /* internal */);
+    if (contentPath.empty())
+    {
+        contentPath = FindFirstContentPath(false /* public */);
+    }
+    if (contentPath.empty())
+    {
+        GTEST_SKIP() << "No content folder found for malformed-frame status test.";
+    }
+
+    // Find the first usable .zst file (one that actually contains frame data).
+    ZstFileInfo zstFileData{};
+    bool found = false;
+    for (auto& entry : std::filesystem::recursive_directory_iterator(contentPath))
+    {
+        if (!entry.is_regular_file() || entry.path().extension() != ".zst" || SkipFile(entry.path()))
+        {
+            continue;
+        }
+
+        auto candidate = LoadZstFile(entry.path());
+        if (candidate.FrameOffsetsAndSizes.UnCompressedFramesMemorySizeInBytes != 0 &&
+            !candidate.FrameOffsetsAndSizes.InputOffsets.empty())
+        {
+            zstFileData = std::move(candidate);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found)
+    {
+        GTEST_SKIP() << "No .zst file with frame data found for malformed-frame status test.";
+    }
+
+    // Inject the reserved bit (bit 3 of the frame-header descriptor byte, which immediately
+    // follows the 4-byte frame magic) into the first frame.  This does not change the frame's
+    // block geometry, so the pipeline still decodes it, but the header parse must now reject it.
+    const uint32_t frame0Offset = zstFileData.FrameOffsetsAndSizes.InputOffsets[0].offs;
+    zstFileData.FrameDataAligned[frame0Offset + 4] |= 0x08;
+
+    std::unique_ptr<ZstdDecompressionWork> gpuWork = std::make_unique<ZstdDecompressionWork>(
+        FindDefaultAdapter().Device.get(),
+        L"ZstdDecompressionMalformedFrameStatusTest");
+
+    std::vector<uint32_t> frameStatus;
+    gpuWork->Decompress(zstFileData.FrameDataAligned, zstFileData.FrameOffsetsAndSizes, &frameStatus);
+
+    ASSERT_EQ(frameStatus.size(), zstFileData.FrameOffsetsAndSizes.InputOffsets.size());
+    EXPECT_EQ(frameStatus[0], kzstdgpu_FrameStatus_ReservedBitSet)
+        << "Frame with the reserved bit set should report kzstdgpu_FrameStatus_ReservedBitSet.";
 }

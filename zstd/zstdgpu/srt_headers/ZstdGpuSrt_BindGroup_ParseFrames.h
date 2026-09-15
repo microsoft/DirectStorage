@@ -17,7 +17,7 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames "DescriptorTable(SRV(t0, space=1, numDescriptors=2), UAV(u0, space=1, numDescriptors=14))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames "DescriptorTable(SRV(t0, space=1, numDescriptors=2), UAV(u0, space=1, numDescriptors=15))"
 
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInCompressedData                    : register(t0, space1);
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInFramesRefs                        : register(t1, space1);
@@ -35,6 +35,7 @@ ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutBlockSizePrefix            
 ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRawBlock    : register(u11, space1);
 ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRleBlock    : register(u12, space1);
 ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerCmpBlock    : register(u13, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameStatus                    : register(u14, space1);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_ParseFrames(ZSTDGPU_PARAM_INOUT(T) srt)
@@ -55,6 +56,7 @@ static void zstdgpu_Srt_FillBindGroup_ParseFrames(ZSTDGPU_PARAM_INOUT(T) srt)
     srt.inoutGlobalBlockIndexPerRawBlock    = ZstdInOutGlobalBlockIndexPerRawBlock;
     srt.inoutGlobalBlockIndexPerRleBlock    = ZstdInOutGlobalBlockIndexPerRleBlock;
     srt.inoutGlobalBlockIndexPerCmpBlock    = ZstdInOutGlobalBlockIndexPerCmpBlock;
+    srt.inoutFrameStatus                    = ZstdInOutFrameStatus;
 }
 
 #else
@@ -78,6 +80,7 @@ static void zstdgpu_Srt_FillBindGroup_ParseFrames(T &srt, const zstdgpu_Resource
     srt.inoutGlobalBlockIndexPerRawBlock    = cpuRes.GlobalBlockIndexPerRawBlock;
     srt.inoutGlobalBlockIndexPerRleBlock    = cpuRes.GlobalBlockIndexPerRleBlock;
     srt.inoutGlobalBlockIndexPerCmpBlock    = cpuRes.GlobalBlockIndexPerCmpBlock;
+    srt.inoutFrameStatus                    = cpuRes.FrameStatus;
 }
 
 #endif /* #ifdef __hlsl_dx_compiler */

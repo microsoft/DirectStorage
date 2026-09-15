@@ -126,6 +126,7 @@ namespace Decompression
         ID3D12Resource* outputBuffer,
         uint32_t outputBufferSizeBytes,
         ID3D12Resource* outputOffsetsAndSizes,
+        ID3D12Resource* frameStatus,
         uint32_t totalOffsetsAndSizes,
         uint32_t* totalStageCount)
     {
@@ -144,7 +145,8 @@ namespace Decompression
             outputBuffer,
             outputBufferSizeBytes,
             outputOffsetsAndSizes,
-            totalOffsetsAndSizes));
+            totalOffsetsAndSizes,
+            frameStatus));
     }
 
     HRESULT _cdecl GetHeapMemorySizesForStage(
