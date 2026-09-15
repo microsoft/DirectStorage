@@ -80,8 +80,6 @@ ZSTDGPU_WARN_POP_MSVC()
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache128.h"
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache64.h"
 #include "ZstdGpuDecompressSequences_SingleStream_LdsFseCache32.h"
-#include "ZstdGpuDecompressSequences_SingleStream_ScalarFseLoad128.h"
-#include "ZstdGpuDecompressSequences_SingleStream_ScalarFseLoad64.h"
 #include "ZstdGpuDecompressSequences_SingleStream_ScalarFseLoad32.h"
 #include "ZstdGpuExecuteSequences128.h"
 #include "ZstdGpuExecuteSequences64.h"
@@ -604,8 +602,6 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     ZSTDGPU_KERNEL(DecompressSequences_SingleStream_LdsFseCache128  ,   L"Decompress Sequences (Single-Stream, LDS FSE Cache, TG Size=128)")    \
     ZSTDGPU_KERNEL(DecompressSequences_SingleStream_LdsFseCache64   ,   L"Decompress Sequences (Single-Stream, LDS FSE Cache, TG Size= 64)")    \
     ZSTDGPU_KERNEL(DecompressSequences_SingleStream_LdsFseCache32   ,   L"Decompress Sequences (Single-Stream, LDS FSE Cache, TG Size= 32)")    \
-    ZSTDGPU_KERNEL(DecompressSequences_SingleStream_ScalarFseLoad128,   L"Decompress Sequences (Single-Stream, Scalar FSE Load, TG Size=128)")  \
-    ZSTDGPU_KERNEL(DecompressSequences_SingleStream_ScalarFseLoad64 ,   L"Decompress Sequences (Single-Stream, Scalar FSE Load, TG Size= 64)")  \
     ZSTDGPU_KERNEL(DecompressSequences_SingleStream_ScalarFseLoad32 ,   L"Decompress Sequences (Single-Stream, Scalar FSE Load, TG Size= 32)")  \
     ZSTDGPU_KERNEL(DecompressSequences_MultiStream_4                ,   L"Decompress Sequences (Multi-Stream, Streams= 4)")                     \
     ZSTDGPU_KERNEL(DecompressSequences_MultiStream_8                ,   L"Decompress Sequences (Multi-Stream, Streams= 8)")                     \

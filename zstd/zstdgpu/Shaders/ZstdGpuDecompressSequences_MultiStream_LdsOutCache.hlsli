@@ -43,7 +43,7 @@
 #   error 'kzstdgpu_DecompressSequences_ThreadsPerStream' must be a power of 2
 #endif
 
-#define SEQ_CODE_INFO_READ_FROM_VGPR 1
+#define SEQ_CODE_INFO_READ_FROM_VGPR_IF_WAVE32_PLUS 1
 #include "../zstdgpu_shaders.h"
 
 #include "../.generated/ZstdGpuSrt_DecompressSequences.h"
