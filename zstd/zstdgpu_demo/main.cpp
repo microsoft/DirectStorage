@@ -1172,6 +1172,196 @@ struct DemoCtx
 };
 
 /** Releases whatever `demoRun` managed to initialise (zero fields are skipped). */
+/**
+ *  zstd reuses entropy tables ACROSS blocks inside a frame: a sequence section may select
+ *  `Repeat_Mode` for its literal-length / offset / match-length FSE tables, and a literals
+ *  section may be "Treeless", meaning it reuses the previous block's Huffman table.
+ *
+ *  A slice that starts mid-frame therefore cannot begin at an arbitrary block ordinal. It must
+ *  begin at a block that defines every table it uses, and it must stop before the first block
+ *  that repeats a table defined outside the slice. Cutting anywhere else decodes with tables the
+ *  slice never built -- which does not fail, it silently produces different sequence lengths and
+ *  wrong output.
+ *
+ *  This walks the block headers only (never a payload) and records, per block ordinal, which of
+ *  the four tables the block REQUIRES from an earlier block and which it DEFINES for later ones.
+ */
+enum
+{
+    kDemoEntropyTable_Huffman     = 1u,
+    kDemoEntropyTable_LiteralLen  = 2u,
+    kDemoEntropyTable_Offset      = 4u,
+    kDemoEntropyTable_MatchLen    = 8u,
+};
+
+/** Returns up to 8 little-endian bytes. Must be 64-bit: the largest literals-section header is
+ *  5 bytes, and truncating it to 32 bits silently mis-locates the sequences section. */
+static uint64_t demoReadLE(const uint8_t *p, uint32_t byteCount)
+{
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < byteCount; ++i)
+        v |= ((uint64_t)p[i]) << (8u * i);
+    return v;
+}
+
+/** Returns the frame's block count, or 0xffffffff if the frame could not be walked. */
+static uint32_t demoScanFrameEntropyDeps(const uint8_t *frame, uint32_t frameSize, uint8_t *outRequires, uint8_t *outDefines, uint32_t outCapacity)
+{
+    if (frameSize < 5 || 0xFD2FB528u != demoReadLE(frame, 4))
+        return 0xffffffffu;
+
+    uint32_t p = 4;
+    const uint8_t fhd = frame[p++];
+    const uint32_t fcsFlag    = (uint32_t)(fhd >> 6);
+    const uint32_t singleSeg  = (uint32_t)((fhd >> 5) & 1u);
+    const uint32_t dictIdFlag = (uint32_t)(fhd & 3u);
+
+    if (0 == singleSeg)
+        p += 1;                                             /** window descriptor */
+    p += (0 == dictIdFlag) ? 0u : (1u << (dictIdFlag - 1u));/** 0, 1, 2 or 4 bytes */
+    p += (0 == fcsFlag) ? singleSeg : (1u << fcsFlag);      /** 0/1, 2, 4 or 8 bytes */
+
+    uint32_t blockOrdinal = 0;
+    for (;;)
+    {
+        if (p + 3u > frameSize || blockOrdinal >= outCapacity)
+            return 0xffffffffu;
+
+        const uint32_t blockHeader = (uint32_t)demoReadLE(frame + p, 3);
+        p += 3;
+        const uint32_t isLast    = blockHeader & 1u;
+        const uint32_t blockType = (blockHeader >> 1) & 3u;
+        const uint32_t blockSize = blockHeader >> 3;
+
+        /** RLE_Block stores the *regenerated* size in the header; its payload is a single byte. */
+        const uint32_t blockPayload = (1u == blockType) ? 1u : blockSize;
+
+        if (p + blockPayload > frameSize)
+            return 0xffffffffu;
+
+        uint8_t req = 0;
+        uint8_t def = 0;
+
+        if (2u == blockType /** Compressed_Block */)
+        {
+            uint32_t q = p;
+            const uint8_t litHeader = frame[q];
+            const uint32_t litType  = (uint32_t)(litHeader & 3u);
+            const uint32_t sizeFmt  = (uint32_t)((litHeader >> 2) & 3u);
+
+            if (3u == litType /** Treeless_Literals_Block */)
+                req |= kDemoEntropyTable_Huffman;
+            if (2u == litType /** Compressed_Literals_Block */)
+                def |= kDemoEntropyTable_Huffman;
+
+            if (litType <= 1u /** Raw / RLE literals */)
+            {
+                uint32_t headerSize = 1;
+                uint32_t regenSize  = (uint32_t)(litHeader >> 3);
+                if (1u == sizeFmt)      { headerSize = 2; regenSize = (uint32_t)((demoReadLE(frame + q, 2) >> 4) & 0xFFFu); }
+                else if (3u == sizeFmt) { headerSize = 3; regenSize = (uint32_t)((demoReadLE(frame + q, 3) >> 4) & 0xFFFFFu); }
+                q += headerSize + ((0u == litType) ? regenSize : 1u);
+            }
+            else
+            {
+                uint32_t headerSize = 3;
+                uint32_t compSize   = (uint32_t)((demoReadLE(frame + q, 3) >> 14) & 0x3FFu);
+                if (2u == sizeFmt)      { headerSize = 4; compSize = (uint32_t)((demoReadLE(frame + q, 4) >> 18) & 0x3FFFu); }
+                else if (3u == sizeFmt) { headerSize = 5; compSize = (uint32_t)((demoReadLE(frame + q, 5) >> 22) & 0x3FFFFu); }
+                q += headerSize + compSize;
+            }
+
+            if (q >= p + blockPayload)
+                return 0xffffffffu;
+
+            const uint8_t nbSeq0 = frame[q];
+            uint32_t seqCount;
+            if (0u == nbSeq0)        { seqCount = 0;                                                      q += 1; }
+            else if (nbSeq0 < 128u)  { seqCount = nbSeq0;                                                 q += 1; }
+            else if (nbSeq0 < 255u)  { seqCount = (((uint32_t)nbSeq0 - 128u) << 8) + frame[q + 1];        q += 2; }
+            else                     { seqCount = (uint32_t)demoReadLE(frame + q + 1, 2) + 0x7F00u;                 q += 3; }
+
+            if (seqCount > 0)
+            {
+                const uint8_t  modes    = frame[q];
+                const uint32_t mode[3]  = { (uint32_t)((modes >> 6) & 3u), (uint32_t)((modes >> 4) & 3u), (uint32_t)((modes >> 2) & 3u) };
+                const uint8_t  table[3] = { kDemoEntropyTable_LiteralLen, kDemoEntropyTable_Offset, kDemoEntropyTable_MatchLen };
+                for (uint32_t m = 0; m < 3; ++m)
+                {
+                    if (3u == mode[m] /** Repeat_Mode */) req |= table[m];
+                    else                                  def |= table[m];
+                }
+            }
+        }
+
+        outRequires[blockOrdinal] = req;
+        outDefines[blockOrdinal]  = def;
+        ++blockOrdinal;
+
+        p += blockPayload;
+        if (isLast)
+            break;
+    }
+
+    return blockOrdinal;
+}
+
+/**
+ *  A block ordinal is a legal slice boundary only if the whole remainder of the frame decodes
+ *  from it with no knowledge of earlier blocks. Requiring merely that the block itself defines
+ *  its own tables is not enough: a later block can repeat a table defined *before* the cut, and
+ *  that block would then be undecodable in every slice -- there is nowhere left to put it.
+ */
+static void demoComputeValidCuts(const uint8_t *blkRequires, const uint8_t *blkDefines, uint32_t blockCount, uint8_t *outValidCut)
+{
+    for (uint32_t start = 0; start < blockCount; ++start)
+    {
+        uint8_t defined = 0;
+        uint8_t valid   = 1;
+        for (uint32_t b = start; b < blockCount; ++b)
+        {
+            if (0 != (blkRequires[b] & (uint8_t)~defined))
+            {
+                valid = 0;
+                break;
+            }
+            defined |= blkDefines[b];
+        }
+        outValidCut[start] = valid;
+    }
+}
+
+/**
+ *  Picks the end ordinal of the slice starting at `sliceStart`, preferring the largest slice no
+ *  longer than `budget`. The budget is a preference, not a bound: when no legal cut exists within
+ *  it the slice is grown until one does, and a frame with no legal cut at all decodes whole.
+ *  Growing is always safe (a bigger slice is closer to a whole frame); cutting illegally is not.
+ */
+static uint32_t demoPlanSliceEnd(const uint8_t *validCut, uint32_t blockCount, uint32_t sliceStart, uint32_t budget)
+{
+    uint32_t bestWithin  = 0;
+    uint32_t firstBeyond = 0;
+
+    for (uint32_t b = sliceStart + 1u; b < blockCount; ++b)
+    {
+        if (0 == validCut[b])
+            continue;
+        if ((b - sliceStart) <= budget)
+        {
+            bestWithin = b;
+        }
+        else
+        {
+            firstBeyond = b;
+            break;
+        }
+    }
+
+    if (0 != bestWithin)  return bestWithin;
+    if (0 != firstBeyond) return firstBeyond;
+    return blockCount;
+}
+
 static void demoCleanup(DemoCtx *ctx)
 {
     if (NULL != ctx->cmdQueue.queue)
@@ -1701,7 +1891,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-limit <count>       [Optional] Decodes only the first <count> blocks of every frame (0 = all). Cannot be combined with --chk-cpu/--chk-gpu/--sim-gpu, which compare against whole-frame references.\n");
                 debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
-                debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each batch as a sequence of <count>-block slices sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
+                debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of roughly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are snapped to block ordinals that start a fresh zstd entropy context, so a slice may be longer than <count>. Forces one frame per batch. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;
@@ -1840,6 +2030,11 @@ static int demoRun(void *demoCtx)
     const uint32_t workingLo    = minFrame;
     const uint32_t workingHi    = maxFrame;
     const uint32_t workingFrames = workingHi - workingLo + 1;
+    // Slice boundaries are legal per *frame* (they depend on that frame's entropy-table reuse),
+    // while the block window handed to the library is uniform across the batch. One frame per
+    // batch is the only shape in which a uniform window can always be cut legally.
+    if (0 != blockSlice)
+        frameBatchCount = 1;
     const uint32_t effBatchFrames = (frameBatchCount == 0 || frameBatchCount > workingFrames)
                                   ? workingFrames : frameBatchCount;
     const uint32_t numBatches   = (workingFrames + effBatchFrames - 1) / effBatchFrames;
@@ -2118,22 +2313,45 @@ static int demoRun(void *demoCtx)
             }
 
             /*
-             *  --blk-slice decodes the batch as a sequence of `blockSlice`-block slices sharing one
+             *  --blk-slice decodes the batch's single frame as a sequence of slices sharing one
              *  destination buffer and one resume buffer, which is the only configuration that
              *  exercises carried repeat offsets and the carried output cursor.
              *
-             *  The slice count is derived from the batch's *total* block count, which over-counts
-             *  whenever the batch holds more than one frame. Over-counting is deliberately safe: a
-             *  slice whose start ordinal is past the end of every frame decodes nothing and writes
-             *  nothing, so the result is wasted dispatches, never wrong output.
+             *  Slice boundaries are NOT `blockSlice` apart in general. zstd reuses entropy tables
+             *  across blocks inside a frame, so a slice may only end where the next block starts a
+             *  fresh entropy context; `blockSlice` is the preferred slice length and the planner
+             *  grows past it when no legal cut exists. See demoScanFrameEntropyDeps.
              */
+            uint8_t *blkRequires    = NULL;
+            uint8_t *blkDefines     = NULL;
+            uint8_t *blkValidCut    = NULL;
+            uint32_t sliceBlockCount = 0;
+            if (0 != blockSlice)
+            {
+                const uint32_t frameCap = 1u + (zstdInFrameRefs[bLo].size / 3u);
+                blkRequires = (uint8_t *)malloc(frameCap);
+                blkDefines  = (uint8_t *)malloc(frameCap);
+                blkValidCut = (uint8_t *)malloc(frameCap);
+                sliceBlockCount = demoScanFrameEntropyDeps((const uint8_t *)zstdData + zstdInFrameRefs[bLo].offs,
+                                                           zstdInFrameRefs[bLo].size, blkRequires, blkDefines, frameCap);
+                if (0xffffffffu == sliceBlockCount)
+                {
+                    debugPrint(L"[FAIL] --blk-slice: could not walk the frame's block headers, so legal slice boundaries are unknown.\n");
+                    ctx->retv = 1;
+                    return 0;
+                }
+                demoComputeValidCuts(blkRequires, blkDefines, sliceBlockCount, blkValidCut);
+            }
+
+            uint32_t sliceStart = 0;
             uint32_t sliceIdx = 0;
             for (;;)
             {
             if (0 != blockSlice)
             {
-                blockStartPerFrame = sliceIdx * blockSlice;
-                blockLimitPerFrame = blockSlice;
+                const uint32_t sliceEnd = demoPlanSliceEnd(blkValidCut, sliceBlockCount, sliceStart, blockSlice);
+                blockStartPerFrame = sliceStart;
+                blockLimitPerFrame = sliceEnd - sliceStart;
             }
 
             // ---- Per-batch setup ----------------------------------------------
@@ -2760,13 +2978,18 @@ static int demoRun(void *demoCtx)
             PIXEndEvent();
 
             ++sliceIdx;
+            sliceStart += blockLimitPerFrame;
             if (0 == blockSlice)
                 break;
             if (!windowOpen)
                 break;
-            if ((sliceIdx * blockSlice) >= (fbInfo.rawBlockCount + fbInfo.rleBlockCount + fbInfo.cmpBlockCount))
+            if (sliceStart >= sliceBlockCount)
                 break;
             }
+
+            free(blkRequires);
+            free(blkDefines);
+            free(blkValidCut);
 
             if (!windowOpen)
                 break;
