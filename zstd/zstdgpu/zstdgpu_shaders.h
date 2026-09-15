@@ -624,36 +624,42 @@ static const uint32_t SEQ_MLEN_EXTRA_BITS_AND_BASELINES[SEQ_MLEN_CODE_INFO_END] 
      4099 << 5 | 12,  8195 << 5 | 13, 16387 << 5 | 14, 32771 << 5 | 15, 65539 << 5 | 16
 };
 
-// For both LLen and MLen, the Predefined_Mode accuracy log is 6 bits, while FSE_Compressed_Mode is 9 bits.
-// So for the default/predefined FSE decoder-tables, there are 512-64 unused DWORDs; the first of each 64 of
-// which are used to store copies of SEQ_{LLEN,MLEN}_EXTRA_BITS_AND_BASELINES, since current AMD RDNA3 compilers
-// seem to emit better code when reading from an SRV than an embedded array, especially for SingleStream variants
-// (which should mostly be SMEM loads). In most other shaders, embedded arrays don't seem to be an issue for RDNA3.
-static uint32_t zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(uint32_t cmpBlockCnt)
-{
-    return zstdgpu_ComputeFseDataStartFromFseIndexLLen(zstdgpu_ComputeFseIndexLLen(0, cmpBlockCnt), cmpBlockCnt) + 64;
-}
-
-static uint32_t zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(uint32_t cmpBlockCnt)
-{
-    return zstdgpu_ComputeFseDataStartFromFseIndexMLen(zstdgpu_ComputeFseIndexMLen(0, cmpBlockCnt), cmpBlockCnt) + 64;
-}
-
 struct zstdgpu_SeqCodeInfoContext
 {
-    ZSTDGPU_RO_BUFFER(uint32_t) fseElems;
-    uint32_t llenDataStart;
-    uint32_t mlenDataStart;
+    uint32_t2 llenVgpr; // .x = low 32 array elements, .y = high 32 array elements
+    uint32_t2 mlenVgpr;
 };
 
-static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext(ZSTDGPU_RO_BUFFER(uint32_t) fseElems, uint32_t cmpBlockCnt)
+static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext()
 {
-    zstdgpu_SeqCodeInfoContext ctx = {
-        fseElems,
-        zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(cmpBlockCnt),
-        zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(cmpBlockCnt)
-    };
+    const uint32_t laneIdx = WaveGetLaneIndex();
+
+    zstdgpu_SeqCodeInfoContext ctx;
+    if (laneIdx < 32)
+    {
+        ctx.llenVgpr.x = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[laneIdx];
+        ctx.mlenVgpr.x = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[laneIdx];
+
+        if (laneIdx < SEQ_LLEN_CODE_INFO_END - 32)
+        {
+            ctx.llenVgpr.y = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[laneIdx + 32];
+        }
+
+        if (laneIdx < SEQ_MLEN_CODE_INFO_END - 32)
+        {
+            ctx.mlenVgpr.y = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[laneIdx + 32];
+        }
+    }
+
     return ctx;
+}
+
+// Cannot read from an inactive lane:
+static uint32_t WaveReadLaneAtConcat(uint32_t2 v2, uint32_t flatIdx)
+{
+    uint32_t v = flatIdx < 32 ? v2.x : v2.y;
+    uint32_t i = flatIdx & 31;
+    return WaveReadLaneAt(v, i);
 }
 
 static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitResources_SRT) srt, uint32_t threadId)
@@ -711,18 +717,6 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
         zstdgpu_FseInfo rleInfo;
         rleInfo.fseProbCountAndAccuracyLog2 = 0;
         srt.inoutFseInfos[i] = rleInfo;
-    }
-
-    const uint32_t codeInfoStartLLen = zstdgpu_SeqCodeInfoDataStartInFseElemsLLen(cmpBlockCnt);
-    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_LLEN_CODE_INFO_END, threadId, kzstdgpu_TgSizeX_InitCounters)
-    {
-        srt.inoutFseElems[codeInfoStartLLen + i] = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[i];
-    }
-
-    const uint32_t codeInfoStartMLen = zstdgpu_SeqCodeInfoDataStartInFseElemsMLen(cmpBlockCnt);
-    ZSTDGPU_FOR_WORK_ITEMS(i, SEQ_MLEN_CODE_INFO_END, threadId, kzstdgpu_TgSizeX_InitCounters)
-    {
-        srt.inoutFseElems[codeInfoStartMLen + i] = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[i];
     }
 
     // NOTE(pamartis): We start from `srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs` because
@@ -3328,9 +3322,13 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
     ZSTDGPU_ASSERT(symbolOffs <= (kzstdgpu_SeqOffset_Encoded_BitBase - 1));
     const uint32_t symbolOffs_Clamped = zstdgpu_MinU32(symbolOffs, kzstdgpu_SeqOffset_Encoded_BitBase - 1);
 
-    // Read from BASELINES and EXTRA_BITS:
-    const uint32_t llenInfo = ctx.fseElems[ctx.llenDataStart + symbolLLen];
-    const uint32_t mlenInfo = ctx.fseElems[ctx.mlenDataStart + symbolMLen];
+#if SEQ_CODE_INFO_READ_FROM_VGPR
+    const uint32_t llenInfo = WaveReadLaneAtConcat(ctx.llenVgpr, symbolLLen);
+    const uint32_t mlenInfo = WaveReadLaneAtConcat(ctx.mlenVgpr, symbolMLen);
+#else
+    const uint32_t llenInfo = SEQ_LLEN_EXTRA_BITS_AND_BASELINES[symbolLLen];
+    const uint32_t mlenInfo = SEQ_MLEN_EXTRA_BITS_AND_BASELINES[symbolMLen];
+#endif
 
     const uint32_t bitcntLLen = llenInfo & 31;
     const uint32_t bitcntOffs = symbolOffs_Clamped;
@@ -3399,9 +3397,11 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream(ZSTDGPU_PARAM_IN
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
-    // An alternative implementation of this may require all threads in the group to be active (before any return):
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
 
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
+    // Some implementations of zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress
+    // may require all lanes active, but this variant cannot satisfy that.
+    // TODO: ensure this variant uses something like SEQ_CODE_INFO_READ_FROM_EMBEDDED_ARRAY_IN_LOOP.
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
@@ -3552,9 +3552,9 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
-    // An alternative implementation of this may require all threads in the group to be active (before any return):
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
-
+    // An implementation of this may require all threads in the group to active (before any return):
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
+    // NOTE: This is group-uniform:
     if (seqStreamIdx >= seqStreamCnt)
         return;
 
@@ -3599,12 +3599,17 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     #endif
 #endif
 
+    // zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress may require all lanes active.
+    // On RDNA, if wave32 is used (which it should for a [numthreads(32,1,1)] shader),
+    // keeping active lanes on is usually fine, especially if the amount of VALU instructions is low.
+#if !SEQ_CODE_INFO_READ_FROM_VGPR
     // The rest of the shader should be scalar. Ideally the compiler should emit mostly scalar instructions,
     // but this may help it, or deactivate unnecessary lanes for instructions with no scalar counterpart (LDS loads).
     if (threadId != 0)
     {
         return;
     }
+#endif
 
         #ifdef ZSTDGPU_BACKWARD_BITBUF
         #   error `ZSTDGPU_BACKWARD_BITBUF` must not be defined.
@@ -3754,8 +3759,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
-    // An alternative implementation of this may require all threads in the group to be active (before any return):
-    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(srt.inFseElems, cmpBlockCnt);
+    // zstdgpu_InitSeqCodeInfoContext/zstdgpu_ReadSeqBitsAndDecompress may require all lanes active (no early return):
+    const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext();
 
     const zstdgpu_OffsetAndSize seqRefDst = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
 
