@@ -206,6 +206,36 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
+ *  @brief      Supplies the per-frame resume state used to continue a frame across submissions.
+ *
+ *  `resumeState` must be a buffer of `4 * frameCount` `uint32_t`s in `D3D12_RESOURCE_STATE_UNORDERED_ACCESS`.
+ *  Pass `clearResumeState` of 1 for the first slice of a sequence and 0 for every subsequent slice:
+ *  the library reads the carried state at the start of a decode and rewrites it at the end, so
+ *  clearing mid-sequence would silently restart every frame.
+ *
+ *  The clear is explicit rather than inferred from `blockStart == 0` because a batch mixes frames
+ *  that are starting with frames that are continuing, and a wrong guess produces plausible-looking
+ *  wrong output rather than a failure.
+ *
+ *  It must be caller-owned because the library's scratch heaps do not survive between submissions,
+ *  and resuming is precisely a cross-submission operation. Passing NULL (the default) makes the
+ *  library allocate and zero its own, which reproduces whole-frame behaviour exactly.
+ *
+ *  The two pieces of state it carries are the ones a mid-frame slice cannot reconstruct:
+ *
+ *      - the output cursor. The caller cannot compute this, because a compressed block's
+ *        decompressed size is only discovered by decoding it.
+ *      - the repeat offsets at the frame's last decoded sequence. zstd's `1/4/8` defaults apply only
+ *        at the true start of a frame.
+ *
+ *  Note this does NOT remove the requirement that preceding slices' output is still present in the
+ *  destination buffer: matches read it as history.
+ *
+ *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *resumeState, uint32_t clearResumeState);
+
+/**
  *  @brief      Decode only blocks `[blockStartPerFrame, blockStartPerFrame + blockLimitPerFrame)` of
  *              every frame. A limit of 0 means "to the end of the frame", so the default
  *              `(0, 0)` is the whole frame.

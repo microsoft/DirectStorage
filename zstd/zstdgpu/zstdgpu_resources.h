@@ -44,7 +44,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMP         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountAll         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , FrameStatus                   )
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameStatus                   )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMaxIdx       )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
@@ -61,7 +62,8 @@
     ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          ) \
     \
     ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        ) \
-    ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
+    ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        ) \
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameResumeState              )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_2() /* empty so far*/
 
@@ -295,6 +297,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameBlockCountAllLookback_Count = PerFrameBlockCountRAWLookback_Count;
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
     const uint32_t FrameStatus_Count = frameCount;
+    const uint32_t PerFrameSeqStreamMaxIdx_Count = frameCount;
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
     const uint32_t Predicate_Count = 2;
@@ -400,6 +403,7 @@ static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo,
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
     const uint32_t UnCompressedFramesRefs_Count     = uncompressedFrameCount;
+    const uint32_t FrameResumeState_Count           = uncompressedFrameCount * kzstdgpu_FrameResumeDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
 }
@@ -650,6 +654,23 @@ static void zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(zstdgpu_ResourceDa
 
         outResData->gpuOnly.FrameStatus = frameStatus;
         outResData->gpuOnly.FrameStatus->AddRef();
+    }
+}
+
+/**
+ *  Replaces the internally allocated per-frame resume buffer with a caller-supplied one.
+ *
+ *  Unlike the output resources above this is optional: passing NULL leaves the internal allocation
+ *  in place, which the library zeroes, so a caller that never slices sees no behaviour change.
+ */
+static void zstdgpu_ResourceDataGpu_ReInitResumeExternal(zstdgpu_ResourceDataGpu *outResData, ID3D12Resource *frameResumeState)
+{
+    if (NULL != frameResumeState && frameResumeState != outResData->gpuOnly.FrameResumeState)
+    {
+        D3D12AID_SAFE_RELEASE(outResData->gpuOnly.FrameResumeState);
+
+        outResData->gpuOnly.FrameResumeState = frameResumeState;
+        outResData->gpuOnly.FrameResumeState->AddRef();
     }
 }
 
@@ -1036,6 +1057,17 @@ static void zstdgpu_ResourceDataCpu_InitFromHeap(zstdgpu_ResourceDataCpu *outRes
     #define ZSTDGPU_BUFFER(type, name) if (outResData->name == NULL && info->name##_ByteSizeInternal != 0) outResData->name = (type *)alloc(info->name##_ByteSizeInternal);
         ZSTDGPU_ALL_BUFFERS_LIST()
     #undef  ZSTDGPU_BUFFER
+
+    /*
+     *  The GPU path zeroes the resume state with a memset dispatch. The CPU simulation runs no such
+     *  pass, and `alloc` is a plain `malloc`, so without this the carried output cursor starts as
+     *  garbage -- and that cursor is added to every block's destination address, so the result is a
+     *  fault rather than merely wrong output.
+     */
+    if (NULL != outResData->FrameResumeState)
+    {
+        memset(outResData->FrameResumeState, 0, info->FrameResumeState_ByteSizeInternal);
+    }
 }
 
 #ifndef ZSTDGPU_DISABLE_RESOURCE_DATA_GPU

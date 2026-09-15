@@ -1580,6 +1580,10 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
 
             // TODO (pamartis): Add scalarisation loop if needed
             InterlockedMin(srt.inoutPerFrameSeqStreamMinIdx[frameIndex], outBlockData.seqStreamIndex);
+            // The maximum is the mirror of the minimum and exists for the same reason: resuming a
+            // frame needs the repeat offsets left by its *last* sequence stream, and there is no
+            // other way to name that stream without scanning forward past frames that have none.
+            InterlockedMax(srt.inoutPerFrameSeqStreamMaxIdx[frameIndex], outBlockData.seqStreamIndex);
         }
     }
 
@@ -4012,12 +4016,77 @@ static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstd
             offset2 = srt.inPerSeqStreamFinalOffset2[prevSeqStreamIdx];
             offset3 = srt.inPerSeqStreamFinalOffset3[prevSeqStreamIdx];
         }
+        else
+        {
+            // Resuming mid-frame: the frame's starting offsets are the previous slice's final ones,
+            // not zstd's defaults. Zero means "frame not started", so the defaults still apply.
+            const uint32_t resume1 = srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset1(frameIdx)];
+            ZSTDGPU_BRANCH if (0u != resume1)
+            {
+                offset1 = resume1;
+                offset2 = srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset2(frameIdx)];
+                offset3 = srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset3(frameIdx)];
+            }
+        }
         offset = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, offset1, offset2, offset3);
     }
     offset -= 3u;
     // Masked write-back: the top two bits of this dword carry the match length, so plain
     // whole-dword arithmetic here would silently corrupt it.
     srt.inoutDecompressedLiterals_Seqs[offsDword] = zstdgpu_SeqReplaceOffs(packed, offset);
+}
+
+/**
+ *  Publishes each frame's carried state so the next slice can pick up where this one stopped.
+ *
+ *  One thread per frame. The two halves are independent:
+ *
+ *   - The output cursor advances by the bytes this slice actually produced for the frame. The host
+ *     cannot compute this itself: a compressed block's decompressed size is only discovered by
+ *     decoding it, which is the whole reason the cursor has to live on the GPU.
+ *   - The repeat offsets are taken from the frame's *last* sequence stream. A frame whose slice
+ *     contained no sequence streams at all leaves them untouched, so an all-RAW slice correctly
+ *     carries the offsets it inherited rather than clearing them.
+ */
+static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_WriteFrameResume_SRT) srt, uint32_t threadId)
+{
+    const uint32_t frameIdx = threadId;
+    if (frameIdx >= srt.frameCount)
+        return;
+
+    const uint32_t blockCount = srt.inCounters[0].Blocks_RAW
+                              + srt.inCounters[0].Blocks_RLE
+                              + srt.inCounters[0].Blocks_CMP;
+
+    // `inPerFrameBlockCountAll` is an exclusive prefix sum, so entry `i` is the index of frame `i`'s
+    // first block and entry `i + 1` is one past its last.
+    const uint32_t firstBlockIdx = srt.inPerFrameBlockCountAll[frameIdx];
+    const uint32_t endBlockIdx   = ((frameIdx + 1u) < srt.frameCount)
+                                 ? srt.inPerFrameBlockCountAll[frameIdx + 1u]
+                                 : blockCount;
+
+    uint32_t decodedBytes = 0;
+    ZSTDGPU_BRANCH if (endBlockIdx > firstBlockIdx)
+    {
+        uint32_t frameStartOffset = 0;
+        ZSTDGPU_BRANCH if (firstBlockIdx > 0)
+        {
+            frameStartOffset = srt.inBlockSizePrefix[firstBlockIdx - 1u];
+        }
+        decodedBytes = srt.inBlockSizePrefix[endBlockIdx - 1u] - frameStartOffset;
+    }
+
+    const uint32_t cursorIdx = zstdgpu_FrameResumeOutputCursor(frameIdx);
+    srt.inoutFrameResumeState[cursorIdx] = srt.inoutFrameResumeState[cursorIdx] + decodedBytes;
+
+    const uint32_t seqStreamMin = srt.inPerFrameSeqStreamMinIdx[frameIdx];
+    ZSTDGPU_BRANCH if (~0u != seqStreamMin)
+    {
+        const uint32_t seqStreamMax = srt.inPerFrameSeqStreamMaxIdx[frameIdx];
+        srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset1(frameIdx)] = srt.inPerSeqStreamFinalOffset1[seqStreamMax];
+        srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset2(frameIdx)] = srt.inPerSeqStreamFinalOffset2[seqStreamMax];
+        srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset3(frameIdx)] = srt.inPerSeqStreamFinalOffset3[seqStreamMax];
+    }
 }
 
 struct zstdgpu_Sequence

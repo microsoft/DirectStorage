@@ -49,6 +49,7 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     }
 
     srt.inoutBlockDestOffs[blockIdx] = srt.inUnCompressedFramesRefs[frameIdx].offs
+                                     + srt.inoutFrameResumeState[zstdgpu_FrameResumeOutputCursor(frameIdx)]
                                      + blockOffset
                                      - firstFrameBlockOffset;
 }

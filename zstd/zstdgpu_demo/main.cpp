@@ -904,6 +904,12 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     {
         memset(zstdCpu.PerFrameSeqStreamMinIdx, 0xFF, zstdFrameCount * sizeof(uint32_t));
     }
+    // NOTE: PerFrameSeqStreamMaxIdx accumulates with InterlockedMax, so it seeds to 0, not ~0u.
+    // A frame with no sequence streams therefore keeps 0, which is indistinguishable from "stream 0"
+    // -- validity is always decided by PerFrameSeqStreamMinIdx being ~0u, never by the maximum.
+    {
+        memset(zstdCpu.PerFrameSeqStreamMaxIdx, 0, zstdFrameCount * sizeof(uint32_t));
+    }
     // Parse Compressed Blocks on CPU with the same code we use on GPU
     {
         zstdgpu_ParseCompressedBlocks_SRT srt;
@@ -939,7 +945,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     }
     const uint32_t literalCount = CNTRS(HUF_Streams_DecodedBytes);
     const uint32_t sequenceCount = CNTRS(Seq_Streams_DecodedItems);
-    zstdgpu_ResourceInfo_Stage_2_Init(&zstdInfo, literalCount, sequenceCount, 0 /*arena bytes: counts here are exact, so size to them*/, 0, 0);
+    zstdgpu_ResourceInfo_Stage_2_Init(&zstdInfo, literalCount, sequenceCount, 0 /*arena bytes: counts here are exact, so size to them*/, 0, zstdFrameCount);
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
     // The CPU reference arena is sized independently of the GPU's, so its top has to travel with
@@ -1429,6 +1435,7 @@ static int demoRun(void *demoCtx)
     uint32_t blockLimitPerFrame = 0; // 0 => decode every block of every frame
     uint32_t blockStartPerFrame = 0; // first block ordinal decoded in every frame
     uint32_t blockDstOffset     = 0; // bytes already decoded by preceding slices, added to every frame's destination
+    uint32_t blockSlice         = 0; // 0 => one dispatch per batch; N => decode N blocks per dispatch, resuming across dispatches
     uint32_t zstdOffs = 0;
 
 #ifndef _GAMING_XBOX
@@ -1447,6 +1454,7 @@ static int demoRun(void *demoCtx)
     bool nextBlockLimit      = false;
     bool nextBlockStart      = false;
     bool nextBlockDstOfs     = false;
+    bool nextBlockSlice      = false;
             bool nextZstdOffs = false;
             bool badArg = false;
             for (argi = 1; argi < argc; ++argi)
@@ -1478,7 +1486,7 @@ static int demoRun(void *demoCtx)
                     nextGpuVenId = false;
                     nextGpuDevId = false;
                 }
-                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs)
+                else if (nextRepCount || nextPrfLevel || nextMinFrame || nextMaxFrame || nextFrameBatchCount || nextZstdOffs || nextBlockLimit || nextBlockStart || nextBlockDstOfs || nextBlockSlice)
                 {
                     errno = 0;
                     wchar_t *end = NULL;
@@ -1506,6 +1514,8 @@ static int demoRun(void *demoCtx)
                             blockStartPerFrame = value;
                         else if (nextBlockDstOfs)
                             blockDstOffset = value;
+                        else if (nextBlockSlice)
+                            blockSlice = value;
                     }
 
                     nextRepCount = false;
@@ -1517,6 +1527,7 @@ static int demoRun(void *demoCtx)
                     nextBlockLimit = false;
                     nextBlockStart = false;
                     nextBlockDstOfs = false;
+                    nextBlockSlice = false;
                 }
                 else if (0 == wcscmp(argv[argi], L"--chk-gpu"))
                 {
@@ -1604,6 +1615,10 @@ static int demoRun(void *demoCtx)
                 {
                     nextBlockDstOfs = true;
                 }
+                else if (0 == wcscmp(argv[argi], L"--blk-slice"))
+                {
+                    nextBlockSlice = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--zst-ofs"))
                 {
                     nextZstdOffs = true;
@@ -1638,11 +1653,24 @@ static int demoRun(void *demoCtx)
              *  dies deep inside literal decoding on an opaque assert, and a validation flag that
              *  reports a meaningless comparison is worse than one that refuses to run.
              */
-            if ((0 != blockLimitPerFrame || 0 != blockStartPerFrame) && (chkCpu || chkGpu || simGpu))
+            if ((0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockSlice) && (chkCpu || chkGpu || simGpu))
             {
-                debugPrint(L"[ERROR] '--blk-limit'/'--blk-start' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
+                debugPrint(L"[ERROR] '--blk-limit'/'--blk-start'/'--blk-slice' cannot be combined with '--chk-cpu', '--chk-gpu' or '--sim-gpu': "
                            L"those compare against a reference that decodes whole frames, so the comparison is not "
                            L"meaningful for a partially decoded frame.\n");
+                ctx->retv = 1;
+                return 0;
+            }
+            /*
+             *  --blk-slice owns the window and the output cursor. --blk-start/--blk-limit would be
+             *  overwritten by it, and --blk-dst-ofs would double-count: the GPU already adds the
+             *  carried cursor to every frame's destination, so a caller-side shift on top of it
+             *  writes each slice twice as far along as it belongs.
+             */
+            if (0 != blockSlice && (0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockDstOffset))
+            {
+                debugPrint(L"[ERROR] '--blk-slice' cannot be combined with '--blk-limit', '--blk-start' or '--blk-dst-ofs': "
+                           L"it drives the block window itself, and the carried output cursor already positions each slice.\n");
                 ctx->retv = 1;
                 return 0;
             }
@@ -1673,6 +1701,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-limit <count>       [Optional] Decodes only the first <count> blocks of every frame (0 = all). Cannot be combined with --chk-cpu/--chk-gpu/--sim-gpu, which compare against whole-frame references.\n");
                 debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
+                debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each batch as a sequence of <count>-block slices sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;
@@ -2028,6 +2057,19 @@ static int demoRun(void *demoCtx)
         d3d12aid_MappedBuffer_Create(&zstdFrameStatus, device, 1u, frameCapacity * (uint32_t)sizeof(uint32_t), D3D12_HEAP_TYPE_READBACK);
     }
 
+    /*
+     *  The resume buffer has to outlive the per-request context, which is destroyed and recreated
+     *  between dispatches, so it is created here alongside the destination. A READBACK-typed
+     *  MappedBuffer is used because its GPU-side resource is a DEFAULT buffer created with
+     *  ALLOW_UNORDERED_ACCESS -- exactly what the library needs -- and its CPU mapping makes the
+     *  carried state inspectable when debugging a slice sequence.
+     */
+    d3d12aid_MappedBuffer zstdFrameResumeState = {};
+    if (0 != blockSlice)
+    {
+        d3d12aid_MappedBuffer_Create(&zstdFrameResumeState, device, 1, sizeof(uint32_t) * kzstdgpu_FrameResumeDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_READBACK);
+    }
+
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
     uint64_t uploadHeapSize[3] = {0, 0, 0 };
     uint64_t defaultHeapSize[3] = {0, 0, 0};
@@ -2073,6 +2115,25 @@ static int demoRun(void *demoCtx)
                 zstdgpu_DestroyPerRequestContext(&ctxMem, NULL, perRequestContext);
                 ZSTDGPU_ENUM(Status) reinit = zstdgpu_CreatePerRequestContext(&perRequestContext, persistentContext, ctxMem, zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
                 ZSTDGPU_ASSERT(ZSTDGPU_ENUM_CONST(StatusSuccess) == reinit);
+            }
+
+            /*
+             *  --blk-slice decodes the batch as a sequence of `blockSlice`-block slices sharing one
+             *  destination buffer and one resume buffer, which is the only configuration that
+             *  exercises carried repeat offsets and the carried output cursor.
+             *
+             *  The slice count is derived from the batch's *total* block count, which over-counts
+             *  whenever the batch holds more than one frame. Over-counting is deliberately safe: a
+             *  slice whose start ordinal is past the end of every frame decodes nothing and writes
+             *  nothing, so the result is wasted dispatches, never wrong output.
+             */
+            uint32_t sliceIdx = 0;
+            for (;;)
+            {
+            if (0 != blockSlice)
+            {
+                blockStartPerFrame = sliceIdx * blockSlice;
+                blockLimitPerFrame = blockSlice;
             }
 
             // ---- Per-batch setup ----------------------------------------------
@@ -2133,6 +2194,10 @@ static int demoRun(void *demoCtx)
                 zstdgpu_SetupAllStageSubmission(perRequestContext);
             }
             zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
+            if (0 != blockSlice)
+            {
+                zstdgpu_SetupResumeState(perRequestContext, zstdFrameResumeState.bufGpu, (0 == sliceIdx) ? 1u : 0u);
+            }
             if (blkCnt)
             {
                 // A batch of only undecodable frames (e.g. bad magic) collects no
@@ -2693,6 +2758,18 @@ static int demoRun(void *demoCtx)
             PIXEndEvent();
 
             PIXEndEvent();
+
+            ++sliceIdx;
+            if (0 == blockSlice)
+                break;
+            if (!windowOpen)
+                break;
+            if ((sliceIdx * blockSlice) >= (fbInfo.rawBlockCount + fbInfo.rleBlockCount + fbInfo.cmpBlockCount))
+                break;
+            }
+
+            if (!windowOpen)
+                break;
         } // for (b) -- one full pass over every batch in the working set
 
         // ---- Per-sweep bookkeeping -------------------------------------------

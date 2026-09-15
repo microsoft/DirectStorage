@@ -58,6 +58,7 @@ ZSTDGPU_WARN_STOP_MSVC(4505) /**< warning C4505: 'function name': unreferenced f
 ZSTDGPU_WARN_POP_MSVC()
 
 #include "ZstdGpuComputeDestBlockOffsets.h"
+#include "ZstdGpuWriteFrameResume.h"
 #include "ZstdGpuComputePrefixSum.h"
 #include "ZstdGpuDecodeHuffmanWeights.h"
 #include "ZstdGpuDecompressHuffmanWeights.h"
@@ -614,7 +615,8 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     ZSTDGPU_KERNEL(PrefixSum                                        ,   L"Prefix Sum")                                                          \
     ZSTDGPU_KERNEL(PrefixSumInclusive                               ,   L"Prefix Sum (Inclusive)")                                              \
     ZSTDGPU_KERNEL(PropagateFseIndex                                ,   L"Propagate FSE Index")                                                 \
-    ZSTDGPU_KERNEL(UpdateDispatchArgs                               ,   L"Update Dispatch Args")
+    ZSTDGPU_KERNEL(UpdateDispatchArgs                               ,   L"Update Dispatch Args")                                                \
+    ZSTDGPU_KERNEL(WriteFrameResume                                 ,   L"Write Per-Frame Resume State")
 
 typedef enum zstdgpu_CompiledShaderId
 {
@@ -671,7 +673,8 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL(PrefixSequenceOffsets)           \
     ZSTDGPU_KERNEL(PrefixSum)                       \
     ZSTDGPU_KERNEL(PropagateFseIndex)               \
-    ZSTDGPU_KERNEL(UpdateDispatchArgs)
+    ZSTDGPU_KERNEL(UpdateDispatchArgs)               \
+    ZSTDGPU_KERNEL(WriteFrameResume)
 
 #define ZSTDGPU_RUNTIME_KERNEL_LIST_SPECIALISED()   \
     ZSTDGPU_KERNEL(DecompressSequences)             \
@@ -708,7 +711,8 @@ static const zstdgpu_CompiledShader kzstdgpu_CompiledShaders [] =
     ZSTDGPU_KERNEL_SCOPE_X(ComputeDestBlockOffsets              , L"Compute Dest Block Offsets" )   \
     ZSTDGPU_KERNEL_SCOPE_X(ExecuteSequences                     , L"ExecuteSequences"           )   \
     ZSTDGPU_KERNEL_SCOPE_X(MemcpyRAW_MemsetRLE                  , L"Memcpy Raw/Memset RLE Blocks")  \
-    ZSTDGPU_KERNEL_SCOPE_X(PrefixBlockSizes                     , L"Prefix Block Sizes"         )
+    ZSTDGPU_KERNEL_SCOPE_X(PrefixBlockSizes                     , L"Prefix Block Sizes"         )   \
+    ZSTDGPU_KERNEL_SCOPE_X(WriteFrameResume                     , L"Write Frame Resume State"   )
 
 #define ZSTDGPU_KERNEL_SCOPE_LIST()     \
     ZSTDGPU_KERNEL_SCOPE_LIST_STAGE_0() \
@@ -829,6 +833,8 @@ struct zstdgpu_PerRequestContextImpl
     ID3D12Resource         *uncompressedFramesData;
     ID3D12Resource         *uncompressedFramesRefs;
     ID3D12Resource         *frameStatus;
+    ID3D12Resource         *frameResumeState;
+    uint32_t                frameResumeStateNeedsClear;
 
     d3d12aid_Timestamps     timestamps;
 
@@ -1195,6 +1201,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->uncompressedFramesData             = NULL;
         context->uncompressedFramesRefs             = NULL;
         context->frameStatus                        = NULL;
+        context->frameResumeState                   = NULL;
+        context->frameResumeStateNeedsClear         = 1;
 
 #if ZSTDGPU_ENABLE_TIMESTAMPS
         d3d12aid_Timestamps_Create(&context->timestamps, context->device, kzstdgpu_KernelScope_Count * 2, 1);
@@ -1243,6 +1251,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPerRequestContext(void **outMemoryBlock, uin
         D3D12AID_SAFE_RELEASE(inPerRequestContext->uncompressedFramesData);
         D3D12AID_SAFE_RELEASE(inPerRequestContext->uncompressedFramesRefs);
         D3D12AID_SAFE_RELEASE(inPerRequestContext->frameStatus);
+        D3D12AID_SAFE_RELEASE(inPerRequestContext->frameResumeState);
 
         D3D12AID_SAFE_RELEASE(inPerRequestContext->srts.heap);
 
@@ -1377,6 +1386,26 @@ ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupOutputs(zstdgpu_PerRequestContext 
 
         inPerRequestContext->zstdUncompressedFrameCount         = frameCount;
         inPerRequestContext->zstdUncompressedFramesByteCount    = framesMemorySizeInBytes;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupResumeState(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *resumeState, uint32_t clearResumeState)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (inPerRequestContext->thisMemoryBlock == (void *)inPerRequestContext);
+    ZSTDGPU_ASSERT(proceed > 0);
+    if (proceed)
+    {
+        D3D12AID_SAFE_RELEASE(inPerRequestContext->frameResumeState);
+
+        inPerRequestContext->frameResumeState = resumeState;
+        inPerRequestContext->frameResumeStateNeedsClear = (NULL == resumeState) ? 1u : clearResumeState;
+        if (NULL != inPerRequestContext->frameResumeState)
+        {
+            inPerRequestContext->frameResumeState->AddRef();
+        }
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
@@ -1873,6 +1902,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
         if (stageIndex == 2u)
         {
             zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+            zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
         }
 
         // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
@@ -1995,6 +2025,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerReques
             zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
         }
         zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+            zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
 
         zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, req->frameStatus);
 
@@ -2123,6 +2154,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
         if (stageIndex == 2u)
         {
             zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+            zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
         }
 
         // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
@@ -2393,6 +2425,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         }
 
         zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
+            zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
 
         zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, req->frameStatus);
 
@@ -2607,6 +2640,12 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         zstdgpu_Bind_Memset_SeqStreamMinIdx(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */req->zstdFrameCount, /* memset value */~0u);
         cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_Memset), 1, 1);
 
+        // The maximum is seeded with 0 rather than ~0u because it is accumulated with InterlockedMax.
+        // A frame with no sequence streams keeps 0, which is indistinguishable from "stream 0", so
+        // validity is always decided by the minimum being ~0u -- never by this value.
+        zstdgpu_Bind_Memset_SeqStreamMaxIdx(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */req->zstdFrameCount, /* memset value */0);
+        cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_Memset), 1, 1);
+
         zstdgpu_Bind_Memset_BlockCountRawLookback(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */lookbackCount, /* memset value */0);
         cmdList->Dispatch(tgCount, 1, 1);
         zstdgpu_Bind_Memset_BlockCountRleLookback(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */lookbackCount, /* memset value */0);
@@ -2621,7 +2660,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Parse Frames :: Count Blocks]");
 
-        D3D12_RESOURCE_BARRIER barriers[10];
+        D3D12_RESOURCE_BARRIER barriers[11];
         uint32_t bc = 0;
 
         // last written by [Init Resources :: Stage 0]
@@ -2633,6 +2672,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // last written by [InitResources :: Memset :: Stage 0]
             // next written/updated by [Parse Compressed Blocks]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMaxIdx);
         }
         // last written by [InitResources :: Memset :: Stage 0]
         // next written by [Parse Frames :: Block Counts]
@@ -3005,7 +3045,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
-        D3D12_RESOURCE_BARRIER barriers[19];
+        D3D12_RESOURCE_BARRIER barriers[20];
         uint32_t bc = 0;
         {
             // last written by [Parse Compressed Blocks]
@@ -3018,6 +3058,9 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // last written by [Parse Compressed Blocks]
             // next read by [Prefix Sequence Offsets]
             setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMinIdx);
+            // last written by [Parse Compressed Blocks]
+            // next read by [Write Frame Resume State]
+            setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.PerFrameSeqStreamMaxIdx);
             // last written by [Prefix RAW/RLE Block Sizes]
             // next read by [Memcpy RAW blocks, Memset RLE blocks]
             if (0 == zstdgpu_IsReadbackRequired(req, 1))
@@ -3173,6 +3216,30 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     if (0 == zstdgpu_IsReadbackRequired(req, 1))
     {
         cmdList->SetPredication(req->resData.gpuOnly.Predicate, sizeof(uint64_t) /* Stage 2 predicate */, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+    }
+
+    {
+        /*
+         *  Zero the per-frame resume state, but only when the library owns it.
+         *
+         *  A caller-supplied buffer carries the state from the previous slice and clearing it would
+         *  silently restart every frame -- the exact silent-wrong-output mode this work exists to
+         *  remove -- so the ownership test is load-bearing, not tidiness.
+         */
+        if (0 != req->frameResumeStateNeedsClear)
+        {
+            PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Memset :: Frame Resume State]");
+
+            const uint32_t resumeDwordCount = req->zstdFrameCount * kzstdgpu_FrameResumeDwordCount;
+            zstdgpu_Bind_Memset_FrameResumeState(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */resumeDwordCount, /* memset value */0);
+            cmdList->Dispatch(ZSTDGPU_TG_COUNT(resumeDwordCount, kzstdgpu_TgSizeX_Memset), 1, 1);
+
+            D3D12_RESOURCE_BARRIER barriers[1];
+            setResourceUavSync(barriers, 0, req->resData.gpuOnly.FrameResumeState);
+            cmdList->ResourceBarrier(_countof(barriers), barriers);
+
+            PIXEndEvent(cmdList);
+        }
     }
 
     {
@@ -3512,6 +3579,32 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         ZSTDGPU_KERNEL_SCOPE(FinaliseSequenceOffsets, cmdList,
             zstdgpu_DispatchIndirect(cmdList, FinaliseSequenceOffsets, FinaliseSequenceOffsets);
+        );
+
+        PIXEndEvent(cmdList);
+    }
+
+    {
+        /*
+         *  The resume state is read by [Prefix Sequence Offsets], [Compute Dest Block Offsets] and
+         *  [Finalise Sequence Offsets] and rewritten here, so it must be written strictly after all
+         *  three. A UAV barrier is enough: the buffer never changes resource state, which also means
+         *  a caller-supplied one only has to be in UNORDERED_ACCESS and can stay there between
+         *  slices.
+         */
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Write Frame Resume State]");
+        D3D12_RESOURCE_BARRIER barriers[1];
+        setResourceUavSync(barriers, 0, req->resData.gpuOnly.FrameResumeState);
+        cmdList->ResourceBarrier(_countof(barriers), barriers);
+        PIXEndEvent(cmdList);
+    }
+
+    {
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Write Frame Resume State]");
+        zstdgpu_Bind_WriteFrameResume(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount);
+
+        ZSTDGPU_KERNEL_SCOPE(WriteFrameResume, cmdList,
+            cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_WriteFrameResume), 1, 1);
         );
 
         PIXEndEvent(cmdList);

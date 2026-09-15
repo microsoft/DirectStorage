@@ -68,6 +68,16 @@ static void zstdgpu_Srt_Fill_SeqStreamMinIdx(zstdgpu_Memset_SRT &srt, const zstd
     zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameSeqStreamMinIdx, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
+static void zstdgpu_Srt_Fill_SeqStreamMaxIdx(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
+{
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameSeqStreamMaxIdx, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
+}
+
+static void zstdgpu_Srt_Fill_FrameResumeState(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
+{
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FrameResumeState, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
+}
+
 static void zstdgpu_Srt_Fill_BlockCountRawLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
     zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRAWLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);

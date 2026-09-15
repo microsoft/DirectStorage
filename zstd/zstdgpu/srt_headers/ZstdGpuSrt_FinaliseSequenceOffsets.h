@@ -26,6 +26,7 @@ ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamSeqStart          : regist
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameBlockCountAll         : register(t5);
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMinIdx       : register(t6);
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInSeqStreamToBlockId            : register(t7);
+ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutFrameResumeState           : register(u1);
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs                  : register(t8);
 
 typedef struct zstdgpu_FinaliseSequenceOffsets_Consts
@@ -37,7 +38,7 @@ typedef struct zstdgpu_FinaliseSequenceOffsets_Consts
 
 ConstantBuffer<zstdgpu_FinaliseSequenceOffsets_Consts> ZstdConstants_FinaliseSequenceOffsets : register(b0);
 
-#define ZSTDGPU_SRT_RS_FinaliseSequenceOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", SRV(t8)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_FinaliseSequenceOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", UAV(u1)" ", SRV(t8)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets_SRT) srt)
 {
@@ -50,6 +51,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets
     srt.inPerFrameBlockCountAll         = ZstdInPerFrameBlockCountAll;
     srt.inPerFrameSeqStreamMinIdx       = ZstdInPerFrameSeqStreamMinIdx;
     srt.inSeqStreamToBlockId            = ZstdInSeqStreamToBlockId;
+    srt.inoutFrameResumeState           = ZstdInOutFrameResumeState;
     srt.inDispatchArgs                  = ZstdInDispatchArgs;
     srt.tgOffset                        = ZstdConstants_FinaliseSequenceOffsets.tgOffset;
     srt.workItemCount                   = ZstdConstants_FinaliseSequenceOffsets.workItemCount;
@@ -79,6 +81,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_FinaliseSequenceOffsets_SRT &srt, const zst
     srt.inPerFrameBlockCountAll         = cpuRes.PerFrameBlockCountAll;
     srt.inPerFrameSeqStreamMinIdx       = cpuRes.PerFrameSeqStreamMinIdx;
     srt.inSeqStreamToBlockId            = cpuRes.SeqStreamToBlockId;
+    srt.inoutFrameResumeState           = cpuRes.FrameResumeState;
     srt.inDispatchArgs                  = cpuRes.DispatchArgs;
     srt.tgOffset                        = tgOffset;
     srt.workItemCount                   = workItemCount;

@@ -684,8 +684,9 @@ static const uint32_t kzstdgpu_TgSizeX_ComputeDestBlockOffset = 64;
 static const uint32_t kzstdgpu_TgSizeX_ComputeDestBlockOffset = 128;
 #endif
 
-#define ZSTDGPU_TG_COUNT(elemCount, tgSize) (((elemCount) + (tgSize) - 1) / (tgSize))
+static const uint32_t kzstdgpu_TgSizeX_WriteFrameResume = 64;
 
+#define ZSTDGPU_TG_COUNT(elemCount, tgSize) (((elemCount) + (tgSize) - 1) / (tgSize))
 static inline uint32_t zstdgpu_AlignUp(uint32_t offset, uint32_t alignment)
 {
     ZSTDGPU_ASSERT(0 == (alignment & (alignment - 1)));
@@ -1809,6 +1810,31 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
     outBlockData.litStreamIndex = ~0u;
     outBlockData.seqStreamIndex = ~0u;
 }
+
+/**
+ *  Per-frame state carried from one intra-frame slice to the next.
+ *
+ *  Laid out as four consecutive dwords per frame in a plain `uint32_t` buffer rather than a struct,
+ *  so the existing memset pass can zero it and a caller can supply it as an ordinary structured
+ *  buffer. Index with the accessors below.
+ *
+ *  It may live in caller-supplied memory (see `zstdgpu_SetupResumeState`) precisely because it must
+ *  survive between submissions: the library's scratch heaps do not. When the caller supplies
+ *  nothing, the library allocates it internally and zeroes it, which reproduces the previous
+ *  whole-frame behaviour exactly.
+ *
+ *  All-zero means "this frame has not been started", which is unambiguous because a valid `offset1`
+ *  is at least `1 + 3` in the biased encoding and therefore never zero.
+ *
+ *  `offset1/2/3` are stored in the same biased-by-3 encoding that `PerSeqStreamFinalOffset*` uses,
+ *  so they move between the two without conversion.
+ */
+#define kzstdgpu_FrameResumeDwordCount      4u
+
+#define zstdgpu_FrameResumeOffset1(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 0u)
+#define zstdgpu_FrameResumeOffset2(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 1u)
+#define zstdgpu_FrameResumeOffset3(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 2u)
+#define zstdgpu_FrameResumeOutputCursor(frameIdx)   ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 3u)
 
 typedef struct zstdgpu_LitStreamInfo
 {

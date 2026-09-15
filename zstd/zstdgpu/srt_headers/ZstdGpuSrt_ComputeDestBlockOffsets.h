@@ -21,6 +21,7 @@ ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutBlockDestOffs          : re
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockSizePrefix           : register(t0);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameBlockCountAll     : register(t1);
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInUnCompressedFramesRefs    : register(t2);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameResumeState       : register(u1);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInDispatchArgs              : register(t3);
 
 typedef struct zstdgpu_ComputeDestBlockOffsets_Consts
@@ -32,7 +33,7 @@ typedef struct zstdgpu_ComputeDestBlockOffsets_Consts
 
 ConstantBuffer<zstdgpu_ComputeDestBlockOffsets_Consts> ZstdConstants_ComputeDestBlockOffsets : register(b0);
 
-#define ZSTDGPU_SRT_RS_ComputeDestBlockOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_ComputeDestBlockOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", UAV(u1)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputeDestBlockOffsets_SRT) srt)
 {
@@ -40,6 +41,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputeDestBlockOffsets
     srt.inBlockSizePrefix           = ZstdInBlockSizePrefix;
     srt.inPerFrameBlockCountAll     = ZstdInPerFrameBlockCountAll;
     srt.inUnCompressedFramesRefs    = ZstdInUnCompressedFramesRefs;
+    srt.inoutFrameResumeState       = ZstdInOutFrameResumeState;
     srt.inDispatchArgs              = ZstdInDispatchArgs;
     srt.tgOffset                    = ZstdConstants_ComputeDestBlockOffsets.tgOffset;
     srt.workItemCount               = ZstdConstants_ComputeDestBlockOffsets.workItemCount;
@@ -64,6 +66,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_ComputeDestBlockOffsets_SRT &srt, const zst
     srt.inBlockSizePrefix           = cpuRes.BlockSizePrefix;
     srt.inPerFrameBlockCountAll     = cpuRes.PerFrameBlockCountAll;
     srt.inUnCompressedFramesRefs    = cpuRes.UnCompressedFramesRefs;
+    srt.inoutFrameResumeState       = cpuRes.FrameResumeState;
     srt.inDispatchArgs              = cpuRes.DispatchArgs;
     srt.tgOffset                    = tgOffset;
     srt.workItemCount               = workItemCount;
