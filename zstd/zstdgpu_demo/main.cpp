@@ -821,7 +821,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0, /* hasBlockWindowPerFrame, the CPU reference never uses a per-frame window */ 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -884,7 +884,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* blockStartPerFrame + blockLimitPerFrame, the CPU reference always decodes whole frames */ 0, 0, /* hasBlockWindowPerFrame, the CPU reference never uses a per-frame window */ 0);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -1866,12 +1866,6 @@ static int demoRun(void *demoCtx)
     const uint32_t workingLo    = minFrame;
     const uint32_t workingHi    = maxFrame;
     const uint32_t workingFrames = workingHi - workingLo + 1;
-    // The block window handed to the library is a scalar applied uniformly to every frame in the
-    // batch, so there is no way to slice one frame while decoding its neighbours whole. One frame
-    // per batch is therefore still required -- not because of cut legality (entropy-only prefix
-    // blocks made every ordinal legal), but because the window itself is not per-frame yet.
-    if (0 != blockSlice)
-        frameBatchCount = 1;
     const uint32_t effBatchFrames = (frameBatchCount == 0 || frameBatchCount > workingFrames)
                                   ? workingFrames : frameBatchCount;
     const uint32_t numBatches   = (workingFrames + effBatchFrames - 1) / effBatchFrames;
@@ -1931,6 +1925,15 @@ static int demoRun(void *demoCtx)
     zstdgpu_OffsetAndSize *batchInRefs    = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
     zstdgpu_OffsetAndSize *batchOutRefs   = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
     zstdgpu_FrameInfo     *batchFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * frameCapacity);
+
+    /*
+     *  Per-frame slice bookkeeping. Frames in one batch reach the end of their own block list at
+     *  different slice indices, so each carries its own cursor and each gets its own window --
+     *  which is exactly what `zstdgpu_SetupBlockWindowPerFrame` exists to express.
+     */
+    uint32_t *frameSliceStart = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
+    uint32_t *frameBlockCount = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * maxBatchFrames) : NULL;
+    uint32_t *blockWindowCpu  = (0 != blockSlice) ? (uint32_t *)malloc(sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * maxBatchFrames) : NULL;
 
     debugPrint(L"[INFO] Working set: frames [%u..%u] (%u frames), %u batch(es) of up to %u frames each.\n",
                workingLo, workingHi, workingFrames, numBatches, effBatchFrames);
@@ -2097,9 +2100,11 @@ static int demoRun(void *demoCtx)
      *  carried state inspectable when debugging a slice sequence.
      */
     d3d12aid_MappedBuffer zstdFrameResumeState = {};
+    d3d12aid_MappedBuffer zstdBlockWindowPerFrame = {};
     if (0 != blockSlice)
     {
         d3d12aid_MappedBuffer_Create(&zstdFrameResumeState, device, 1, sizeof(uint32_t) * kzstdgpu_FrameResumeDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_READBACK);
+        d3d12aid_MappedBuffer_Create(&zstdBlockWindowPerFrame, device, 1, sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_UPLOAD);
     }
 
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
@@ -2150,18 +2155,23 @@ static int demoRun(void *demoCtx)
             }
 
             /*
-             *  --blk-slice decodes the batch's single frame as a sequence of slices sharing one
-             *  destination buffer and one resume buffer, which is the only configuration that
-             *  exercises carried repeat offsets and the carried output cursor.
+             *  --blk-slice decodes the batch as a sequence of slices sharing one destination buffer
+             *  and one resume buffer, which is the only configuration that exercises carried repeat
+             *  offsets and the carried output cursor.
              *
              *  Slice boundaries are plain arithmetic: `0, K, 2K, ...`. Every block ordinal is a
              *  legal cut because compressed blocks before the window are carried through the parse
              *  as "entropy only" -- parsed for the Huffman and FSE tables that in-window blocks
-             *  reuse via Treeless/Repeat_Mode, emitting no literals, sequences or output bytes. The
-             *  frame's block count, needed only to know when to stop, comes from the library's own
-             *  pre-scan below rather than from a second zstd parser on the host.
+             *  reuse via Treeless/Repeat_Mode, emitting no literals, sequences or output bytes.
+             *
+             *  The window is supplied PER FRAME, so a batch may hold many frames at once even
+             *  though they run out of blocks at different slice indices: a finished frame is given
+             *  the skip sentinel rather than being dropped from the batch (a batch is a contiguous
+             *  frame range, so it cannot be dropped). Per-frame block counts come from the
+             *  library's own pre-scan below, not from a second zstd parser on the host.
              */
-            uint32_t sliceBlockCount = 0;
+            uint32_t sliceFramesLeft = 0;
+            bool     sliceLastForBatch = true;
 
             uint32_t sliceStart = 0;
             uint32_t sliceIdx = 0;
@@ -2169,8 +2179,10 @@ static int demoRun(void *demoCtx)
             {
             if (0 != blockSlice)
             {
-                blockStartPerFrame = sliceStart;
-                blockLimitPerFrame = blockSlice;
+                // The per-frame window supersedes the scalar one; leave the scalar at "whole frame"
+                // so the two cannot disagree.
+                blockStartPerFrame = 0;
+                blockLimitPerFrame = 0;
             }
 
             // ---- Per-batch setup ----------------------------------------------
@@ -2200,16 +2212,55 @@ static int demoRun(void *demoCtx)
             zstdgpu_CountFramesAndBlocks(&fbInfo, stagedPtr, batchSpanAl, batchSpan);
 
             /*
-             *  With slicing there is exactly one frame per batch, so this pre-scan's block counts
-             *  are that frame's -- which is all the slice loop needs in order to know when it has
-             *  run out of blocks. Exact, and parsed by the library rather than by the demo.
+             *  With slicing each frame gets its own window, so the batch totals here are combined
+             *  with each frame's block-type starts (which `zstdgpu_CollectFrames` fills as running
+             *  prefix sums) to recover a per-frame block count. Exact, and parsed by the library
+             *  rather than by a second zstd parser on the host.
              */
-            sliceBlockCount = fbInfo.rawBlockCount + fbInfo.rleBlockCount + fbInfo.cmpBlockCount;
             zstdgpu_CollectFrames(batchInRefs, batchFrameInfo, fbInfo.frameCount, stagedPtr, batchSpanAl, batchSpan);
             // Apply the same tolerant enumeration used for the whole-input scan so a
             // batch that contains the corrupt / undecodable frame dispatches the same
             // frames (and terminal bad frame) to the GPU parser.
             zstdgpu_Demo_MakeFramesTolerant(&fbInfo, batchInRefs, batchFrameInfo, stagedPtr, batchSpan);
+
+            if (0 != blockSlice)
+            {
+                const uint32_t batchBlockCount = fbInfo.rawBlockCount + fbInfo.rleBlockCount + fbInfo.cmpBlockCount;
+
+                sliceFramesLeft = 0;
+                sliceLastForBatch = true;
+                for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
+                {
+                    const uint32_t thisStart = batchFrameInfo[j].rawBlockStart + batchFrameInfo[j].rleBlockStart + batchFrameInfo[j].cmpBlockStart;
+                    const uint32_t nextStart = (j + 1 < fbInfo.frameCount)
+                                                   ? (batchFrameInfo[j + 1].rawBlockStart + batchFrameInfo[j + 1].rleBlockStart + batchFrameInfo[j + 1].cmpBlockStart)
+                                                   : batchBlockCount;
+                    frameBlockCount[j] = nextStart - thisStart;
+
+                    if (0 == sliceIdx)
+                        frameSliceStart[j] = 0;
+
+                    // A frame that has run out of blocks stays in the batch (a batch is a
+                    // contiguous frame range) but must decode nothing, which an ordinary window
+                    // cannot say -- `(0, 0)` means the whole frame. Hence the explicit sentinel.
+                    if (frameSliceStart[j] >= frameBlockCount[j])
+                    {
+                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = kzstdgpu_BlockWindowSkipFrame;
+                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = 0;
+                    }
+                    else
+                    {
+                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 0] = frameSliceStart[j];
+                        blockWindowCpu[j * kzstdgpu_BlockWindowDwordCount + 1] = blockSlice;
+                        ++sliceFramesLeft;
+                        if (frameSliceStart[j] + blockSlice < frameBlockCount[j])
+                            sliceLastForBatch = false;
+                    }
+                }
+
+                d3d12aid_MappedBuffer_Append(&zstdBlockWindowPerFrame, 0, (void *)blockWindowCpu,
+                                             sizeof(uint32_t) * kzstdgpu_BlockWindowDwordCount * fbInfo.frameCount);
+            }
 
             {
                 uint32_t offs = 0;
@@ -2240,6 +2291,7 @@ static int demoRun(void *demoCtx)
             zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
             if (0 != blockSlice)
             {
+                zstdgpu_SetupBlockWindowPerFrame(perRequestContext, zstdBlockWindowPerFrame.bufGpu);
                 zstdgpu_SetupResumeState(perRequestContext, zstdFrameResumeState.bufGpu, (0 == sliceIdx) ? 1u : 0u);
             }
             if (blkCnt)
@@ -2296,7 +2348,7 @@ static int demoRun(void *demoCtx)
                 // they are re-homed each time: transition the destination back to
                 // COPY_DEST first (the previous dispatch's EndTransfer left it in the
                 // shader-read state), copy, then transition to the shader-read state.
-                D3D12_RESOURCE_BARRIER barriers[3];
+                D3D12_RESOURCE_BARRIER barriers[4];
                 uint32_t bufferCount = 0;
 
                 if (testSourceInGpuMemory > 0 && dispatchIdx == 0)
@@ -2315,6 +2367,18 @@ static int demoRun(void *demoCtx)
                 }
                 d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesRefs, 0);
                 d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &zstdUnCompressedFramesRefs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                if (0 != blockSlice)
+                {
+                    if (dispatchIdx > 0)
+                    {
+                        D3D12_RESOURCE_BARRIER toCopyDest;
+                        d3d12aid_Resource_TransitionBarrier(&toCopyDest, zstdBlockWindowPerFrame.bufGpu, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                        cmdList->ResourceBarrier(1u, &toCopyDest);
+                    }
+                    d3d12aid_MappedBuffer_Transfer(cmdList, &zstdBlockWindowPerFrame, 0);
+                    d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &zstdBlockWindowPerFrame, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
 
                 cmdList->ResourceBarrier(bufferCount, barriers);
             }
@@ -2594,7 +2658,7 @@ static int demoRun(void *demoCtx)
                  *  slice's contents -- a correct prefix with a stale tail, which is
                  *  indistinguishable from a decode that lost its last slice.
                  */
-                if (sweep == 0 && outFrm && (0 == blockSlice || sliceStart + blockLimitPerFrame >= sliceBlockCount))
+                if (sweep == 0 && outFrm && (0 == blockSlice || sliceLastForBatch))
                 {
                     const int bufferSize = ZSTDGPU_WARN_DISABLE_MSVC(4996, _snwprintf(NULL, 0, L"%s.frame_%u", zstFilePath, workingHi) + 1);
                     wchar_t *buffer = (wchar_t *)malloc(bufferSize * sizeof(wchar_t));
@@ -2829,7 +2893,24 @@ static int demoRun(void *demoCtx)
                 break;
             if (!windowOpen)
                 break;
-            if (sliceStart >= sliceBlockCount)
+
+            // Advance every unfinished frame by one slice. The batch is done when no frame has
+            // blocks left -- frames finish at different slice indices, which is precisely what the
+            // per-frame window (and its skip sentinel) exists to accommodate.
+            {
+                uint32_t framesLeft = 0;
+                for (uint32_t j = 0; j < fbInfo.frameCount; ++j)
+                {
+                    if (frameSliceStart[j] < frameBlockCount[j])
+                    {
+                        frameSliceStart[j] += blockSlice;
+                        if (frameSliceStart[j] < frameBlockCount[j])
+                            ++framesLeft;
+                    }
+                }
+                sliceFramesLeft = framesLeft;
+            }
+            if (0 == sliceFramesLeft)
                 break;
             }
 
@@ -2923,6 +3004,9 @@ static int demoRun(void *demoCtx)
     free(batchInRefs);
     free(batchOutRefs);
     free(batchFrameInfo);
+    free(frameSliceStart);
+    free(frameBlockCount);
+    free(blockWindowCpu);
 
     debugPrint(L"Finished.\n");
     return 0;

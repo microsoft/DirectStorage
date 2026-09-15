@@ -46,6 +46,7 @@
 ZSTDGPU_SRT_BIND_GROUP_BEGIN(ParseFrames, Stage0|Stage1)
     ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , CompressedData                )
     ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_OffsetAndSize         , FramesRefs                    )
+    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , BlockWindowPerFrame           )
 
     ZSTDGPU_SRT_BUF_RW_STRUCT(zstdgpu_Counters              , Counters                      )
     ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , PerFrameBlockCountRAW         )
@@ -152,6 +153,7 @@ ZSTDGPU_SRT_BEGIN(ParseFrames, Direct)
     ZSTDGPU_SRT_CONST(uint32_t                              , countBlocksOnly               )
     ZSTDGPU_SRT_CONST(uint32_t                              , blockStartPerFrame            )
     ZSTDGPU_SRT_CONST(uint32_t                              , blockLimitPerFrame            )
+    ZSTDGPU_SRT_CONST(uint32_t                              , hasBlockWindowPerFrame        )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(Memset, Indirect)

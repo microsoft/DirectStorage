@@ -524,11 +524,17 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
          *
          *  Blocks AFTER the window need no such treatment -- table definitions only ever flow
          *  forwards, so nothing past the window can be required inside it.
+         *
+         *  `kzstdgpu_BlockWindowSkipFrame` as the start ordinal means "decode nothing from this
+         *  frame", which suppresses the entropy-only carry too. It cannot be spelled as an ordinary
+         *  window: `(0, 0)` is the whole frame, and a start past the last block would still pay to
+         *  parse every compressed block in the frame for tables no in-window block ever uses.
          */
+        const uint32_t skipFrame      = (kzstdgpu_BlockWindowSkipFrame == blockStart) ? 1u : 0u;
         const uint32_t atOrAfterStart = (blockOrdinal >= blockStart) ? 1u : 0u;
         const uint32_t beforeEnd      = ((0u == blockLimit) || (blockOrdinal < blockStart + blockLimit)) ? 1u : 0u;
-        const uint32_t inWindow       = (0 != atOrAfterStart && 0 != beforeEnd) ? 1u : 0u;
-        const uint32_t entropyOnly    = (isCmp && 0 == atOrAfterStart) ? 1u : 0u;
+        const uint32_t inWindow       = (0 == skipFrame && 0 != atOrAfterStart && 0 != beforeEnd) ? 1u : 0u;
+        const uint32_t entropyOnly    = (0 == skipFrame && isCmp && 0 == atOrAfterStart) ? 1u : 0u;
         const uint32_t emitBlock      = (0 != inWindow || 0 != entropyOnly) ? 1u : 0u;
         ++blockOrdinal;
 
@@ -617,6 +623,24 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
         {
             zstdgpu_FrameInfo frameInfo;
 
+            /*
+             *  The window is per frame when the caller supplied an array, and the batch-uniform
+             *  scalar otherwise. Resolving it here -- rather than passing both down -- keeps
+             *  `zstdgpu_ShaderEntry_ParseFrame` unaware of where the window came from.
+             *
+             *  `kzstdgpu_BlockWindowSkipFrame` is passed through untouched: `ParseFrame` recognises
+             *  it in the start ordinal. It cannot be re-expressed as an ordinary window, because
+             *  `(0, 0)` is the whole frame and a start past the last block would still carry every
+             *  preceding compressed block as entropy-only.
+             */
+            uint32_t frameBlockStart = srt.blockStartPerFrame;
+            uint32_t frameBlockLimit = srt.blockLimitPerFrame;
+            if (srt.hasBlockWindowPerFrame > 0)
+            {
+                frameBlockStart = srt.inBlockWindowPerFrame[zstdgpu_BlockWindowStart(threadId)];
+                frameBlockLimit = srt.inBlockWindowPerFrame[zstdgpu_BlockWindowLimit(threadId)];
+            }
+
             if (srt.countBlocksOnly > 0)
             {
                 frameInfo.rawBlockStart = 0;
@@ -645,8 +669,8 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 srt.inoutRleBlockSizePrefix,
                 bits,
                 srt.countBlocksOnly > 0 ? 0u : 1u,
-                srt.blockStartPerFrame,
-                srt.blockLimitPerFrame
+                frameBlockStart,
+                frameBlockLimit
             );
 
             if (srt.countBlocksOnly > 0)

@@ -835,6 +835,7 @@ struct zstdgpu_PerRequestContextImpl
     ID3D12Resource         *frameStatus;
     ID3D12Resource         *frameResumeState;
     uint32_t                frameResumeStateNeedsClear;
+    ID3D12Resource         *blockWindowPerFrame;
 
     d3d12aid_Timestamps     timestamps;
 
@@ -1212,6 +1213,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->zstdCompressedFramesByteCount      = 0;
     context->zstdBlockStartPerFrame            = 0;
     context->zstdBlockLimitPerFrame            = 0;
+        context->blockWindowPerFrame                = NULL;
 
         context->zstdUncompressedFrameCount         = 0;
         context->zstdUncompressedFramesByteCount    = 0;
@@ -1252,6 +1254,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPerRequestContext(void **outMemoryBlock, uin
         D3D12AID_SAFE_RELEASE(inPerRequestContext->uncompressedFramesRefs);
         D3D12AID_SAFE_RELEASE(inPerRequestContext->frameStatus);
         D3D12AID_SAFE_RELEASE(inPerRequestContext->frameResumeState);
+        D3D12AID_SAFE_RELEASE(inPerRequestContext->blockWindowPerFrame);
 
         D3D12AID_SAFE_RELEASE(inPerRequestContext->srts.heap);
 
@@ -1437,6 +1440,27 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext r
     {
         req->zstdBlockStartPerFrame = blockStartPerFrame;
         req->zstdBlockLimitPerFrame = blockLimitPerFrame;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockWindowPerFrame(zstdgpu_PerRequestContext req, struct ID3D12Resource *blockWindowPerFrame)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != req);
+    proceed = proceed && (req->thisMemoryBlock == (void *)req);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        D3D12AID_SAFE_RELEASE(req->blockWindowPerFrame);
+
+        req->blockWindowPerFrame = blockWindowPerFrame;
+        if (NULL != req->blockWindowPerFrame)
+        {
+            req->blockWindowPerFrame->AddRef();
+        }
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
@@ -1925,6 +1949,13 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
             zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, req->frameStatus);
         }
 
+        // The per-frame block window lives in stage 0's allocation, so it has to be re-substituted
+        // after that stage's Init re-creates it from the heap.
+        if (stageIndex == 0u)
+        {
+            zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(&req->resData, req->blockWindowPerFrame);
+        }
+
         if (stageIndex == 2u)
         {
             zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
@@ -2050,6 +2081,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerReques
         {
             zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
         }
+        zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(&req->resData, req->blockWindowPerFrame);
         zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
             zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
 
@@ -2175,6 +2207,13 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
         if (stageIndex == 0u)
         {
             zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, req->frameStatus);
+        }
+
+        // The per-frame block window lives in stage 0's allocation, so it has to be re-substituted
+        // after that stage's Init re-creates it from the heap.
+        if (stageIndex == 0u)
+        {
+            zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(&req->resData, req->blockWindowPerFrame);
         }
 
         if (stageIndex == 2u)
@@ -2449,6 +2488,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         {
             zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
         }
+        zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(&req->resData, req->blockWindowPerFrame);
 
         zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
             zstdgpu_ResourceDataGpu_ReInitResumeExternal(&req->resData, req->frameResumeState);
@@ -2719,7 +2759,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         const uint32_t countBlocksOnly = 1;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Count Blocks]");
 
-        zstdgpu_Bind_ParseFrames_Stage0(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->zstdBlockStartPerFrame, req->zstdBlockLimitPerFrame);
+        zstdgpu_Bind_ParseFrames_Stage0(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->zstdBlockStartPerFrame, req->zstdBlockLimitPerFrame, (NULL != req->blockWindowPerFrame) ? 1u : 0u);
         ZSTDGPU_KERNEL_SCOPE(ParseFrames_CountBlocks, cmdList,
             cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_ParseCompressedBlocks), 1, 1);
         );
@@ -2964,7 +3004,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         const uint32_t countBlocksOnly = 0;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Collect Blocks]");
 
-        zstdgpu_Bind_ParseFrames_Stage1(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->zstdBlockStartPerFrame, req->zstdBlockLimitPerFrame);
+        zstdgpu_Bind_ParseFrames_Stage1(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->zstdBlockStartPerFrame, req->zstdBlockLimitPerFrame, (NULL != req->blockWindowPerFrame) ? 1u : 0u);
         ZSTDGPU_KERNEL_SCOPE(ParseFrames, cmdList,
             cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_ParseCompressedBlocks), 1, 1);
         );

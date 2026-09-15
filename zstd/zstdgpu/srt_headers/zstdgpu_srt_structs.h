@@ -19,6 +19,7 @@ typedef struct zstdgpu_ParseFrames_SRT
 {
     ZSTDGPU_RO_BUFFER(uint32_t)                             inCompressedData;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inFramesRefs;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockWindowPerFrame;
     ZSTDGPU_RW_BUFFER(zstdgpu_Counters)                     inoutCounters;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerFrameBlockCountRAW;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerFrameBlockCountRLE;
@@ -39,6 +40,7 @@ typedef struct zstdgpu_ParseFrames_SRT
     uint32_t                                                countBlocksOnly;
     uint32_t                                                blockStartPerFrame;
     uint32_t                                                blockLimitPerFrame;
+    uint32_t                                                hasBlockWindowPerFrame;
 } zstdgpu_ParseFrames_SRT;
 
 typedef struct zstdgpu_Memset_SRT

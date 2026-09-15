@@ -26,11 +26,12 @@ typedef struct zstdgpu_ParseFrames_Consts
     uint32_t    countBlocksOnly;
     uint32_t    blockStartPerFrame;
     uint32_t    blockLimitPerFrame;
+    uint32_t    hasBlockWindowPerFrame;
 } zstdgpu_ParseFrames_Consts;
 
 ConstantBuffer<zstdgpu_ParseFrames_Consts> ZstdConstants_ParseFrames : register(b0);
 
-#define ZSTDGPU_SRT_RS_ParseFrames ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames ", RootConstants(b0, num32BitConstants=5)"
+#define ZSTDGPU_SRT_RS_ParseFrames ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames ", RootConstants(b0, num32BitConstants=6)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt)
 {
@@ -41,6 +42,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt)
     srt.countBlocksOnly             = ZstdConstants_ParseFrames.countBlocksOnly;
     srt.blockStartPerFrame          = ZstdConstants_ParseFrames.blockStartPerFrame;
     srt.blockLimitPerFrame          = ZstdConstants_ParseFrames.blockLimitPerFrame;
+    srt.hasBlockWindowPerFrame      = ZstdConstants_ParseFrames.hasBlockWindowPerFrame;
 }
 
 #else
@@ -50,7 +52,8 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseFrames_SRT &srt, const zstdgpu_Resourc
                              uint32_t     compressedBufferSizeInBytes,
                              uint32_t     countBlocksOnly,
                              uint32_t     blockStartPerFrame,
-                             uint32_t     blockLimitPerFrame)
+                             uint32_t     blockLimitPerFrame,
+                             uint32_t     hasBlockWindowPerFrame)
 {
     zstdgpu_Srt_FillBindGroup_ParseFrames(srt, cpuRes);
     srt.frameCount                  = frameCount;
@@ -58,6 +61,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseFrames_SRT &srt, const zstdgpu_Resourc
     srt.countBlocksOnly             = countBlocksOnly;
     srt.blockStartPerFrame          = blockStartPerFrame;
     srt.blockLimitPerFrame          = blockLimitPerFrame;
+    srt.hasBlockWindowPerFrame      = hasBlockWindowPerFrame;
 }
 
 #endif

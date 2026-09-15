@@ -1863,6 +1863,35 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
 #define zstdgpu_FrameResumeOffset3(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 2u)
 #define zstdgpu_FrameResumeOutputCursor(frameIdx)   ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 3u)
 
+/**
+ *  Per-frame block window, the per-frame form of `zstdgpu_SetupBlockLimitPerFrame`'s scalars.
+ *
+ *  The scalar window is applied identically to every frame in the batch, so a batch cannot slice one
+ *  frame while decoding its neighbours whole. That makes whole-frame packing alongside a slice piece
+ *  inexpressible, which is why slicing otherwise forces one frame per batch. This buffer lifts that:
+ *  each frame states its own window.
+ *
+ *  Laid out as two consecutive dwords per frame in a plain `uint32_t` buffer rather than a struct,
+ *  for the same reason the resume state is: a caller can supply it as an ordinary structured buffer.
+ *
+ *  Semantics per frame match the scalar API exactly:
+ *      - `blockStart` is the first block ordinal decoded,
+ *      - `blockLimit` is the number of block ordinals decoded, and **0 means "to the end of the
+ *        frame"** -- so `(0, 0)` is the whole frame and is what a frame that is not being sliced
+ *        should carry.
+ *
+ *  `kzstdgpu_BlockWindowSkipFrame` in the `blockStart` slot means "decode nothing from this frame".
+ *  It exists because a batch is a contiguous frame range while frames finish at different slice
+ *  counts, so a frame that has already been fully decoded still sits inside the range. It is NOT the
+ *  same as a start past the last block: that would still pay to parse every preceding compressed
+ *  block as entropy-only, whereas a skipped frame emits nothing and builds no tables.
+ */
+#define kzstdgpu_BlockWindowDwordCount      2u
+#define kzstdgpu_BlockWindowSkipFrame       0xffffffffu
+
+#define zstdgpu_BlockWindowStart(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 0u)
+#define zstdgpu_BlockWindowLimit(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 1u)
+
 typedef struct zstdgpu_LitStreamInfo
 {
     zstdgpu_OffsetAndSize src;       //< offset and size of the compressed literal stream in the source compressed data

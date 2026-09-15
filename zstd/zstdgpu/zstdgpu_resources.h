@@ -51,6 +51,7 @@
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )   \
     ZSTDGPU_BUFFER(uint64_t                                 , Predicate                     )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , BlockWindowPerFrame           )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRAWLookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLELookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMPLookback )   \
@@ -301,6 +302,12 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
     const uint32_t Predicate_Count = 2;
+
+    /*
+     *  Sized for the whole batch even though it is read only when the caller supplies a per-frame
+     *  window array, because the descriptor has to be valid either way. 8 bytes per frame.
+     */
+    const uint32_t BlockWindowPerFrame_Count = frameCount * kzstdgpu_BlockWindowDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
@@ -671,6 +678,24 @@ static void zstdgpu_ResourceDataGpu_ReInitResumeExternal(zstdgpu_ResourceDataGpu
 
         outResData->gpuOnly.FrameResumeState = frameResumeState;
         outResData->gpuOnly.FrameResumeState->AddRef();
+    }
+}
+
+/**
+ *  Replaces the internally allocated per-frame block window buffer with a caller-supplied one.
+ *
+ *  Optional in the same way the resume buffer is: passing NULL leaves the internal allocation in
+ *  place. The internal one is never read -- `hasBlockWindowPerFrame` stays 0, so the shader takes
+ *  the scalar window instead -- it exists only so the descriptor is always valid.
+ */
+static void zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(zstdgpu_ResourceDataGpu *outResData, ID3D12Resource *blockWindowPerFrame)
+{
+    if (NULL != blockWindowPerFrame && blockWindowPerFrame != outResData->gpuOnly.BlockWindowPerFrame)
+    {
+        D3D12AID_SAFE_RELEASE(outResData->gpuOnly.BlockWindowPerFrame);
+
+        outResData->gpuOnly.BlockWindowPerFrame = blockWindowPerFrame;
+        outResData->gpuOnly.BlockWindowPerFrame->AddRef();
     }
 }
 

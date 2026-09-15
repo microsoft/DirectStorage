@@ -280,8 +280,8 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *  frame's own destination.
  *
  *  NB: this window is a single scalar applied uniformly to every frame in the batch. There is no
- *      way to slice one frame while decoding its neighbours whole, so slicing in practice means one
- *      frame per batch until a per-frame window exists.
+ *      way to slice one frame while decoding its neighbours whole -- use
+ *      `zstdgpu_SetupBlockWindowPerFrame` for that.
  *
  *  NB: validating a partial decode requires a reference that truncates at the same block boundary.
  *      Comparing against a whole-frame reference is not meaningful, so callers that validate must
@@ -290,6 +290,40 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame);
+
+/**
+ *  @brief      Supplies a PER-FRAME block window, replacing the batch-uniform scalars set by
+ *              `zstdgpu_SetupBlockLimitPerFrame`.
+ *
+ *  `blockWindowPerFrame` must be a buffer of `2 * frameCount` `uint32_t`s in
+ *  `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`, holding `(blockStart, blockLimit)` per frame in
+ *  frame order. Passing NULL (the default) restores the scalar window, so a caller that never slices
+ *  sees no behaviour change.
+ *
+ *  Per-frame semantics match the scalar API exactly: `blockLimit == 0` means "to the end of the
+ *  frame", so `(0, 0)` is the whole frame and is what a frame that is not being sliced carries.
+ *
+ *  `kzstdgpu_BlockWindowSkipFrame` as a frame's `blockStart` means "decode nothing from this frame".
+ *  It is needed because a batch is a contiguous frame range while frames finish at different slice
+ *  counts, so an already-completed frame still sits inside the range. It is NOT equivalent to a
+ *  start past the frame's last block: that still pays to parse every compressed block for entropy
+ *  tables no in-window block ever uses.
+ *
+ *  WHY THIS EXISTS. The scalar window is applied identically to every frame in a batch, so a batch
+ *  cannot slice one frame while decoding its neighbours whole. That forces one frame per batch
+ *  whenever anything is sliced, and makes packing whole frames alongside a slice piece impossible.
+ *
+ *  The window is consumed by the frame parse, which runs in both the counting and the collecting
+ *  dispatch, and both receive the same buffer -- so the emitted records and the counts that size
+ *  them cannot disagree.
+ *
+ *  NB: a host pre-scan that counts whole frames (`zstdgpu_CountFramesAndBlocks`) remains a valid
+ *      upper bound for sizing, because windowing a frame can only ever emit fewer blocks than the
+ *      frame contains.
+ *
+ *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockWindowPerFrame(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *blockWindowPerFrame);
 
 /**
  *  @brief      Converts a per-slice DECOMPRESSED byte budget into the number of block ordinals a
