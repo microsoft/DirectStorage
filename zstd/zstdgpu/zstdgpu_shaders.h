@@ -598,7 +598,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
     }
 }
 
-// "Info" here is short for baselines + extra bits.
+// "Info" here is short for EXTRA_BITS_AND_BASELINES:
 #define SEQ_LLEN_CODE_INFO_END 36
 #define SEQ_MLEN_CODE_INFO_END 53
 
@@ -626,9 +626,11 @@ static const uint32_t SEQ_MLEN_EXTRA_BITS_AND_BASELINES[SEQ_MLEN_CODE_INFO_END] 
 
 struct zstdgpu_SeqCodeInfoContext
 {
+#if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
     // .x = low 32 array elements, .y = high 32 array elements
     uint32_t2 llenVgpr;
     uint32_t2 mlenVgpr;
+#endif
 };
 
 #if SEQ_CODE_INFO_USE_LDS && SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
@@ -692,11 +694,11 @@ static zstdgpu_SeqCodeInfoContext zstdgpu_InitSeqCodeInfoContext(uint32_t thread
 #if SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS
 static uint32_t zstdgpu_ConcatenatedWaveReadLaneAt(uint32_t2 v2, uint32_t flatIdx)
 {
-    // Since flatIdx should be uniform across the wave, we can do select before WaveReadLaneAt.
-    // Even if we change that order, DecompressSequences_MultiStream_LdsOutCache cannot work
-    // with this VGPR method, since not all lanes are active in every loop iteration.
-    uint32_t v = flatIdx < 32 ? v2.x : v2.y;    // NOTE: this "v_cndmask_b32" needs all lanes active.
-    return WaveReadLaneAt(v, flatIdx & 31);     // Also undefined in HLSL to read from an inactive lane.
+    // Since flatIdx should be uniform across the wave, we can do a select before WaveReadLaneAt.
+    // Even if that order was changed, DecompressSequences_MultiStream_LdsOutCache cannot work
+    // with this VGPR method, since all lanes may not be are active in every loop iteration.
+    uint32_t v = flatIdx < 32 ? v2.x : v2.y;    // This "v_cndmask_b32" needs all lanes active.
+    return WaveReadLaneAt(v, flatIdx & 31);     // Undefined in HLSL to read from an inactive lane.
 }
 #endif
 
@@ -3365,8 +3367,8 @@ static void zstdgpu_ReadSeqBitsAndDecompress(ZSTDGPU_PARAM_INOUT(zstdgpu_Backwar
 
 #if SEQ_CODE_INFO_USE_LDS
 
-    // Depending on the compiler, using WaveReadLaneFirst(info) or WaveReadLaneAt(info, 0)
-    // may not be recommended or needed/helpful.
+    // SingleStream: Depending on the compiler,
+    // using WaveReadLaneFirst(info) or WaveReadLaneAt(info, 0) may not be recommended/needed/helpful.
     llenInfo = LdsSeqCodeInfoLLen[symbolLLen];
     mlenInfo = LdsSeqCodeInfoMLen[symbolMLen];
 
@@ -3608,7 +3610,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
 
-    // An implementation of this may require all threads in the group to active (before any return):
+    // An implementation of this may require all threads in the group active (before any return):
     const zstdgpu_SeqCodeInfoContext seqCodeInfoCtx = zstdgpu_InitSeqCodeInfoContext(threadId, tgSize);
     // NOTE: This is group-uniform, so it is okay for SEQ_CODE_INFO_USE_READLANE_UNIFORM_INDEX_WAVE32_PLUS:
     if (seqStreamIdx >= seqStreamCnt)

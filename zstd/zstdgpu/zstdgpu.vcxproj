@@ -274,7 +274,7 @@
   <Target Name="CollectShaders">
     <ItemGroup>
       <Shader Include="$(MSBuildThisFileDirectory)Shaders\*.hlsl">
-        <ShaderModel>cs_6_6</ShaderModel>
+        <ShaderModel>cs_6_0</ShaderModel>
         <Opts>
         </Opts>
       </Shader>

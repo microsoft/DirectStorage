@@ -935,23 +935,23 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         D3D12AID_CHECK(adapter->GetDesc(&desc));
         D3D12AID_SAFE_RELEASE(adapter);
 
-        if (desc.VendorId == 0x1002)
+        if (desc.VendorId == 0x1002) // AMD
         {
-            // AMD
-            ZSTDGPU_KERNEL_MAP(DecompressLiterals, DecompressLiterals_LdsStoreCache64_16);
+            ZSTDGPU_KERNEL_MAP(DecompressLiterals, DecompressLiterals_LdsStoreCache32_16);
             context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = 16;
-#if 0
+
+            // After a2eacc9a269108ae33a06bc5a2a1c0ca3840b791 (prefetch next data from FSE tables, overlaps stores),
+            // should also consider DecompressSequences_MultiStream_8 or similar:
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
-#else
-            ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_8);
-            context->DecompressSequences_StreamsPerGroup = 8;
-#endif
+
+            // On RDNA3, ExecuteSequences performance is better with either [WaveSize(64)] forced,
+            // or an alternative method for overlapping match copies that does not use WaveReadLaneAt
+            // with a _nonuniform_ lane index, which in certain contexts makes the RDNA3 compiler choose wave32.
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
         }
-        else if (desc.VendorId == 0x10de)
+        else if (desc.VendorId == 0x10de) // Nvidia
         {
-            // Nvidia
             ZSTDGPU_KERNEL_MAP(DecompressLiterals, DecompressLiterals_LdsStoreCache32_16);
             context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = 16;
 
