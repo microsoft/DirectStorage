@@ -274,6 +274,12 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext in
  *  an individual frame while this window is uniform across the batch, so slicing real content in
  *  general means one frame per batch.
  *
+ *  NB: this restriction is an artifact of resolving table reuse by dispatch-local lookback, and is
+ *      intended to be removed rather than formalised. Resolving `Repeat_Mode` and `Treeless` to the
+ *      owning block's descriptor offset instead -- so an in-slice block rebuilds its tables from
+ *      compressed bytes that are resident anyway -- makes every block ordinal a legal cut and
+ *      retires the host scan entirely. Do not build a caller-visible legality API on top of this.
+ *
  *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
  *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
  *  than of the whole frame. Memory requirements are unaffected and remain sized for the whole frame,
