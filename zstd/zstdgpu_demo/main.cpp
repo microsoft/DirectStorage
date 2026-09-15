@@ -1880,8 +1880,8 @@ static int demoRun(void *demoCtx)
         zstdgpu_ReferenceStore_AllocateMemory();
 
         // NOTE(pamartis): this call to reference ZSTD decompressor populates zstdgpu_ReferenceStore with ground-truth data.
-        int r = ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
-        debugPrint(L"[INFO] ZSTD_decompress  input size: %d  output size: %d   result: %d\n", zstdDataSize, zstdReferenceUncompressedDataSize, r); 
+        size_t r = ZSTD_decompress(zstdReferenceUncompressedData, zstdReferenceUncompressedDataSize, zstdData, zstdDataSize);
+        debugPrint(L"[INFO] ZSTD_decompress  input size: %d  output size: %d   result: %lld\n", zstdDataSize, zstdReferenceUncompressedDataSize, r);
     }
 
     if (chkCpu && !skipRefValidation)
