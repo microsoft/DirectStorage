@@ -1380,6 +1380,8 @@ static const wchar_t *zstdgpu_Demo_FrameStatusName(uint32_t status)
     case kzstdgpu_FrameStatus_WindowTooLarge:        return L"WindowTooLarge";
     case kzstdgpu_FrameStatus_MissingContentSize:    return L"MissingContentSize";
     case kzstdgpu_FrameStatus_RequestTooLarge:       return L"RequestTooLarge";
+    case kzstdgpu_FrameStatus_BlockCountExceeded:    return L"BlockCountExceeded";
+    case kzstdgpu_FrameStatus_ScratchExceeded:       return L"ScratchExceeded";
     default:                                         return L"Unknown";
     }
 }
@@ -1420,6 +1422,7 @@ static int demoRun(void *demoCtx)
 
     bool extMem = false;
     bool blkCnt = false;
+    bool forceEstBlk = false;
     bool seqCnt = false;
     bool chkGpu = false;
     bool chkCpu = false;
@@ -1621,6 +1624,10 @@ static int demoRun(void *demoCtx)
                     seqCnt = true;
                     blkCnt = true; // --seq-cnt implies --blk-cnt
                 }
+                else if (0 == wcscmp(argv[argi], L"--force-est-blk"))
+                {
+                    forceEstBlk = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--prf-lvl"))
                 {
                     nextPrfLevel = true;
@@ -1691,6 +1698,25 @@ static int demoRun(void *demoCtx)
                 }
             }
             /*
+             *  --force-est-blk deliberately reproduces the UNSOUND sizing hazard so the reporting
+             *  path can be exercised. It suppresses the exact host pre-scan and opts in to estimated
+             *  block counts, which can fall far short on real content. The decode is then
+             *  expected to be WRONG -- the point is that it must now say so through the frame status
+             *  buffer rather than exiting 0 with corrupt output.
+             */
+            if (forceEstBlk)
+            {
+                if (!ssm)
+                {
+                    debugPrint(L"[ERROR] '--force-est-blk' requires '--ssm': estimated block counts are only reachable "
+                               L"on the single-submission path, since every other path reads the true counts back.\n");
+                    ctx->retv = 1;
+                    return 0;
+                }
+                blkCnt = false;
+                seqCnt = false;
+            }
+            /*
              *  Refuse the combinations whose reference decodes the whole frame. Without this the run
              *  dies deep inside literal decoding on an opaque assert, and a validation flag that
              *  reports a meaningless comparison is worse than one that refuses to run.
@@ -1745,6 +1771,9 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--run-cnt <count>         [Optional] The number of times to repeat the experiment.\n");
                 debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them.\n");
                 debugPrint(L"\t--blk-cnt                 [Optional] Uses SetupFrameInfoConstants path (user-specified block counts from CPU pre-scan).\n");
+    debugPrint(L"\t--force-est-blk           [Optional, diagnostic] Forces '--ssm' to use ESTIMATED block counts instead of the exact\n");
+    debugPrint(L"\t                                     pre-scan. The estimate is unsound, so the decode is expected to be WRONG; the\n");
+    debugPrint(L"\t                                     point is that the frame status buffer must report it. Never use for real work.\n");
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
@@ -2099,6 +2128,10 @@ static int demoRun(void *demoCtx)
             zstdgpu_SetupAllStageSubmission(perRequestContext);
         }
         zstdgpu_SetupBlockLimitPerFrame(perRequestContext, blockStartPerFrame, blockLimitPerFrame);
+        if (forceEstBlk)
+        {
+            zstdgpu_SetupAllowEstimatedBlockCounts(perRequestContext);
+        }
         if (blkCnt)
         {
             // See the batched path below: the library rejects an all-zero block
@@ -2434,6 +2467,10 @@ static int demoRun(void *demoCtx)
             {
                 zstdgpu_SetupBlockWindowPerFrame(perRequestContext, zstdBlockWindowPerFrame.bufGpu);
                 zstdgpu_SetupResumeState(perRequestContext, zstdFrameResumeState.bufGpu, (0 == sliceIdx) ? 1u : 0u);
+            }
+            if (forceEstBlk)
+            {
+                zstdgpu_SetupAllowEstimatedBlockCounts(perRequestContext);
             }
             if (blkCnt)
             {

@@ -21,6 +21,7 @@ ZSTDGPU_RW_BUFFER(zstdgpu_Counters) ZstdInOutCounters       : register(u0);
 ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutDispatchArgs   : register(u1);
 ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutDispatchCnts   : register(u2);
 ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutPredicate      : register(u3);
+ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutFrameStatus    : register(u4);
 
 typedef struct zstdgpu_UpdateDispatchArgs_Consts
 {
@@ -33,11 +34,13 @@ typedef struct zstdgpu_UpdateDispatchArgs_Consts
     uint32_t    seqElemCountMax;
     uint32_t    executeIndirectWorkaround;
     uint32_t    arenaByteCount;
+    uint32_t    frameCount;
+    uint32_t    reportsScratchOverflow;
 } zstdgpu_UpdateDispatchArgs_Consts;
 
 ConstantBuffer<zstdgpu_UpdateDispatchArgs_Consts> ZstdConstants_UpdateDispatchArgs : register(b0);
 
-#define ZSTDGPU_SRT_RS_UpdateDispatchArgs "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", RootConstants(b0, num32BitConstants=9)"
+#define ZSTDGPU_SRT_RS_UpdateDispatchArgs "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", UAV(u4)" ", RootConstants(b0, num32BitConstants=11)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_UpdateDispatchArgs_SRT) srt)
 {
@@ -45,6 +48,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_UpdateDispatchArgs_SRT)
     srt.inoutDispatchArgs                   = ZstdInOutDispatchArgs;
     srt.inoutDispatchCnts                   = ZstdInOutDispatchCnts;
     srt.inoutPredicate                      = ZstdInOutPredicate;
+    srt.inoutFrameStatus                    = ZstdInOutFrameStatus;
     srt.decompressSequences_StreamsPerTG    = ZstdConstants_UpdateDispatchArgs.decompressSequences_StreamsPerTG;
     srt.stage                               = ZstdConstants_UpdateDispatchArgs.stage;
     srt.cmpBlockCountMax                    = ZstdConstants_UpdateDispatchArgs.cmpBlockCountMax;
@@ -54,6 +58,8 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_UpdateDispatchArgs_SRT)
     srt.seqElemCountMax                     = ZstdConstants_UpdateDispatchArgs.seqElemCountMax;
     srt.executeIndirectWorkaround           = ZstdConstants_UpdateDispatchArgs.executeIndirectWorkaround;
     srt.arenaByteCount                      = ZstdConstants_UpdateDispatchArgs.arenaByteCount;
+    srt.frameCount                          = ZstdConstants_UpdateDispatchArgs.frameCount;
+    srt.reportsScratchOverflow              = ZstdConstants_UpdateDispatchArgs.reportsScratchOverflow;
 }
 
 #else
@@ -67,12 +73,15 @@ static void zstdgpu_Srt_Fill(zstdgpu_UpdateDispatchArgs_SRT &srt, const zstdgpu_
                              uint32_t     litByteCountMax,
                              uint32_t     seqElemCountMax,
                              uint32_t     executeIndirectWorkaround,
-                             uint32_t     arenaByteCount)
+                             uint32_t     arenaByteCount,
+                             uint32_t     frameCount,
+                             uint32_t     reportsScratchOverflow)
 {
     srt.inoutCounters                       = cpuRes.Counters;
     srt.inoutDispatchArgs                   = cpuRes.DispatchArgs;
     srt.inoutDispatchCnts                   = cpuRes.DispatchCnts;
     srt.inoutPredicate                      = cpuRes.Predicate;
+    srt.inoutFrameStatus                    = cpuRes.FrameStatus;
     srt.decompressSequences_StreamsPerTG    = decompressSequences_StreamsPerTG;
     srt.stage                               = stage;
     srt.cmpBlockCountMax                    = cmpBlockCountMax;
@@ -82,6 +91,8 @@ static void zstdgpu_Srt_Fill(zstdgpu_UpdateDispatchArgs_SRT &srt, const zstdgpu_
     srt.seqElemCountMax                     = seqElemCountMax;
     srt.executeIndirectWorkaround           = executeIndirectWorkaround;
     srt.arenaByteCount                      = arenaByteCount;
+    srt.frameCount                          = frameCount;
+    srt.reportsScratchOverflow              = reportsScratchOverflow;
 }
 
 #endif

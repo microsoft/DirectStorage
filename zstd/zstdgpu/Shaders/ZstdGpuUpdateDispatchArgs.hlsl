@@ -19,6 +19,30 @@
 #include "../zstdgpu_shaders.h"
 #include "../srt_headers/ZstdGpuSrt_UpdateDispatchArgs.h"
 
+/**
+ *  Marks every frame in the batch as failed because the batch ran out of scratch.
+ *
+ *  The overflow is a per-DISPATCH condition computed from batch-global counters, so it cannot be
+ *  attributed to one frame. Every frame is marked, because once predicated work is skipped no
+ *  frame's output can be trusted.
+ *
+ *  A frame that already carries a more specific failure (bad magic, dictionary, reserved bit, ...)
+ *  keeps it: that reason is the more useful one, and such frames were never going to be decoded.
+ *
+ *  Single-threaded, and that is deliberate -- this loop only ever runs when the decode has already
+ *  failed, so its cost is irrelevant. On the success path it is one comparison.
+ */
+static void zstdgpu_MarkAllFramesFailed(ZSTDGPU_RW_BUFFER(uint32_t) inoutFrameStatus, uint32_t frameCount, uint32_t status)
+{
+    for (uint32_t frameIdx = 0; frameIdx < frameCount; ++frameIdx)
+    {
+        if (kzstdgpu_FrameStatus_Success == inoutFrameStatus[frameIdx])
+        {
+            inoutFrameStatus[frameIdx] = status;
+        }
+    }
+}
+
 [RootSignature(ZSTDGPU_SRT_RS_UpdateDispatchArgs)]
 [numthreads(1, 1, 1)]
 void main()
@@ -65,6 +89,17 @@ void main()
         srt.inoutPredicate[1] = 0;             // upper 32-bits of Stage 1 predicate
         srt.inoutPredicate[2] = predicateMask; // lower 32-bits of Stage 2 predicate
         srt.inoutPredicate[3] = 0;             // upper 32-bits of Stage 2 predicate
+
+        // Report the overflow instead of skipping silently.
+        //
+        // ORDERING, and it is load-bearing: [Parse Frames :: Collect Blocks] writes every frame's
+        // status in stage 1, i.e. AFTER this pass, with an unconditional assignment that would
+        // overwrite these marks. It cannot: that pass is predicated on exactly the mask written
+        // above, so it runs only when this mask is zero and there was nothing to mark.
+        if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
+        {
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_BlockCountExceeded);
+        }
     }
     else if (srt.stage == 1)
     {
@@ -103,6 +138,14 @@ void main()
                                      | (arenaBytesNeeded > srt.arenaByteCount ? (1u << 5u) : 0u);
 
         srt.inoutPredicate[2] = srt.inoutPredicate[2] | predicateMask; // lower 32-bits of Stage 2 predicate
+
+        // Report the overflow instead of skipping silently. Unlike the stage 0 case above, the
+        // per-frame statuses have ALREADY been written by [Parse Frames :: Collect Blocks] at this
+        // point, so a frame rejected on its own merits keeps that more specific reason.
+        if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
+        {
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_ScratchExceeded);
+        }
     }
     else
     {

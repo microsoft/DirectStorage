@@ -101,7 +101,7 @@ static const uint32_t kzstdgpu_SrtConstsRootSlot_PrefixSum                = 3;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_PropagateFseIndex        = 3;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_ComputePrefixSum         = 6;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_PrefixSequenceOffsets    = 12;
-static const uint32_t kzstdgpu_SrtConstsRootSlot_UpdateDispatchArgs       = 4;
+static const uint32_t kzstdgpu_SrtConstsRootSlot_UpdateDispatchArgs       = 5;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_DecompressHuffmanWeights = 7;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_DecodeHuffmanWeights     = 5;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_DecompressSequences      = 14;
@@ -926,22 +926,25 @@ static void zstdgpu_Bind_PrefixSequenceOffsets(ID3D12GraphicsCommandList *cmdLis
     cmdList->SetComputeRoot32BitConstant(12 /* Consts */, frameCount, 2 /* frameCount */);
 }
 
-static void zstdgpu_Bind_UpdateDispatchArgs(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t decompressSequences_StreamsPerTG, uint32_t stage, uint32_t cmpBlockCountMax, uint32_t rawBlockCountMax, uint32_t rleBlockCountMax, uint32_t litByteCountMax, uint32_t seqElemCountMax, uint32_t executeIndirectWorkaround, uint32_t arenaByteCount)
+static void zstdgpu_Bind_UpdateDispatchArgs(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t decompressSequences_StreamsPerTG, uint32_t stage, uint32_t cmpBlockCountMax, uint32_t rawBlockCountMax, uint32_t rleBlockCountMax, uint32_t litByteCountMax, uint32_t seqElemCountMax, uint32_t executeIndirectWorkaround, uint32_t arenaByteCount, uint32_t frameCount, uint32_t reportsScratchOverflow)
 {
     d3d12aid_ComputeRsPs_Set(&srts.UpdateDispatchArgs, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* Counters */, b.Counters->GetGPUVirtualAddress());
     cmdList->SetComputeRootUnorderedAccessView(1 /* DispatchArgs */, b.DispatchArgs->GetGPUVirtualAddress());
     cmdList->SetComputeRootUnorderedAccessView(2 /* DispatchCnts */, b.DispatchCnts->GetGPUVirtualAddress());
     cmdList->SetComputeRootUnorderedAccessView(3 /* Predicate */, b.Predicate->GetGPUVirtualAddress());
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, decompressSequences_StreamsPerTG, 0 /* decompressSequences_StreamsPerTG */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, stage, 1 /* stage */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, cmpBlockCountMax, 2 /* cmpBlockCountMax */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, rawBlockCountMax, 3 /* rawBlockCountMax */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, rleBlockCountMax, 4 /* rleBlockCountMax */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, litByteCountMax, 5 /* litByteCountMax */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, seqElemCountMax, 6 /* seqElemCountMax */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, executeIndirectWorkaround, 7 /* executeIndirectWorkaround */);
-    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, arenaByteCount, 8 /* arenaByteCount */);
+    cmdList->SetComputeRootUnorderedAccessView(4 /* FrameStatus */, b.FrameStatus->GetGPUVirtualAddress());
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, decompressSequences_StreamsPerTG, 0 /* decompressSequences_StreamsPerTG */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, stage, 1 /* stage */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, cmpBlockCountMax, 2 /* cmpBlockCountMax */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, rawBlockCountMax, 3 /* rawBlockCountMax */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, rleBlockCountMax, 4 /* rleBlockCountMax */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, litByteCountMax, 5 /* litByteCountMax */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, seqElemCountMax, 6 /* seqElemCountMax */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, executeIndirectWorkaround, 7 /* executeIndirectWorkaround */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, arenaByteCount, 8 /* arenaByteCount */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, frameCount, 9 /* frameCount */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, reportsScratchOverflow, 10 /* reportsScratchOverflow */);
 }
 
 static void zstdgpu_Bind_DecompressHuffmanWeights_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b)

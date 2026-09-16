@@ -531,9 +531,12 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
         outInfo->FramesRefs_ByteSizeInternal     = 0;
     }
 
-    // NOTE: FrameStatus is always a caller-supplied (external) resource, so it never
-    // gets internal storage; only its element count / byte size are used for the UAV view.
-    outInfo->FrameStatus_ByteSizeInternal = 0;
+    // NOTE: FrameStatus is normally a caller-supplied (external) resource, substituted after init.
+    // It is still sized internally so the binding is ALWAYS valid: UpdateDispatchArgs binds it as a
+    // ROOT UAV (a Direct SRT), which dereferences the resource at bind time rather than tolerating a
+    // null descriptor the way a bind-group table does. A caller that asks for no status buffer would
+    // otherwise crash the bind. The internal allocation is frameCount dwords and is released when the
+    // caller's resource is substituted in.
 
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpuOnly(outInfo);
     zstdgpu_ResourceInfo_Stage_0_InitOffsetCpu2Gpu(outInfo);

@@ -2903,7 +2903,13 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             /* litByteCountMax, unused for stage 0 */0,
             /* seqElemCountMax, unused for stage 0 */0,
             req->executeIndirectWorkaround,
-            /* arenaByteCount,  unused for stage 0 */0
+            /* arenaByteCount,  unused for stage 0 */0,
+            req->zstdFrameCount,
+            // Report only when the overflow would otherwise be acted on SILENTLY. This matches the
+            // `SetPredication` condition below exactly: where readback is required the host re-sizes
+            // from the counters it read back, so predication is never applied and there is nothing to
+            // hide. Reporting there would be a false alarm.
+            (0 == zstdgpu_IsReadbackRequired(req, 0)) ? 1u : 0u
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage0, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -3253,7 +3259,10 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->zstdUncompressedLitByteCountMax,
             req->zstdUncompressedSeqElemCountMax,
             req->executeIndirectWorkaround,
-            req->resInfo.DecompressedLiterals_ByteSize
+            req->resInfo.DecompressedLiterals_ByteSize,
+            req->zstdFrameCount,
+            // Matches the stage 2 `SetPredication` condition -- see the stage 0 site for why.
+            (0 == zstdgpu_IsReadbackRequired(req, 1)) ? 1u : 0u
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage1, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -3418,7 +3427,9 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             /* litByteCountMax, unused for stage == 2 */0,
             /* seqElemCountMax, unused for stage == 2 */0,
             req->executeIndirectWorkaround,
-            /* arenaByteCount,  unused for stage == 2 */0
+            /* arenaByteCount,  unused for stage == 2 */0,
+            req->zstdFrameCount,
+            /* reportsScratchOverflow: stage 2 performs no overflow check */0u
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_DecompressLiterals, cmdList,
             cmdList->Dispatch(1, 1, 1);

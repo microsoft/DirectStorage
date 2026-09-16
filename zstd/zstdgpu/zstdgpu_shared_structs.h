@@ -62,3 +62,20 @@ static const uint32_t kzstdgpu_FrameStatus_RequestTooLarge       = 0xA07A0006u; 
 // kzstdgpu_FrameStatus_RequestTooLarge and its output is undefined; split such
 // requests into smaller batches.
 static const uint32_t kzstdgpu_MaxRequestUncompressedByteSize    = 0x3FFFFFFFu;
+
+// -----------------------------------------------------------------------------
+// Scratch-exhaustion status.
+//
+// Unlike the codes above, these do NOT describe anything wrong with the frame.
+// They report that the scratch memory sized for the batch was too small, so the
+// decode was abandoned. The condition is detected per DISPATCH, from batch-global
+// counters, and cannot be attributed to an individual frame -- so every frame in
+// the batch that had not already failed for its own reason is marked, because no
+// frame's output can be trusted once predicated work has been skipped.
+//
+// Without these, exceeding the scratch bound skips the predicated work SILENTLY
+// and the decode returns wrong output with a success status. That is the exact
+// failure mode the per-frame status buffer exists to make impossible.
+// -----------------------------------------------------------------------------
+static const uint32_t kzstdgpu_FrameStatus_BlockCountExceeded    = 0xA07A0007u; // more blocks than the scratch was sized for (host pre-scan disagreed with the GPU parse, or block counts were estimated)
+static const uint32_t kzstdgpu_FrameStatus_ScratchExceeded       = 0xA07A0008u; // literal/sequence arena too small for the decoded content

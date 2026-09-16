@@ -127,6 +127,7 @@ typedef struct zstdgpu_UpdateDispatchArgs_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDispatchArgs;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDispatchCnts;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPredicate;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFrameStatus;
     uint32_t                                                decompressSequences_StreamsPerTG;
     uint32_t                                                stage;
     uint32_t                                                cmpBlockCountMax;
@@ -136,6 +137,8 @@ typedef struct zstdgpu_UpdateDispatchArgs_SRT
     uint32_t                                                seqElemCountMax;
     uint32_t                                                executeIndirectWorkaround;
     uint32_t                                                arenaByteCount;
+    uint32_t                                                frameCount;
+    uint32_t                                                reportsScratchOverflow;
 } zstdgpu_UpdateDispatchArgs_SRT;
 
 typedef struct zstdgpu_DecompressHuffmanWeights_SRT
