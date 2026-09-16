@@ -240,6 +240,7 @@
     <ClCompile Include="libzstdgpu.cpp" />
     <ClCompile Include="zstdgpu_tests.cpp" />
     <ClCompile Include="seq_record_tests.cpp" />
+    <ClCompile Include="collect_blocks_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

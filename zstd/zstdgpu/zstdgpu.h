@@ -91,6 +91,12 @@ ZSTDGPU_API void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu
  *
  *  NB2: For RLE block `zstdgpu_OffsetAndSize::offs` stores the actual 8-bit symbol. At the same time `zstdgpu_OffsetAndSize::size`
  *       stores the number of times the symbol has to be repeated in the decompressed stream.
+ *
+ *  NB3: This function is a standalone host-side convenience. The decode pipeline does NOT consume
+ *       its output -- blocks are discovered on the GPU by `ParseFrames`, and block ordinals are
+ *       GPU-derived. Nothing in the library, the demo or the tests calls this to decode; it exists
+ *       for a caller that wants to enumerate blocks itself. Do not read its presence as evidence
+ *       that block collection happens on the host.
  */
 ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAndSize *outBlocksRLE, zstdgpu_OffsetAndSize *outBlocksCmp, const zstdgpu_OffsetAndSize *frames, const zstdgpu_FrameInfo *frameInfos, uint32_t frameIndex, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes);
 
