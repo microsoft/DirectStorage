@@ -361,8 +361,38 @@ ZSTDGPU_API uint32_t zstdgpu_SliceBlockCountForDecompressedBudget(uint64_t decom
  *              reading from GPU counter readback, enabling stages 0 and 1 to be recorded into
  *              the same command list without a CPU fence.
  *              Can be called before or after `zstdgpu_SetupInputs*` functions.
+ *
+ *  NB: under single submission (`zstdgpu_SetupAllStageSubmission`) this is effectively REQUIRED.
+ *      Block count cannot be bounded by the decompressed size -- a block may regenerate as little
+ *      as zero bytes -- so without these counts the library has only an estimate, and exceeding it
+ *      silently skips predicated work and corrupts the output. The sizing entry points therefore
+ *      refuse that combination unless the caller opts in with
+ *      `zstdgpu_SetupAllowEstimatedBlockCounts`.
+ *
+ *      Supplying them is cheap: `zstdgpu_CountFramesAndBlocks` is a block-header hop that does not
+ *      descend into literal or sequence sections.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount);
+
+/**
+ *  @brief      Permits single submission to size per-block metadata from an ESTIMATED block count
+ *              when no exact count is available.
+ *
+ *  Only call this if the compressed bytes are unreachable from the CPU -- the
+ *  `zstdgpu_SetupInputsAsFramesInGpuMemory` case, where a host pre-scan is impossible. Any caller
+ *  that can reach the bytes should call `zstdgpu_CountFramesAndBlocks` and
+ *  `zstdgpu_SetupFrameInfoConstants` instead, which is both sound and nearly free.
+ *
+ *  WHAT THIS OPTS INTO: the estimate is `(decompressedBytes + 4095) / 4096`, which is NOT a bound.
+ *  Real content can exceed it by a wide margin. When it is exceeded the stage count checks fire
+ *  and the predicated work is SKIPPED, so the decode returns WRONG OUTPUT WITH A SUCCESS STATUS.
+ *  Nothing reports this: there is no overflow bit in the frame status buffer, and skipping
+ *  silently is all `SetPredication` does.
+ *
+ *  It is therefore only appropriate for content you produced and trust. Do not use it on untrusted
+ *  or adversarial input.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllowEstimatedBlockCounts(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
  *  @brief      Specifies the total decoded literal byte count and sequence count.

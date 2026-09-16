@@ -787,6 +787,7 @@ static const uint32_t kzstdgpu_SetupFlags_InputsGpuMemory       = (1u << 1);
 static const uint32_t kzstdgpu_SetupFlags_HasFrameInfoConstants = (1u << 2);
 static const uint32_t kzstdgpu_SetupFlags_HasBlockInfoConstants = (1u << 3);
 static const uint32_t kzstdgpu_SetupFlags_HasSingleSubmission   = (1u << 4);
+static const uint32_t kzstdgpu_SetupFlags_AllowEstimatedBlocks  = (1u << 5);
 
 static const uint32_t kzstdgpu_SetupFlags_InputsMask = kzstdgpu_SetupFlags_InputsCpuMemory | kzstdgpu_SetupFlags_InputsGpuMemory;
 
@@ -1429,6 +1430,21 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext r
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
+ZSTDGPU_ENUM(Status) zstdgpu_SetupAllowEstimatedBlockCounts(zstdgpu_PerRequestContext req)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != req);
+    proceed = proceed && (req->thisMemoryBlock == (void *)req);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        req->setupFlags |= kzstdgpu_SetupFlags_AllowEstimatedBlocks;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
 ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext req, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame)
 {
     uint32_t proceed = 1;
@@ -1578,6 +1594,52 @@ static uint32_t zstdgpu_OutputSizeToBlockCount(uint32_t size)
 }
 
 /**
+ *  Rejects the one remaining configuration that can silently produce wrong output.
+ *
+ *  Single submission cannot read GPU counters back, so it must size per-block metadata before
+ *  anything runs. With caller-supplied counts that is exact. Without them the only available
+ *  number is `zstdgpu_OutputSizeToBlockCount`, which is an estimate and NOT a bound -- and when it
+ *  is exceeded, the stage predicates skip the predicated work and the decode returns corrupt
+ *  output with a SUCCESS status. Nothing reports it: the frame status buffer carries no overflow
+ *  bit today, and the predicate is consumed by `SetPredication`, whose entire behaviour is to skip
+ *  silently.
+ *
+ *  So this combination is refused rather than merely documented. Refusing is the whole point: a
+ *  loud failure beats corrupt output with a success code.
+ *
+ *  It is not refused unconditionally, because `zstdgpu_SetupInputsAsFramesInGpuMemory` is a
+ *  legitimate configuration in which the compressed bytes never touch the CPU and a host pre-scan
+ *  is therefore impossible. Such a caller opts in with `zstdgpu_SetupAllowEstimatedBlockCounts`,
+ *  which makes the risk explicit and acknowledged instead of silent and default.
+ */
+static uint32_t zstdgpu_IsBlockCountSourceSound(zstdgpu_PerRequestContext req)
+{
+    if (!zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
+    {
+        // Staged submission reads the true counts back from GPU counters.
+        return 1;
+    }
+    if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
+    {
+        // Caller-supplied counts are exact.
+        return 1;
+    }
+    return zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_AllowEstimatedBlocks) ? 1u : 0u;
+}
+
+#define ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req)                                                        \
+    if (!zstdgpu_IsBlockCountSourceSound(req))                                                          \
+    {                                                                                                   \
+        ZSTDGPU_ASSERT(!"zstdgpu: single submission without caller-supplied block counts. The block "    \
+                        "count estimate is NOT a bound, and exceeding it silently skips predicated "     \
+                        "work and corrupts the output. Call zstdgpu_SetupFrameInfoConstants with "       \
+                        "exact counts from zstdgpu_CountFramesAndBlocks, or, if the compressed bytes "   \
+                        "are GPU-resident and cannot be pre-scanned, opt in explicitly with "            \
+                        "zstdgpu_SetupAllowEstimatedBlockCounts.");                                      \
+        return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);                                                \
+    }
+
+/**
  *  Provable upper bound on the number of sequences a batch can contain, derived purely from the
  *  decompressed size.
  *
@@ -1619,11 +1681,13 @@ static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, 
         if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasSingleSubmission))
         {
             // NOTE: This is an ESTIMATE and is NOT sound -- block count cannot be bounded by the
-            // decompressed size (see `zstdgpu_OutputSizeToBlockCount`). Callers using
-            // single-submission on untrusted content should supply exact counts via
-            // `zstdgpu_SetupFrameInfoConstants`, which is cheap: the block-header hop does not
-            // descend into literal/sequence sections. When this estimate is exceeded the
-            // stage-1/stage-2 count checks report it through the frame status buffer.
+            // decompressed size (see `zstdgpu_OutputSizeToBlockCount`). Reaching this line at all
+            // means the caller explicitly opted in via `zstdgpu_SetupAllowEstimatedBlockCounts`;
+            // the sizing entry points otherwise refuse the configuration outright (see
+            // `zstdgpu_IsBlockCountSourceSound`). If the estimate is exceeded the stage-1/stage-2
+            // count checks fire, and because those drive `SetPredication`, the predicated work is
+            // SKIPPED SILENTLY -- there is no overflow bit in the frame status buffer today. That
+            // is precisely why this path has to be opted into rather than defaulted to.
             cntRle = cntRaw = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
         }
         else
@@ -1775,6 +1839,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         // (This was originally a stopgap justified by literals and sequences being sized
         //  separately at ~6.33x the decompressed size, which was genuinely unallocatable. The
         //  merged arena at 4x removed that justification -- but not reason 1.)
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: scratch requirement exceeds the maximum supported heap size. "
@@ -1848,6 +1913,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaul
         // See the matching check in `zstdgpu_GetGpuMemoryRequirement` for why this must stay: it is
         // both the report path for an oversized batch AND the backstop that makes the saturating
         // arena bound safe.
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (*outDefaultHeapByteCount >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
@@ -2159,6 +2225,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
          *  is present on the public sizing API but absent on both internal-memory submit paths,
          *  which is worse than having none, because the guard then merely looks present.
          */
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: stage scratch requirement exceeds the maximum supported heap "
@@ -2295,6 +2362,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
          *  work -- wrong output with a success exit code, exactly the failure this whole effort
          *  exists to eliminate. Rejecting here keeps saturation loud.
          */
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (dflt >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
