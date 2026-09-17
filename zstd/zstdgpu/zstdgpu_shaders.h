@@ -2736,38 +2736,6 @@ static void zstdgpu_PreInitHuffmanTableToLds(ZSTDGPU_RO_TYPED_BUFFER(uint32_t, u
 ZSTDGPU_INIT_HUFFMAN_TABLE_LDS(0, InitHuffmanTable);
 #include "zstdgpu_lds_decl_undef.h"
 
-static void zstdgpu_ShaderEntry_InitHuffmanTable(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTable_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t tgSize)
-{
-    #include "zstdgpu_lds_decl_base.h"
-    ZSTDGPU_INIT_HUFFMAN_TABLE_LDS(0, InitHuffmanTable);
-    #include "zstdgpu_lds_decl_undef.h"
-
-    uint32_t bitsMax = 0;
-    uint32_t codeTableSize = 0;
-    zstdgpu_PreInitHuffmanTableToLds(
-        srt.inDecompressedHuffmanWeights,
-        srt.inDecompressedHuffmanWeightCount,
-        groupId,
-        threadId,
-        tgSize,
-        bitsMax,
-        codeTableSize,
-        GS_PreInit,
-        GS_RankIndex,
-        GS_CodeAndSymbol,
-        srt.inoutHuffmanTableCodeAndSymbol,
-        true
-    );
-    ZSTDGPU_FOR_WORK_ITEMS(workItemId, bitsMax + 1u, threadId, tgSize)
-    {
-        srt.inoutHuffmanTableRankIndex[groupId * kzstdgpu_MaxCount_HuffmanWeightRanks + workItemId] = zstdgpu_LdsLoadU32(GS_RankIndex + workItemId);
-    }
-    if (threadId == 0)
-    {
-        srt.inoutHuffmanTableInfo[groupId] = (bitsMax << 16) | codeTableSize;
-    }
-}
-
 static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
                                                                ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                                ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
@@ -2846,82 +2814,6 @@ static void zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(ZSTDGPU_RO_BU
 #include "zstdgpu_lds_decl_size.h"
 ZSTDGPU_DECOMPRESS_LITERALS_LDS(0, DecompressLiterals);
 #include "zstdgpu_lds_decl_undef.h"
-
-static void zstdgpu_ShaderEntry_DecompressLiterals(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressLiterals_SRT) srt, uint32_t groupId, uint32_t threadId, uint32_t tgSize)
-{
-    uint32_t htIndex = 0;
-    uint32_t htGroupStart = 0;
-    uint32_t htLiteralStart = 0;
-    uint32_t htLiteralCount= 0;
-
-    zstdgpu_ConvertThreadgroupIdToDecompressLiteralsInputs(
-        srt.inLitGroupEndPerHuffmanTable,
-        srt.inHufWIdToHufLitId,
-        srt.inHufLitIdToLitStreamId,
-        srt.inCounters[0].HufLit,
-        srt.inCounters[0].HUF_Streams,
-        srt.inCounters[0].Blocks_CMP, // The number of Huffman table slots is the same as the number of Compressed blocks
-        groupId,
-        htIndex,
-        htGroupStart,
-        htLiteralStart,
-        htLiteralCount
-    );
-
-
-    #include "zstdgpu_lds_decl_base.h"
-    ZSTDGPU_DECOMPRESS_LITERALS_LDS(0, DecompressLiterals);
-    #include "zstdgpu_lds_decl_undef.h"
-
-    const uint32_t htInfo = WaveReadLaneFirst(srt.inHuffmanTableInfo[htIndex]);
-    const uint32_t bitsMax = htInfo >> 16;
-    const uint32_t codeTableSize = htInfo & 0xffffu;
-    const uint32_t stateCnt = WaveReadLaneFirst(srt.inHuffmanTableRankIndex[htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks + bitsMax]);
-    const uint32_t statePairCnt = stateCnt >> 1u;
-
-    // Expand Huffman Table, pack 2 entries into single dword
-    ZSTDGPU_FOR_WORK_ITEMS(statePairId, statePairCnt, threadId, tgSize)
-    {
-        const uint32_t stateId0 = statePairId << 1u;
-        const uint32_t stateId1 = stateId0 + 1u;
-
-        const uint32_t symbolIndex0 = zstdgpu_BinarySearchMasked(srt.inHuffmanTableCodeAndSymbol, htIndex * kzstdgpu_MaxCount_HuffmanWeights, codeTableSize, stateId0, 0x00ffffffu);
-        const uint32_t symbolIndex1 = zstdgpu_BinarySearchMasked(srt.inHuffmanTableCodeAndSymbol, htIndex * kzstdgpu_MaxCount_HuffmanWeights, codeTableSize, stateId1, 0x00ffffffu);
-
-        const uint32_t bitcntIndex0 = zstdgpu_BinarySearchMasked(srt.inHuffmanTableRankIndex, htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks, bitsMax + 1, stateId0, 0xffffffffu)
-                                    - htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks;
-
-        const uint32_t bitcntIndex1 = zstdgpu_BinarySearchMasked(srt.inHuffmanTableRankIndex, htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks, bitsMax + 1, stateId1, 0xffffffffu)
-                                    - htIndex * kzstdgpu_MaxCount_HuffmanWeightRanks;
-
-        const uint32_t symbol0 = srt.inHuffmanTableCodeAndSymbol[symbolIndex0] >> 24;
-        const uint32_t bitcnt0 = bitsMax - bitcntIndex0;
-
-        const uint32_t symbol1 = srt.inHuffmanTableCodeAndSymbol[symbolIndex1] >> 24;
-        const uint32_t bitcnt1 = bitsMax - bitcntIndex1;
-
-        const uint32_t symbolAndBitcnt0 = (symbol0 << 8) | bitcnt0;
-        const uint32_t symbolAndBitcnt1 = (symbol1 << 8) | bitcnt1;
-
-        zstdgpu_LdsStoreU32(GS_HuffmanTable + statePairId, (symbolAndBitcnt1 << 16) | symbolAndBitcnt0);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    zstdgpu_DecompressHuffmanCompressedLiterals(
-        srt.inCompressedData,
-        srt.inLitRefs,
-        srt.inoutDecompressedLiterals,
-        GS_HuffmanTable,
-        groupId,
-        threadId,
-        htGroupStart,
-        htLiteralStart,
-        htLiteralCount,
-        bitsMax,
-        tgSize
-    );
-
-}
 
 // LDS partitioning macro lists for combined Huffman Table Initialisation + Literal Decompression
 #define ZSTDGPU_INIT_HUFFMAN_TABLE_AND_DECOMPRESS_LITERALS_LDS(base, size)          \

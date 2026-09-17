@@ -48,24 +48,6 @@ typedef struct zstdgpu_Memset_SRT
     uint32_t                                                value;
 } zstdgpu_Memset_SRT;
 
-typedef struct zstdgpu_DecompressLiterals_SRT
-{
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inLitGroupEndPerHuffmanTable;
-    ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
-    ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo)                inLitRefs;
-    ZSTDGPU_RO_RAW_BUFFER(uint32_t)                         inCompressedData;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inHufWIdToHufLitId;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inHufLitIdToLitStreamId;
-    ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)              inoutDecompressedLiterals;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inHuffmanTableInfo;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inHuffmanTableCodeAndSymbol;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inHuffmanTableRankIndex;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedLiterals_Dwords;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
-    uint32_t                                                tgOffset;
-    uint32_t                                                workItemCount;
-} zstdgpu_DecompressLiterals_SRT;
-
 typedef struct zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT
 {
     ZSTDGPU_RO_BUFFER(uint32_t)                             inLitGroupEndPerHuffmanTable;
@@ -174,20 +156,6 @@ typedef struct zstdgpu_DecodeHuffmanWeights_SRT
     uint32_t                                                workItemCount;
     uint32_t                                                compressedBufferSizeInBytes;
 } zstdgpu_DecodeHuffmanWeights_SRT;
-
-typedef struct zstdgpu_InitHuffmanTable_SRT
-{
-    ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)              inDecompressedHuffmanWeights;
-    ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)              inDecompressedHuffmanWeightCount;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHuffmanTableInfo;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHuffmanTableCodeAndSymbol;
-    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHuffmanTableRankIndex;
-    ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
-    uint32_t                                                tgOffset;
-    uint32_t                                                workItemCount;
-    uint32_t                                                fseCompressed;
-} zstdgpu_InitHuffmanTable_SRT;
 
 typedef struct zstdgpu_DecompressSequences_SRT
 {

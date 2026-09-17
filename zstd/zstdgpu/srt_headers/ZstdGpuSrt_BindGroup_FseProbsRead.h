@@ -17,9 +17,9 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead "DescriptorTable(SRV(t0, space=10, numDescriptors=1))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead "DescriptorTable(SRV(t0, space=8, numDescriptors=1))"
 
-ZSTDGPU_RO_TYPED_BUFFER(int32_t, int16_t)   ZstdInFseProbs  : register(t0, space10);
+ZSTDGPU_RO_TYPED_BUFFER(int32_t, int16_t)   ZstdInFseProbs  : register(t0, space8);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_FseProbsRead(ZSTDGPU_PARAM_INOUT(T) srt)
