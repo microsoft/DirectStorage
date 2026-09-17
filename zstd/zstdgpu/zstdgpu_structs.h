@@ -235,7 +235,7 @@ static const uint32_t kzstdgpu_MaxCount_HuffmanWeightRanks          = kzstdgpu_M
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits  = kzstdgpu_MaxCount_HuffmanWeights / 32;
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsAllDigitBits  = kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits * 5;
 
-static const uint32_t kzstdgpu_MaxCount_FseProbs = 256;
+static const uint32_t kzstdgpu_MaxCount_FseProbs = 64;
 
 static const uint32_t kzstdgpu_MaxCount_FseElems = 512;
 static const uint32_t kzstdgpu_MaxCount_FseElemsOneDigitBits = kzstdgpu_MaxCount_FseElems / 32;
