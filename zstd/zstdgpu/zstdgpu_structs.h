@@ -243,6 +243,17 @@ static const uint32_t kzstdgpu_MaxCount_HuffmanWeightRanks          = kzstdgpu_M
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits  = kzstdgpu_MaxCount_HuffmanWeights / 32;
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsAllDigitBits  = kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits * 5;
 
+// Per-FSE-table stride for the transient FSE-probability scratch buffer, and the
+// hard cap the FSE-header parser enforces on a table's symbol count (see the
+// `symbol < kzstdgpu_MaxCount_FseProbs` guards in zstdgpu_ParseFseHeader) and the
+// size of the CompactedPositiveFrqPrefixSumAndSymbols LDS region.
+//
+// The largest legal zstd FSE alphabet is ML with maxSymbolValue 52 => 53 entries
+// (LL 36, OF 32, Huffman-weights <=13). A conforming stream always terminates a
+// table via `remain == 0` at symbol <= maxSymbolValue+1 <= 53, so 64 accepts every
+// legal table (with margin) while still rejecting corrupt over-long tables. It was
+// previously 256, which over-provisioned the per-block FseProbs scratch and the
+// LDS region without accepting any additional legal input.
 static const uint32_t kzstdgpu_MaxCount_FseProbs = 64;
 
 static const uint32_t kzstdgpu_MaxCount_FseElems = 512;
