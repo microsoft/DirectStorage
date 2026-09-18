@@ -3165,8 +3165,10 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
                 zstdgpu_HuffmanStream_Consume(stream, bitcnt);
             }
         }
+
+        // This call cannot be in top-level control flow since zstdgpu_HuffmanStream_InitWithSegment was not:
+        zstdgpu_HuffmanStream_ConditionalFetch(stream);
     }
-    zstdgpu_HuffmanStream_ConditionalFetch(stream);
 
     const uint32_t kStoreCacheBankCount = 32;
     const uint32_t kStoreCacheBankMask = kStoreCacheBankCount - 1u;
@@ -3239,8 +3241,9 @@ static void zstdgpu_DecompressHuffmanCompressedLiterals_StoreLdsCache(ZSTDGPU_RO
     while (WaveActiveAnyTrue(dwordIdx < dwordIdxEnd));
 
     // zstdgpu_HuffmanStream_ConditionalFetch(stream) is not needed here:
-    //      - It is after the 0-3 head aligmnent decodes.
-    //      - It is at the bottom of the 4x loop; that exit condition is per-thread, but so is the fetch condition.
+    //      - The fetch condition/logic is per-lane.
+    //      - Control flow that can reach here for an init zstdgpu_HuffmanStream
+    //        is per-lane and ends with ConditionalFetch.
 
     // Handle tail bytes (up to 3 bytes after the last dword-aligned address)
     ZSTDGPU_BRANCH if (dwordAlignedEnd < byteAlignedEnd)
