@@ -1252,7 +1252,7 @@ struct zstdgpu_HuffmanStream
     uint32_t maxBitsPerCode;
     uint32_t _32MinusMaxBitsPerCode;
 
-    uint64_t dataFetched;
+    uint64_t data1; // destination of fetches
     bool needsFetchSoon; // "soon" roughly means every 4 literals
 };
 
@@ -1265,7 +1265,7 @@ static inline void zstdgpu_HuffmanStream_ConditionalFetch(ZSTDGPU_PARAM_INOUT(zs
     {
         const uint32_t loadByteOffset = stream.lastByteOffset - sizeof(uint64_t);
         stream.lastByteOffset = loadByteOffset;
-        stream.dataFetched = zstdgpu_ByteOffsetLoadU64(stream.buffer, loadByteOffset);
+        stream.data1 = zstdgpu_ByteOffsetLoadU64(stream.buffer, loadByteOffset);
     }
     stream.needsFetchSoon = false;
 }
@@ -1307,7 +1307,7 @@ static inline void zstdgpu_HuffmanStream_InitWithSegment(ZSTDGPU_PARAM_INOUT(zst
 
     ZSTDGPU_ASSERT(1 <= maxBitsPerCode && maxBitsPerCode <= 11);
 
-    stream.dataFetched    = 0;
+    stream.data1          = 0;
     stream.needsFetchSoon = true;
     zstdgpu_HuffmanStream_ConditionalFetch(stream);
 }
@@ -1323,11 +1323,11 @@ static inline uint32_t zstdgpu_HuffmanStream_GetFromFetched(ZSTDGPU_PARAM_INOUT(
         ZSTDGPU_ASSERT(!stream.needsFetchSoon);
         ZSTDGPU_ASSERT(stream.numBitsSpare == 0);
         ZSTDGPU_ASSERT(((stream.finalByteOffset | stream.lastByteOffset) & 7) == 0);
-        ZSTDGPU_ASSERT(int32_t(stream.finalByteOffset) <= int32_t(stream.lastByteOffset));
+        ZSTDGPU_ASSERT(stream.finalByteOffset <= stream.lastByteOffset);
 
         stream.dataSpare      = uint32_t(stream.data0 >> 32);
         stream.numBitsSpare   = stream.numBits0;
-        stream.data0          = stream.dataFetched;
+        stream.data0          = stream.data1;
         // Ideally this compare+select is done once at the top of a multi-literal-decode loop:
         stream.numBits0       = (stream.finalByteOffset == stream.lastByteOffset) ? uint32_t(-1) : 64; // see @last_peek comment
         stream.needsFetchSoon = true;
