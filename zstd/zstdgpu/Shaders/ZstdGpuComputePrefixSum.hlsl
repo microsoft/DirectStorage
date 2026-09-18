@@ -18,7 +18,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_ComputePrefixSum.h"
+#include "../srt_headers/ZstdGpuSrt_ComputePrefixSum.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_ComputePrefixSum)]
 [numthreads(kzstdgpu_TgSizeX_PrefixSum_LiteralCount, 1, 1)]

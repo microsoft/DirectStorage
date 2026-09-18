@@ -260,6 +260,31 @@ static bool ParseEntry(Parser& p, AdversarialEntry& entry, std::string& errorOut
     return true;
 }
 
+// Parses a JSON array of perf entries ("[ {path_glob, reason}, ... ]") into
+// `out`. Assumes the caller has consumed the array's key and ':'. Reuses
+// ParseEntry: perf entries share path_glob/reason with adversarial entries, and
+// any expected_exit_code that happens to be present is parsed and ignored.
+static bool ParsePerfEntryArray(Parser& p, std::vector<PerfEntry>& out, std::string& errorOut)
+{
+    if (!p.SkipWs() || !p.Expect('[')) { errorOut = p.error; return false; }
+    if (!p.SkipWs()) { p.Fail("unexpected eof in perf entry array"); errorOut = p.error; return false; }
+    if (p.text[p.pos] == ']') { ++p.pos; return true; }
+    while (true)
+    {
+        AdversarialEntry ae;
+        if (!ParseEntry(p, ae, errorOut)) return false;
+        PerfEntry pe;
+        pe.pathGlob = std::move(ae.pathGlob);
+        pe.reason = std::move(ae.reason);
+        out.push_back(std::move(pe));
+        if (!p.SkipWs()) { p.Fail("unexpected eof in perf entry array"); errorOut = p.error; return false; }
+        if (p.text[p.pos] == ',') { ++p.pos; continue; }
+        if (p.text[p.pos] == ']') { ++p.pos; break; }
+        p.Fail("expected ',' or ']' in perf entry array"); errorOut = p.error; return false;
+    }
+    return true;
+}
+
 // Parses one scenario_skip object. scenario_glob and gpu_name_glob are
 // required; path_glob, reason, and tracking_bug are optional; unknown fields
 // are skipped.
@@ -591,6 +616,131 @@ size_t AdversarialManifest::CountCoverage(const std::vector<std::string>& files,
                 break;
             }
         }
+    }
+
+    return filesMatched;
+}
+
+// ---------------------------------------------------------------------------
+// PerfManifest
+// ---------------------------------------------------------------------------
+
+bool PerfManifest::LoadFromFile(const std::filesystem::path& jsonPath, std::string& errorOut)
+{
+    m_latency.clear();
+    m_throughput.clear();
+    m_loaded = false;
+    m_sourcePath = jsonPath;
+
+    std::ifstream file(jsonPath, std::ios::binary);
+    if (!file)
+    {
+        errorOut = "could not open perf manifest file: " + jsonPath.string();
+        return false;
+    }
+    std::ostringstream buf;
+    buf << file.rdbuf();
+    std::string text = buf.str();
+
+    Parser p{ std::string_view(text), 0, {} };
+
+    if (!p.SkipWs() || !p.Expect('{')) { errorOut = p.error; return false; }
+
+    while (true)
+    {
+        if (!p.SkipWs()) { p.Fail("unexpected eof at top level"); errorOut = p.error; return false; }
+        if (p.text[p.pos] == '}') { ++p.pos; break; }
+
+        std::string key = p.ReadString();
+        if (p.Failed()) { errorOut = p.error; return false; }
+        if (!p.SkipWs() || !p.Expect(':')) { errorOut = p.error; return false; }
+
+        if (key == "$schema_version")
+        {
+            int v = p.ReadInt();
+            if (p.Failed()) { errorOut = p.error; return false; }
+            if (v != 1)
+            {
+                errorOut = "unsupported $schema_version " + std::to_string(v) + " (this wrapper supports version 1)";
+                return false;
+            }
+        }
+        else if (key == "latency")
+        {
+            if (!ParsePerfEntryArray(p, m_latency, errorOut)) return false;
+        }
+        else if (key == "throughput")
+        {
+            if (!ParsePerfEntryArray(p, m_throughput, errorOut)) return false;
+        }
+        else
+        {
+            // Unknown top-level field (e.g. "notes") — skip for forward compat.
+            p.SkipValue();
+            if (p.Failed()) { errorOut = p.error; return false; }
+        }
+
+        if (!p.SkipWs()) { p.Fail("unexpected eof at top level"); errorOut = p.error; return false; }
+        if (p.text[p.pos] == ',') { ++p.pos; continue; }
+        if (p.text[p.pos] == '}') { ++p.pos; break; }
+        p.Fail("expected ',' or '}' at top level"); errorOut = p.error; return false;
+    }
+
+    m_loaded = true;
+    return true;
+}
+
+std::vector<std::string> PerfManifest::SelectFiles(const std::string& scenario,
+                                                   const std::vector<std::string>& discoveredFiles,
+                                                   const std::filesystem::path& contentPath) const
+{
+    std::vector<std::string> selected;
+    if (!m_loaded)
+        return selected;
+
+    const std::vector<PerfEntry>* globs = nullptr;
+    if (scenario == "latency")         globs = &m_latency;
+    else if (scenario == "throughput") globs = &m_throughput;
+    else                               return selected;  // unknown scenario selects nothing
+
+    // Single pass over the discovered files: preserves discovery order and
+    // dedupes for free (each file is added at most once, even if several globs
+    // match it). Mirrors CountCoverage's matching.
+    for (const auto& f : discoveredFiles)
+    {
+        const std::string rel = RelativeAndNormalize(f, contentPath);
+        for (const auto& e : *globs)
+        {
+            if (GlobMatchSuffix(e.pathGlob, rel))
+            {
+                selected.push_back(f);
+                break;
+            }
+        }
+    }
+    return selected;
+}
+
+size_t PerfManifest::CountCoverage(const std::vector<std::string>& files,
+                                   const std::filesystem::path& contentPath) const
+{
+    if (!m_loaded)
+        return 0;
+
+    size_t filesMatched = 0;
+    for (const auto& f : files)
+    {
+        const std::string rel = RelativeAndNormalize(f, contentPath);
+        bool matched = false;
+        for (const auto* set : { &m_latency, &m_throughput })
+        {
+            for (const auto& e : *set)
+            {
+                if (GlobMatchSuffix(e.pathGlob, rel)) { matched = true; break; }
+            }
+            if (matched) break;
+        }
+        if (matched) ++filesMatched;
     }
 
     return filesMatched;

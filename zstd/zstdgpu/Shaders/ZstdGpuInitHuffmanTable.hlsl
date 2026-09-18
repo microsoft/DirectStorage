@@ -16,7 +16,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_InitHuffmanTable.h"
+#include "../srt_headers/ZstdGpuSrt_InitHuffmanTable.h"
 
 // WARN(pamartis): Wasteful, need only uint8_t but HLSL doesn't support it
 groupshared uint32_t GS_Lds[kzstdgpu_InitHuffmanTable_LdsSize];

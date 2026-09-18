@@ -28,7 +28,7 @@
       "tracking_bug": "Replace with a bug ID, driver note, or TSG link describing why the scenario is disabled on this device class."
     },
     {
-      "scenario_glob": "PerStageTiming",
+      "scenario_glob": "D3D12DebugLayerSeq",
       "gpu_name_glob": "*Fabrikam GPU 9000*",
       "reason": "Example: quarantine a single named scenario on one specific device model.",
       "tracking_bug": "Replace with a tracking reference."

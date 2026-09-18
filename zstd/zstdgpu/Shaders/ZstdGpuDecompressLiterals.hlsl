@@ -15,7 +15,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_DecompressLiterals.h"
+#include "../srt_headers/ZstdGpuSrt_DecompressLiterals.h"
 
 // WARN(pamartis): Wasteful, need only uint8_t but HLSL doesn't support it
 groupshared uint32_t GS_Lds[kzstdgpu_DecompressLiterals_LdsSize];

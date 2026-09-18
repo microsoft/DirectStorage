@@ -97,3 +97,57 @@ private:
     std::filesystem::path m_sourcePath;
     bool m_loaded = false;
 };
+
+// One perf-manifest entry: a glob (relative to --content-path) that selects
+// files for a perf scenario, plus a human-readable reason the files qualify.
+struct PerfEntry
+{
+    std::string pathGlob;                          // Glob over the file path relative to --content-path (JSON key "path_glob")
+    std::string reason;                            // Human-readable note on why these files qualify (JSON key "reason")
+};
+
+// Perf manifest: selects the content each perf scenario runs over. Carries two
+// independent glob sets, "latency" and "throughput"; they may (and eventually
+// will) select different files even though today they glob to the same tiles.
+// This replaces the old hardcoded "path contains 64KB" selection so the perf
+// corpus is data-driven, authored beside the content rather than in code.
+//
+// Loaded once at startup, then read-only from test threads. Uses the same
+// anchored glob syntax ('*', '[a-b]') as the adversarial manifest, matched
+// against each discovered file's path relative to --content-path.
+class PerfManifest
+{
+public:
+    // Loads the "latency" and "throughput" glob arrays from a JSON file. Returns
+    // false (with a diagnostic in errorOut) if the file is missing, malformed, or
+    // has an unsupported schema_version, leaving the manifest empty/unloaded.
+    bool LoadFromFile(const std::filesystem::path& jsonPath, std::string& errorOut);
+
+    // Returns the discovered files matching at least one glob for the given
+    // scenario ("latency" or "throughput"). Files are returned in discovery
+    // order and deduplicated (a file selected by several globs appears once);
+    // an unknown scenario name selects nothing. Order/dedupe matter: the demo
+    // concatenates the result into one stream, so duplicates or reordering would
+    // double-count frames and destabilize the pooled P50/median.
+    std::vector<std::string> SelectFiles(const std::string& scenario,
+                                         const std::vector<std::string>& discoveredFiles,
+                                         const std::filesystem::path& contentPath) const;
+
+    // Startup coverage self-check: how many of `files` match at least one glob in
+    // either scenario. The wrapper fails loud when a loaded manifest matches
+    // nothing (almost always a content-path / glob-prefix mismatch).
+    size_t CountCoverage(const std::vector<std::string>& files,
+                         const std::filesystem::path& contentPath) const;
+
+    size_t LatencyCount() const { return m_latency.size(); }
+    size_t ThroughputCount() const { return m_throughput.size(); }
+    size_t Size() const { return m_latency.size() + m_throughput.size(); }
+    bool Loaded() const { return m_loaded; }
+    const std::filesystem::path& SourcePath() const { return m_sourcePath; }
+
+private:
+    std::vector<PerfEntry> m_latency;
+    std::vector<PerfEntry> m_throughput;
+    std::filesystem::path m_sourcePath;
+    bool m_loaded = false;
+};

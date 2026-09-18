@@ -45,7 +45,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_DecompressSequences.h"
+#include "../srt_headers/ZstdGpuSrt_DecompressSequences.h"
 
 groupshared uint32_t Lds[kzstdgpu_DecompressSequences_MultiStream_LdsOutCache_LdsSize];
 #define ZSTDGPU_LDS Lds

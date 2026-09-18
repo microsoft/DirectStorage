@@ -16,7 +16,7 @@
  */
 
 #include "../zstdgpu_shaders.h"
-#include "../.generated/ZstdGpuSrt_DecodeHuffmanWeights.h"
+#include "../srt_headers/ZstdGpuSrt_DecodeHuffmanWeights.h"
 
 #ifdef __XBOX_SCARLETT
 #define __XBOX_ENABLE_WAVE32 1

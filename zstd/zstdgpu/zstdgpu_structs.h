@@ -235,7 +235,7 @@ static const uint32_t kzstdgpu_MaxCount_HuffmanWeightRanks          = kzstdgpu_M
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits  = kzstdgpu_MaxCount_HuffmanWeights / 32;
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsAllDigitBits  = kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits * 5;
 
-static const uint32_t kzstdgpu_MaxCount_FseProbs = 256;
+static const uint32_t kzstdgpu_MaxCount_FseProbs = 64;
 
 static const uint32_t kzstdgpu_MaxCount_FseElems = 512;
 static const uint32_t kzstdgpu_MaxCount_FseElemsOneDigitBits = kzstdgpu_MaxCount_FseElems / 32;
@@ -270,6 +270,7 @@ static const uint32_t kzstdgpu_FseRleTableCount = 256;
 static const uint32_t kzstdgpu_FrameStatusFlag_ReservedBitSet = 1u << 0u;
 static const uint32_t kzstdgpu_FrameStatusFlag_ChecksumBitSet = 1u << 1u;
 static const uint32_t kzstdgpu_FrameStatusFlag_DictionaryUsed = 1u << 2u;
+static const uint32_t kzstdgpu_FrameStatusFlag_ContentSizeAbsent = 1u << 3u;
 
 // FSE element packing: symbol(8) | bitcnt(8) | nstate(16) -> uint32_t
 static inline uint32_t zstdgpu_PackFseElem(uint32_t symbol, uint32_t bitcnt, uint32_t nstate)
@@ -1595,6 +1596,6 @@ static inline uint32_t zstdgpu_InitResources_GetDispatchSizeX(uint32_t initResou
     return (maxThreads + kzstdgpu_TgSizeX_InitCounters - 1) / kzstdgpu_TgSizeX_InitCounters;
 }
 
-#include ".generated/zstdgpu_srt_structs.h"
+#include "srt_headers/zstdgpu_srt_structs.h"
 
 #endif // #define ZSTDGPU_STRUCTS_H

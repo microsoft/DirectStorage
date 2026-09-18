@@ -151,7 +151,8 @@ public:
 
     Frames Decompress(
         std::vector<uint8_t>& compressedData,
-        OffsetsAndSizes& offsetsAndSizes);
+        OffsetsAndSizes& offsetsAndSizes,
+        std::vector<uint32_t>* outFrameStatus = nullptr);
 
 protected:
     winrt::com_ptr<ID3D12Resource> CreateBuffer(size_t size, const wchar_t* name);

@@ -16,7 +16,7 @@
 
 #include "../zstdgpu_shaders.h"
 
-#include "../.generated/ZstdGpuSrt_ExecuteSequences.h"
+#include "../srt_headers/ZstdGpuSrt_ExecuteSequences.h"
 
 [RootSignature(ZSTDGPU_SRT_RS_ExecuteSequences)]
 [numthreads(MAX_COPY_SIZE, 1, 1)]

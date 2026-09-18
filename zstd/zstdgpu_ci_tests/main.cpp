@@ -107,10 +107,7 @@ static void PrintUsage(const char* exe)
               << "  --demo-path <path>      Path to zstdgpu_demo.exe (required)\n"
               << "  --log-dir <dir>         Directory for logs and CSV output\n"
               << "  --log-file <path>       Consolidated text log file\n"
-              << "  --run-count <N>         Perf test iteration count (default: 40)\n"
               << "  --timeout <seconds>     Per-test process timeout (default: no timeout)\n"
-              << "  --perf-min-mb <N>       Minimum .zst file size (MB) required for perf tests (default: 4).\n"
-              << "                          Smaller files skip perf; individually-compressed textures are not representative of throughput.\n"
               << "  --gbv-sample-count <N>  Number of files the GBV scenarios run on, sampled by an even stride\n"
               << "                          across the sorted corpus (default: 0 = no cap; run GBV on every file\n"
               << "                          within --gbv-max-mb). A positive N samples that many files by stride.\n"
@@ -137,6 +134,13 @@ static void PrintUsage(const char* exe)
               << "                                    - correctness tests expect a specific exit code + stderr signature\n"
               << "                                  If no manifest is found (no flag AND no file in content-path), the\n"
               << "                                  wrapper falls back to legacy behavior: every file expected to succeed.\n"
+              << "  --perf-manifest <path>          Optional JSON manifest selecting the perf corpus. Carries two\n"
+              << "                                  glob sets, \"latency\" and \"throughput\" (globs relative to\n"
+              << "                                  --content-path), which may select different files. If NOT\n"
+              << "                                  specified, the wrapper auto-discovers the manifest at\n"
+              << "                                  <content-path>/perf_manifest.json. Each perf scenario runs over\n"
+              << "                                  its matching files; without a manifest the perf tests fail on an\n"
+              << "                                  empty selection. Correctness tests are unaffected.\n"
               << std::endl;
 }
 
@@ -174,12 +178,6 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         {
             config.logFile = argv[++i];
         }
-        else if (std::strcmp(argv[i], "--run-count") == 0 && i + 1 < argc)
-        {
-            config.runCount = std::atoi(argv[++i]);
-            if (config.runCount <= 0)
-                config.runCount = 40;
-        }
         else if (std::strcmp(argv[i], "--timeout") == 0 && i + 1 < argc)
         {
             config.timeoutSeconds = std::atoi(argv[++i]);
@@ -190,15 +188,13 @@ static bool ParseArgs(int argc, char** argv, TestConfig& config, bool& shouldExi
         {
             config.adversarialManifestPath = argv[++i];
         }
+        else if (std::strcmp(argv[i], "--perf-manifest") == 0 && i + 1 < argc)
+        {
+            config.perfManifestPath = argv[++i];
+        }
         else if (std::strcmp(argv[i], "--gpu-name") == 0 && i + 1 < argc)
         {
             config.gpuName = argv[++i];
-        }
-        else if (std::strcmp(argv[i], "--perf-min-mb") == 0 && i + 1 < argc)
-        {
-            config.perfMinMB = std::atoi(argv[++i]);
-            if (config.perfMinMB < 0)
-                config.perfMinMB = 0;   // <= 0 disables the perf-size skip (all files eligible for perf)
         }
         else if (std::strcmp(argv[i], "--gbv-sample-count") == 0 && i + 1 < argc)
         {
@@ -349,6 +345,66 @@ static int ValidateAndDiscover(TestConfig& config)
         std::cout << "No adversarial manifest found (neither --adversarial-manifest passed "
                   << "nor <content-path>/adversarial_manifest.json exists). "
                   << "Running in legacy mode: every file expected to succeed.\n";
+    }
+
+    // Load the perf manifest (selects the latency/throughput perf corpus).
+    // Resolution mirrors the adversarial manifest:
+    //   1. --perf-manifest <path> is an explicit override; a missing file there
+    //      is a hard error.
+    //   2. Else auto-discover <content-path>/perf_manifest.json. Absent is NOT an
+    //      error here (correctness-only runs don't need it) — but the perf tests
+    //      fail loud on an empty selection if they run without one.
+    //   3. A file that exists but fails to parse is always a hard error.
+    bool perfManifestFromExplicitFlag = !config.perfManifestPath.empty();
+    if (!perfManifestFromExplicitFlag)
+    {
+        std::filesystem::path autoPath =
+            std::filesystem::path(config.contentPath) / "perf_manifest.json";
+        if (std::filesystem::exists(autoPath))
+        {
+            config.perfManifestPath = autoPath.string();
+        }
+    }
+
+    if (!config.perfManifestPath.empty())
+    {
+        std::string loadError;
+        if (!config.perfManifest.LoadFromFile(config.perfManifestPath, loadError))
+        {
+            return Fail("perf manifest failed to load from '" +
+                        config.perfManifestPath + "': " + loadError);
+        }
+        std::cout << "Loaded perf manifest with "
+                  << config.perfManifest.LatencyCount() << " latency + "
+                  << config.perfManifest.ThroughputCount() << " throughput entries from '"
+                  << config.perfManifestPath << "'"
+                  << (perfManifestFromExplicitFlag ? " (via --perf-manifest)." : " (auto-discovered in content-path).")
+                  << "\n";
+
+        // Coverage self-check. A loaded manifest that matches NOTHING is almost
+        // always a content-path / glob-prefix mismatch (globs authored relative
+        // to a sub-tree while --content-path points elsewhere). Left undetected it
+        // turns every perf scenario into a spurious empty-selection failure, so
+        // fail loud here with a clearer, earlier message.
+        const size_t filesMatched = config.perfManifest.CountCoverage(
+            config.discoveredFiles, config.contentPath);
+        if (config.perfManifest.Size() > 0 && filesMatched == 0)
+        {
+            return Fail("perf manifest loaded " +
+                        std::to_string(config.perfManifest.Size()) +
+                        " entries but matched 0 of " +
+                        std::to_string(config.discoveredFiles.size()) +
+                        " discovered files. This is almost certainly a content-path/glob "
+                        "prefix mismatch: manifest globs are authored relative to a sub-tree. "
+                        "Verify --content-path '" +
+                        config.contentPath + "' points at or above that tree.");
+        }
+    }
+    else
+    {
+        std::cout << "No perf manifest found (neither --perf-manifest passed "
+                  << "nor <content-path>/perf_manifest.json exists). "
+                  << "The ZstdGpuPerfTests scenarios will fail on an empty selection if run.\n";
     }
 
     return 0;

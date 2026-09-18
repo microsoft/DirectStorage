@@ -25,19 +25,34 @@
 //     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
 //     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
 //
-//   Performance (EXPECT — soft fail, also verify CSV output was written):
-//     - PerStageTiming     : --prf-lvl 2 --d3d-gfx --seq-cnt → results/stages_<stem>.csv
+//   ZstdGpuPerfTests — report-only perf (batches at a time)
+//     - Latency    : small fixed-size (12-frame) batches; the demo's total [PERF]
+//                    line reports the P50 latency across the corpus windows.
+//     - Throughput : a harness-owned, fixed ladder of window sizes
+//                    (64,128,192,256,384,512,768,1024). The harness invokes the
+//                    demo once per rung over the whole corpus; each rung's total
+//                    [PERF] line reports the median bandwidth across the corpus
+//                    windows at that batch size (a bandwidth-vs-window curve).
+//
+//   The demo computes and prints per-batch and pooled-total latency + bandwidth on
+//   [PERF] stdout lines; the harness only orchestrates and echoes those lines (no
+//   CSV parsing / no aggregation). An external log-analysis script consumes the
+//   [PERF] lines run-over-run.
 
 #include "zstdgpu_ci_tests.h"
 #include "zstd_frame_size.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <Windows.h>
 
 // Internal types + forward declarations
@@ -66,13 +81,6 @@ namespace
     std::vector<std::string> BuildCorrectnessArgs(
         const std::string& zstFile,
         const std::vector<std::string>& scenarioFlags);
-
-    std::vector<std::string> BuildPerformanceArgs(
-        const std::string& zstFile,
-        int profilingLevel,
-        int runCount,
-        const std::string& csvOutputPath,
-        const std::vector<std::string>& extraFlags);
 }
 
 // Defined below; used by RunBatchedCorrectnessTest to keep fuzz content out of
@@ -261,17 +269,6 @@ static bool IsSelectedForGbv(const std::string& zstFile)
 {
     const auto& sel = GbvSampledFiles();
     return sel.find(zstFile) != sel.end();
-}
-
-// True if the file is smaller than --perf-min-mb. Returns false when
-// --perf-min-mb <= 0 (disabled) or the file size cannot be read.
-static bool IsSmallForPerf(const std::string& zstFile)
-{
-    if (g_testConfig.perfMinMB <= 0) return false;
-    std::error_code ec;
-    auto size = std::filesystem::file_size(zstFile, ec);
-    if (ec) return false;
-    return size < static_cast<uintmax_t>(g_testConfig.perfMinMB) * 1024ULL * 1024ULL;
 }
 
 // Returns a GTEST_SKIP message when --max-frame-mb is set (> 0) and the file's
@@ -614,90 +611,54 @@ static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
     runBatch();
 }
 
-// Run a performance scenario. Spawns zstdgpu_demo.exe with profiling flags and requests CSV output. Uses EXPECT (not ASSERT) to verify the demo executed successfully and produced CSV output.
-// main() has already validated the demo path exists.
-static void RunPerformanceTest(const std::string& zstFile, int profilingLevel,
-                                const std::vector<std::string>& extraFlags)
+// Batched perf test
+// Run the entire configured corpus of latency or throughput files
+// Latency is fixed batch sizes, throughput is a ladder of batch sizes.
+// Each run emits a perf line that is read and processed by analysis scripts
+static void RunPerfTest(int frameBatchCount, const char* scenario)
 {
-    // Skip if the manifest marks this scenario as skipped for this GPU; this
-    // takes precedence over the fuzz/size skips below.
-    if (std::string skip = ScenarioSkipReason(zstFile); !skip.empty())
-    {
-        GTEST_SKIP() << skip;
-        return;
-    }
+    const std::vector<std::string> files = g_testConfig.perfManifest.SelectFiles(
+        scenario, g_testConfig.discoveredFiles, g_testConfig.contentPath);
+    ASSERT_FALSE(files.empty())
+        << "Perf manifest selected no files for the '" << scenario << "' scenario. "
+        << "Ensure a perf manifest is loaded (--perf-manifest or "
+        << "<content-path>/perf_manifest.json) and its '" << scenario
+        << "' globs match content under '" << g_testConfig.contentPath << "'.";
 
-    // Fuzzing content mixes clean and corrupt inputs with varying code paths,
-    // so its timing isn't meaningful perf data — skip it before running the demo.
-    if (IsFuzzContent(zstFile))
-    {
-        GTEST_SKIP()
-            << "Perf test skipped: file is fuzzing content (under a 'fuzz' directory).\n"
-            << "File: " << zstFile;
-        return;
-    }
+    std::string listPath;
+    ASSERT_TRUE(WriteBatchListFile(std::string("perf_") + scenario, files, listPath))
+        << "Failed to write perf batch list file.";
 
-    // Skip files smaller than --perf-min-mb.
-    if (IsSmallForPerf(zstFile))
-    {
-        GTEST_SKIP()
-            << "Perf test skipped: file is under --perf-min-mb ("
-            << g_testConfig.perfMinMB << " MB).\n"
-            << "File: " << zstFile;
-        return;
-    }
+    std::cout << "[PERF-CFG] scenario=" << scenario
+              << " files=" << files.size()
+              << " frame-batch-count=" << frameBatchCount
+              << " run-cnt=" << g_testConfig.perfRunCount << "\n";
 
-    // Perf CSVs are written as stages_<stem>.csv under the results directory.
-    std::string stem = std::filesystem::path(zstFile).stem().string();
-    std::filesystem::path resultsDir = std::filesystem::path(g_testConfig.logDir) / "results";
-    if (!std::filesystem::exists(resultsDir))
-    {
-        std::filesystem::create_directories(resultsDir);
-    }
-    std::string csvPath = (resultsDir / ("stages_" + stem + ".csv")).string();
+    const std::vector<std::string> args = {
+        "--zst", "@" + listPath,
+        "--frame-batch-count", std::to_string(frameBatchCount),
+        "--run-cnt", std::to_string(g_testConfig.perfRunCount),
+        "--prf-lvl", "0",
+        "--seq-cnt",
+    };
 
-    auto args = BuildPerformanceArgs(zstFile, profilingLevel, g_testConfig.runCount, csvPath, extraFlags);
-    if (std::string skip = FrameSizeSkipReason(zstFile); !skip.empty())
-    {
-        GTEST_SKIP() << skip;
-        return;
-    }
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+    WriteToLogFile(std::string("[perf ") + scenario + "]", result);
 
-    // Write to log file before assertions so logs are captured even if a check fails.
-    WriteToLogFile(zstFile, result);
-
-    // Log the output regardless of pass/fail. This IS the demo stdout capture —
-    // the assertion messages below intentionally do NOT reprint result.stdOut.
-    std::cout << "[DEMO CMD] " << result.commandLine << "\n";
+    std::cout << "[PERF-CFG] " << result.commandLine << "\n";
     if (!result.stdOut.empty())
-    {
-        std::cout << "[DEMO OUT] " << result.stdOut << "\n";
-    }
+        std::cout << result.stdOut << "\n";
 
     EXPECT_FALSE(result.timedOut)
-        << "Demo process timed out after " << g_testConfig.timeoutSeconds << " seconds.\n"
-        << "Command: " << result.commandLine;
-
+        << "Demo timed out after " << g_testConfig.timeoutSeconds << "s.\nCommand: " << result.commandLine;
     EXPECT_TRUE(result.launchError.empty())
-        << "Failed to launch demo: " << result.launchError << "\n"
-        << "Command: " << result.commandLine;
-
-    // Fuzz content was already skipped above, so any file reaching here is
-    // expected to decode successfully AND produce a CSV.
+        << "Failed to launch demo: " << result.launchError << "\nCommand: " << result.commandLine;
     EXPECT_EQ(result.exitCode, 0)
-        << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
-        << "Command: " << result.commandLine
-        << "  (stdout already printed above as [DEMO OUT])";
+        << "Demo returned non-zero exit code: " << result.exitCode << "\nCommand: " << result.commandLine;
 
-    EXPECT_TRUE(std::filesystem::exists(csvPath)) << "CSV not created: " << csvPath;
-
-    if (std::filesystem::exists(csvPath))
-    {
-        std::cout << "[PERF CSV] Written to: " << csvPath << "\n";
-    }
+    if (result.stdOut.find("[PERF]") == std::string::npos)
+        ADD_FAILURE() << "Demo did not emit a [PERF] metrics line on stdout.\nCommand: " << result.commandLine;
 }
-
 // Test fixture and test cases
 
 // Per-file fixture (spec: ZstdGpuDemoTests).
@@ -709,6 +670,13 @@ class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
 // Batched fixture (spec: ZstdGpuCorrectnessTests).
 // Whole corpus is passed as a vector for batched execution
 class ZstdGpuCorrectnessTests : public ::testing::TestWithParam<std::vector<std::string>>
+{
+};
+
+// Perf fixture (spec: ZstdGpuPerfTests).
+// Each perf scenario tiles a fixed-size frame batch across the perf-manifest's
+// selected corpus, so the cases are plain (non-parameterized) tests.
+class ZstdGpuPerfTests : public ::testing::Test
 {
 };
 
@@ -767,13 +735,34 @@ TEST_P(ZstdGpuDemoTests, GbvSeq)
 #endif
 }
 
-// --- Performance tests ---
+// --- Batched perf tests (report-only) ---
 
-// Per-stage timings (--prf-lvl 2) on the DIRECT queue (--d3d-gfx) in single-
-// submission mode (--seq-cnt). Skips fuzz content and files under --perf-min-mb.
-TEST_P(ZstdGpuDemoTests, PerStageTiming)
+// Latency: tiles the perf-manifest's latency corpus into small fixed-size
+// (12-frame) batches, one batch per GPU dispatch, over a fixed number of sweeps. The
+// demo's total [PERF] line reports the P50 latency across all the corpus windows.
+TEST_F(ZstdGpuPerfTests, Latency)
 {
-    RunPerformanceTest(GetParam(), 2, {"--d3d-gfx", "--seq-cnt"});
+    RunPerfTest(g_testConfig.perfLatencyFrameCount, "latency");
+}
+
+// Throughput: sweeps a harness-owned ladder of window sizes. The harness owns
+// the ladder and invokes the demo once per rung (batch size), each tiling the
+// whole perf-manifest throughput corpus over a fixed number of sweeps. Each rung's
+// total [PERF] line reports the median bandwidth across the corpus windows at that
+// batch size, yielding a bandwidth-vs-window curve that downstream tooling reads per rung.
+TEST_F(ZstdGpuPerfTests, Throughput)
+{
+    const std::vector<int>& ladder = g_testConfig.perfThroughputFrameCounts;
+    ASSERT_FALSE(ladder.empty())
+        << "Throughput ladder is empty (perfThroughputFrameCounts is a fixed CI constant).";
+
+    std::cout << "[THROUGHPUT] rungs=" << ladder.size() << " frame-batch-counts=";
+    for (size_t i = 0; i < ladder.size(); ++i)
+        std::cout << (i ? "," : "") << ladder[i];
+    std::cout << " run-cnt=" << g_testConfig.perfRunCount << "\n";
+
+    for (int rung : ladder)
+        RunPerfTest(rung, "throughput");
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -940,40 +929,6 @@ std::vector<std::string> BuildCorrectnessArgs(
         args.push_back(std::to_string(g_testConfig.idxMax));
     }
     for (const auto& flag : scenarioFlags)
-    {
-        args.push_back(flag);
-    }
-    return args;
-}
-
-// Builds argument list for performance tests: run N iterations at the specified
-// profiling level, optionally writing per-run timing data to a CSV file. Any
-// scenario-specific demo flags are appended from `extraFlags`.
-std::vector<std::string> BuildPerformanceArgs(
-    const std::string& zstFile,
-    int profilingLevel,
-    int runCount,
-    const std::string& csvOutputPath,
-    const std::vector<std::string>& extraFlags)
-{
-    std::vector<std::string> args;
-    args.push_back("--zst");
-    args.push_back(zstFile);
-    args.push_back("--prf-lvl");
-    args.push_back(std::to_string(profilingLevel));
-    args.push_back("--run-cnt");
-    args.push_back(std::to_string(runCount));
-    if (!csvOutputPath.empty())
-    {
-        args.push_back("--out-csv");
-        args.push_back(csvOutputPath);
-    }
-    if (g_testConfig.idxMax >= 0)
-    {
-        args.push_back("--idx-max");
-        args.push_back(std::to_string(g_testConfig.idxMax));
-    }
-    for (const auto& flag : extraFlags)
     {
         args.push_back(flag);
     }

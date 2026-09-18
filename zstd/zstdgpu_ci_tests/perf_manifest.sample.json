@@ -1,0 +1,22 @@
+{
+  "$schema_version": 1,
+  "notes": "SAMPLE / REFERENCE perf manifest for the Zstd GPU CI wrapper. Selects the content each perf scenario runs over. The entries below are placeholders that exist only to document the schema -- do not ship it as-is. At runtime the wrapper loads a real manifest either from --perf-manifest <path> or, if that flag is absent, by auto-discovering <content-path>/perf_manifest.json. 'latency' and 'throughput' are two independent glob sets: each is a list of path globs relative to --content-path, using the same anchored '*' and '[a-b]' syntax as the adversarial manifest. Files are selected in discovery order and de-duplicated, so a file matched by several globs is used once. The two sets may select the same files today and diverge later (e.g. latency -> small single-frame tiles, throughput -> larger multi-frame streams) without any code change.",
+
+  "latency": [
+    {
+      "path_glob": "<path>/tiles_64KB/*.zst",
+      "reason": "Small frames dispatched a dozen at a time; the perf Latency scenario tiles them and reports the pooled P50 latency. '*' matches any characters within the path."
+    },
+    {
+      "path_glob": "<path>/latency_family_[0-9][0-9].zst",
+      "reason": "A family of files matched with a bracket range. '[0-9]' matches one digit."
+    }
+  ],
+
+  "throughput": [
+    {
+      "path_glob": "<path>/tiles_64KB/*.zst",
+      "reason": "Frames tiled across the throughput frame-count ladder; the Throughput scenario reports the median bandwidth at each rung (batch size)."
+    }
+  ]
+}
