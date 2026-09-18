@@ -27,6 +27,8 @@ void main()
 
     zstdgpu_Srt_Fill(srt);
 
+    const bool executeIndirectWorkaround = srt.executeIndirectWorkaround;
+
     if (srt.stage == 0)
     {
         // Block-count dependent slots (valid after Stage 0 ParseFrames :: Count Blocks)
@@ -39,20 +41,20 @@ void main()
 
 
         // the arguments dependent on block counts/sizes -- these could be computed after ParseFrames
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_ComputePrefixSum,         cmpBlockCount,                            kzstdgpu_TgSizeX_PrefixSum_LiteralCount);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesAll,      allBlockCount,                            kzstdgpu_TgSizeX_PrefixSum);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesRLE,      rleBlockCount,                            kzstdgpu_TgSizeX_PrefixSum);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesRAW,      rawBlockCount,                            kzstdgpu_TgSizeX_PrefixSum);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_MemcpyRAW,                srt.inoutCounters[0].BlocksBytes_RAW,          kzstdgpu_TgSizeX_MemsetMemcpy);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_MemsetRLE,                srt.inoutCounters[0].BlocksBytes_RLE,          kzstdgpu_TgSizeX_MemsetMemcpy);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_ParseCompressedBlocks,    cmpBlockCount,                            kzstdgpu_TgSizeX_ParseCompressedBlocks);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_ComputePrefixSum,         cmpBlockCount,                            kzstdgpu_TgSizeX_PrefixSum_LiteralCount, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesAll,      allBlockCount,                            kzstdgpu_TgSizeX_PrefixSum, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesRLE,      rleBlockCount,                            kzstdgpu_TgSizeX_PrefixSum, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixBlockSizesRAW,      rawBlockCount,                            kzstdgpu_TgSizeX_PrefixSum, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_MemcpyRAW,                srt.inoutCounters[0].BlocksBytes_RAW,          kzstdgpu_TgSizeX_MemsetMemcpy, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_MemsetRLE,                srt.inoutCounters[0].BlocksBytes_RLE,          kzstdgpu_TgSizeX_MemsetMemcpy, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_ParseCompressedBlocks,    cmpBlockCount,                            kzstdgpu_TgSizeX_ParseCompressedBlocks, executeIndirectWorkaround);
 
         // Memset dispatch slots for InitResources Stage 1
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_RawBlockLookback,    zstdgpu_GetLookbackBlockCount(rawBlockCount),                    kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_RleBlockLookback,    zstdgpu_GetLookbackBlockCount(rleBlockCount),                    kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockLookback,    zstdgpu_GetLookbackBlockCount(cmpBlockCount),                    kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_AllBlockLookback,    zstdgpu_GetLookbackBlockCount(allBlockCount),                    kzstdgpu_TgSizeX_Memset);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockCount,       cmpBlockCount,                                                   kzstdgpu_TgSizeX_Memset);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_RawBlockLookback,    zstdgpu_GetLookbackBlockCount(rawBlockCount),                    kzstdgpu_TgSizeX_Memset, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_RleBlockLookback,    zstdgpu_GetLookbackBlockCount(rleBlockCount),                    kzstdgpu_TgSizeX_Memset, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockLookback,    zstdgpu_GetLookbackBlockCount(cmpBlockCount),                    kzstdgpu_TgSizeX_Memset, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_AllBlockLookback,    zstdgpu_GetLookbackBlockCount(allBlockCount),                    kzstdgpu_TgSizeX_Memset, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_Memset_CmpBlockCount,       cmpBlockCount,                                                   kzstdgpu_TgSizeX_Memset, executeIndirectWorkaround);
 
         const uint32_t predicateMask = 0
                                      | (cmpBlockCount > srt.cmpBlockCountMax ? (1u << 0u) : 0u)
@@ -70,23 +72,23 @@ void main()
         const uint32_t seqElemCount = srt.inoutCounters[0].Seq_Streams_DecodedItems;
 
         // the arguments dependent on various streams counts that are part of compressed blocks -- these could be computed after ParseCompressedBlocks
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseHufW,                  srt.inoutCounters[0].FseHufW,                  1);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseLLen,                  srt.inoutCounters[0].FseLLen,                  1);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseOffs,                  srt.inoutCounters[0].FseOffs,                  1);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseMLen,                  srt.inoutCounters[0].FseMLen,                  1);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_HUF_WgtStreams,           srt.inoutCounters[0].HUF_WgtStreams,           1);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseHufW,                  srt.inoutCounters[0].FseHufW,                  1, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseLLen,                  srt.inoutCounters[0].FseLLen,                  1, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseOffs,                  srt.inoutCounters[0].FseOffs,                  1, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FseMLen,                  srt.inoutCounters[0].FseMLen,                  1, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_HUF_WgtStreams,           srt.inoutCounters[0].HUF_WgtStreams,           1, executeIndirectWorkaround);
 
         // NOTE(pamartis): The number of groups running the decompression of Huffman weights depends on the number FSE tables
         // for Huffman weights because those numbers are the same because each FSE table decompresses its own Huffman weights' stream.
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressHuffmanWeights, srt.inoutCounters[0].FseHufW,                  kzstdgpu_TgSizeX_DecompressHuffmanWeights);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressHuffmanWeights, srt.inoutCounters[0].FseHufW,                  kzstdgpu_TgSizeX_DecompressHuffmanWeights, executeIndirectWorkaround);
 
         // NOTE(pamartis): We also do decoding of uncompressed Huffman Weights stored as two nibbles per byte to make sure final representation
         // (a byte per weight) becomes identical, so identical representation simplfies initialisation of Huffman tables to use during literal decoding
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecodeHuffmanWeights,     srt.inoutCounters[0].HUF_WgtStreams,           kzstdgpu_TgSizeX_DecodeHuffmanWeights);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressSequences,      srt.inoutCounters[0].Seq_Streams,              srt.decompressSequences_StreamsPerTG);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FinaliseSequenceOffsets,  srt.inoutCounters[0].Seq_Streams_DecodedItems, kzstdgpu_TgSizeX_FinaliseSequenceOffsets);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixSequenceOffsets,    srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PrefixSequenceOffsets);
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex,        srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PropagateFseIndex);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecodeHuffmanWeights,     srt.inoutCounters[0].HUF_WgtStreams,           kzstdgpu_TgSizeX_DecodeHuffmanWeights, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressSequences,      srt.inoutCounters[0].Seq_Streams,              srt.decompressSequences_StreamsPerTG, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FinaliseSequenceOffsets,  srt.inoutCounters[0].Seq_Streams_DecodedItems, kzstdgpu_TgSizeX_FinaliseSequenceOffsets, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PrefixSequenceOffsets,    srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PrefixSequenceOffsets, executeIndirectWorkaround);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_PropagateFseIndex,        srt.inoutCounters[0].Seq_Streams,              kzstdgpu_TgSizeX_PropagateFseIndex, executeIndirectWorkaround);
 
         const uint32_t predicateMask = 0
                                      | (litByteCount > srt.litByteCountMax ? (1u << 3u) : 0u)
@@ -97,6 +99,6 @@ void main()
     else
     {
         // The number of Groups required for `DecompressLiterals` is only calculated after `ComputePrefixSum`
-        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressLiterals,       srt.inoutCounters[0].DecompressLiteralsGroups, 1);
+        zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressLiterals,       srt.inoutCounters[0].DecompressLiteralsGroups, 1, executeIndirectWorkaround);
     }
 }

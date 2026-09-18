@@ -42,6 +42,7 @@ typedef struct zstdgpu_ParseFrames_SRT
 typedef struct zstdgpu_Memset_SRT
 {
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDest;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                value;
@@ -60,6 +61,7 @@ typedef struct zstdgpu_DecompressLiterals_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inHuffmanTableCodeAndSymbol;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inHuffmanTableRankIndex;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutDecompressedLiterals_Dwords;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_DecompressLiterals_SRT;
@@ -75,6 +77,7 @@ typedef struct zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT
     ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)              inoutDecompressedLiterals;
     ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)              inDecompressedHuffmanWeights;
     ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)              inDecompressedHuffmanWeightCount;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT;
@@ -83,6 +86,7 @@ typedef struct zstdgpu_PrefixSum_SRT
 {
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutInCountsOutPrefix;
     ZSTDGPU_RW_BUFFER_GLC(uint32_t)                         inoutInCountsOutPrefixLookback;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                outputInclusive;
@@ -92,6 +96,7 @@ typedef struct zstdgpu_PropagateFseIndex_SRT
 {
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFseIds;
     ZSTDGPU_RW_BUFFER_GLC(uint32_t)                         inoutFseIndexLookback;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_PropagateFseIndex_SRT;
@@ -103,6 +108,7 @@ typedef struct zstdgpu_ComputePrefixSum_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutLitGroupEndPerHuffmanTable;
     ZSTDGPU_RW_BUFFER_GLC(uint32_t)                         inoutLitGroupEndPerHuffmanTableLookback;
     ZSTDGPU_RW_BUFFER(zstdgpu_Counters)                     inoutCounters;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                literalsPerGroup;
@@ -120,6 +126,7 @@ typedef struct zstdgpu_PrefixSequenceOffsets_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountAll;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inSeqStreamToBlockId;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                frameCount;
@@ -138,6 +145,7 @@ typedef struct zstdgpu_UpdateDispatchArgs_SRT
     uint32_t                                                rleBlockCountMax;
     uint32_t                                                litByteCountMax;
     uint32_t                                                seqElemCountMax;
+    uint32_t                                                executeIndirectWorkaround;
 } zstdgpu_UpdateDispatchArgs_SRT;
 
 typedef struct zstdgpu_DecompressHuffmanWeights_SRT
@@ -149,6 +157,7 @@ typedef struct zstdgpu_DecompressHuffmanWeights_SRT
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inHufRefs;
     ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)                      inFseInfos;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inFseElems;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_DecompressHuffmanWeights_SRT;
@@ -160,6 +169,7 @@ typedef struct zstdgpu_DecodeHuffmanWeights_SRT
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inCompressedData;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inHufRefs;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                compressedBufferSizeInBytes;
@@ -173,6 +183,7 @@ typedef struct zstdgpu_InitHuffmanTable_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHuffmanTableCodeAndSymbol;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHuffmanTableRankIndex;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                fseCompressed;
@@ -197,6 +208,7 @@ typedef struct zstdgpu_DecompressSequences_SRT
     ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)                      inFseInfos;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamSeqStart;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inFseElems;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_DecompressSequences_SRT;
@@ -212,6 +224,7 @@ typedef struct zstdgpu_FinaliseSequenceOffsets_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountAll;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameSeqStreamMinIdx;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inSeqStreamToBlockId;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
 } zstdgpu_FinaliseSequenceOffsets_SRT;
@@ -222,6 +235,7 @@ typedef struct zstdgpu_InitFseTable_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFseElems;
     ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)                      inFseInfos;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                tableType;
@@ -236,6 +250,7 @@ typedef struct zstdgpu_ComputeDestBlockOffsets_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockSizePrefix;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountAll;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inUnCompressedFramesRefs;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                frameCount;
@@ -267,6 +282,7 @@ typedef struct zstdgpu_MemsetMemcpy_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockSizePrefixTyped;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inBlocksRefsTyped;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inGlobalBlockIndexTyped;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                flags;
@@ -310,6 +326,7 @@ typedef struct zstdgpu_ParseCompressedBlocks_SRT
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inBlocksCMPRefs;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountCMP;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inGlobalBlockIndexPerCmpBlock;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                compressedBufferSizeInBytes;

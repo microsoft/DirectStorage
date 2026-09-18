@@ -22,6 +22,7 @@ ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInHufLitIdToLitStreamId                 
 ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutLitGroupEndPerHuffmanTable         : register(u0);
 ZSTDGPU_RW_BUFFER_GLC(uint32_t)     ZstdInOutLitGroupEndPerHuffmanTableLookback : register(u1);
 ZSTDGPU_RW_BUFFER(zstdgpu_Counters) ZstdInOutCounters                           : register(u2);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs                          : register(t2);
 
 typedef struct zstdgpu_ComputePrefixSum_Consts
 {
@@ -32,7 +33,7 @@ typedef struct zstdgpu_ComputePrefixSum_Consts
 
 ConstantBuffer<zstdgpu_ComputePrefixSum_Consts> ZstdConstants_ComputePrefixSum : register(b0);
 
-#define ZSTDGPU_SRT_RS_ComputePrefixSum "SRV(t0)" ", SRV(t1)" ", UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_ComputePrefixSum "SRV(t0)" ", SRV(t1)" ", UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", SRV(t2)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputePrefixSum_SRT) srt)
 {
@@ -41,9 +42,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputePrefixSum_SRT) s
     srt.inoutLitGroupEndPerHuffmanTable         = ZstdInOutLitGroupEndPerHuffmanTable;
     srt.inoutLitGroupEndPerHuffmanTableLookback = ZstdInOutLitGroupEndPerHuffmanTableLookback;
     srt.inoutCounters                           = ZstdInOutCounters;
+    srt.inDispatchArgs                          = ZstdInDispatchArgs;
     srt.tgOffset                                = ZstdConstants_ComputePrefixSum.tgOffset;
     srt.workItemCount                           = ZstdConstants_ComputePrefixSum.workItemCount;
     srt.literalsPerGroup                        = ZstdConstants_ComputePrefixSum.literalsPerGroup;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -58,6 +67,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_ComputePrefixSum_SRT &srt, const zstdgpu_Re
     srt.inoutLitGroupEndPerHuffmanTable         = cpuRes.LitGroupEndPerHuffmanTable;
     srt.inoutLitGroupEndPerHuffmanTableLookback = cpuRes.LitGroupEndPerHuffmanTableLookback;
     srt.inoutCounters                           = cpuRes.Counters;
+    srt.inDispatchArgs                          = cpuRes.DispatchArgs;
     srt.tgOffset                                = tgOffset;
     srt.workItemCount                           = workItemCount;
     srt.literalsPerGroup                        = literalsPerGroup;

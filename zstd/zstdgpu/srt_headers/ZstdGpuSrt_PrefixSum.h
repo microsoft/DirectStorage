@@ -19,6 +19,7 @@
 
 ZSTDGPU_RW_BUFFER(uint32_t)     ZstdInOutInCountsOutPrefix          : register(u0);
 ZSTDGPU_RW_BUFFER_GLC(uint32_t) ZstdInOutInCountsOutPrefixLookback  : register(u1);
+ZSTDGPU_RO_BUFFER(uint32_t)     ZstdInDispatchArgs                  : register(t0);
 
 typedef struct zstdgpu_PrefixSum_Consts
 {
@@ -29,15 +30,23 @@ typedef struct zstdgpu_PrefixSum_Consts
 
 ConstantBuffer<zstdgpu_PrefixSum_Consts> ZstdConstants_PrefixSum : register(b0);
 
-#define ZSTDGPU_SRT_RS_PrefixSum "UAV(u0)" ", UAV(u1)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_PrefixSum "UAV(u0)" ", UAV(u1)" ", SRV(t0)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PrefixSum_SRT) srt)
 {
     srt.inoutInCountsOutPrefix          = ZstdInOutInCountsOutPrefix;
     srt.inoutInCountsOutPrefixLookback  = ZstdInOutInCountsOutPrefixLookback;
+    srt.inDispatchArgs                  = ZstdInDispatchArgs;
     srt.tgOffset                        = ZstdConstants_PrefixSum.tgOffset;
     srt.workItemCount                   = ZstdConstants_PrefixSum.workItemCount;
     srt.outputInclusive                 = ZstdConstants_PrefixSum.outputInclusive;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -45,12 +54,14 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PrefixSum_SRT) srt)
 static void zstdgpu_Srt_Fill(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &,
                              ZSTDGPU_RW_BUFFER(uint32_t)      inoutInCountsOutPrefix,
                              ZSTDGPU_RW_BUFFER_GLC(uint32_t)  inoutInCountsOutPrefixLookback,
+                             ZSTDGPU_RO_BUFFER(uint32_t)      inDispatchArgs,
                              uint32_t                         tgOffset,
                              uint32_t                         workItemCount,
                              uint32_t                         outputInclusive)
 {
     srt.inoutInCountsOutPrefix          = inoutInCountsOutPrefix;
     srt.inoutInCountsOutPrefixLookback  = inoutInCountsOutPrefixLookback;
+    srt.inDispatchArgs                  = inDispatchArgs;
     srt.tgOffset                        = tgOffset;
     srt.workItemCount                   = workItemCount;
     srt.outputInclusive                 = outputInclusive;
@@ -58,37 +69,37 @@ static void zstdgpu_Srt_Fill(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceD
 
 static void zstdgpu_Srt_Fill_BlockCountRaw(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRAW, cpuRes.PerFrameBlockCountRAWLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRAW, cpuRes.PerFrameBlockCountRAWLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountRle(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRLE, cpuRes.PerFrameBlockCountRLELookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRLE, cpuRes.PerFrameBlockCountRLELookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountCmp(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountCMP, cpuRes.PerFrameBlockCountCMPLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountCMP, cpuRes.PerFrameBlockCountCMPLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountAll(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountAll, cpuRes.PerFrameBlockCountAllLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountAll, cpuRes.PerFrameBlockCountAllLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockSizesRaw(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RawBlockSizePrefix, cpuRes.RawBlockSizePrefixLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RawBlockSizePrefix, cpuRes.RawBlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockSizesRle(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RleBlockSizePrefix, cpuRes.RleBlockSizePrefixLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RleBlockSizePrefix, cpuRes.RleBlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 static void zstdgpu_Srt_Fill_BlockSizesAll(zstdgpu_PrefixSum_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t outputInclusive)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSizePrefix, cpuRes.BlockSizePrefixLookback, tgOffset, workItemCount, outputInclusive);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSizePrefix, cpuRes.BlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, outputInclusive);
 }
 
 #endif

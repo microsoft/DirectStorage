@@ -23,6 +23,7 @@ ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInCompressedData                
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInBlocksCMPRefs                 : register(t1);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameBlockCountCMP         : register(t2);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInGlobalBlockIndexPerCmpBlock   : register(t3);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInDispatchArgs                  : register(t4);
 
 typedef struct zstdgpu_ParseCompressedBlocks_Consts
 {
@@ -34,7 +35,7 @@ typedef struct zstdgpu_ParseCompressedBlocks_Consts
 
 ConstantBuffer<zstdgpu_ParseCompressedBlocks_Consts> ZstdConstants_ParseCompressedBlocks : register(b0);
 
-#define ZSTDGPU_SRT_RS_ParseCompressedBlocks ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=4)"
+#define ZSTDGPU_SRT_RS_ParseCompressedBlocks ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", RootConstants(b0, num32BitConstants=4)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseCompressedBlocks_SRT) srt)
 {
@@ -44,10 +45,18 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseCompressedBlocks_S
     srt.inBlocksCMPRefs                 = ZstdInBlocksCMPRefs;
     srt.inPerFrameBlockCountCMP         = ZstdInPerFrameBlockCountCMP;
     srt.inGlobalBlockIndexPerCmpBlock   = ZstdInGlobalBlockIndexPerCmpBlock;
+    srt.inDispatchArgs                  = ZstdInDispatchArgs;
     srt.tgOffset                        = ZstdConstants_ParseCompressedBlocks.tgOffset;
     srt.workItemCount                   = ZstdConstants_ParseCompressedBlocks.workItemCount;
     srt.compressedBufferSizeInBytes     = ZstdConstants_ParseCompressedBlocks.compressedBufferSizeInBytes;
     srt.frameCount                      = ZstdConstants_ParseCompressedBlocks.frameCount;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -64,6 +73,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseCompressedBlocks_SRT &srt, const zstdg
     srt.inBlocksCMPRefs                 = cpuRes.BlocksCMPRefs;
     srt.inPerFrameBlockCountCMP         = cpuRes.PerFrameBlockCountCMP;
     srt.inGlobalBlockIndexPerCmpBlock   = cpuRes.GlobalBlockIndexPerCmpBlock;
+    srt.inDispatchArgs                  = cpuRes.DispatchArgs;
     srt.tgOffset                        = tgOffset;
     srt.workItemCount                   = workItemCount;
     srt.compressedBufferSizeInBytes     = compressedBufferSizeInBytes;

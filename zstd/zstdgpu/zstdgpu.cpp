@@ -784,6 +784,7 @@ struct zstdgpu_PersistentContextImpl
     #undef ZSTDGPU_KERNEL
     uint32_t                DecompressLiterals_LdsStoreCache_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+    bool                    executeIndirectWorkaround;
 };
 
 static const uint32_t kzstdgpu_SetupFlags_InputsCpuMemory       = (1u << 0);
@@ -808,6 +809,7 @@ struct zstdgpu_PerRequestContextImpl
 
     uint32_t                DecompressLiterals_LdsStoreCache_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+    bool                    executeIndirectWorkaround;
 
     zstdgpu_Srts            srts;
     zstdgpu_ResourceDataGpu resData;
@@ -945,6 +947,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
+
+            context->executeIndirectWorkaround = (desc.DeviceId >= 0x7500);
         }
         else if (desc.VendorId == 0x10de)
         {
@@ -1083,6 +1087,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         #undef ZSTDGPU_KERNEL
         context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = persistentContext->DecompressLiterals_LdsStoreCache_StreamsPerGroup;
         context->DecompressSequences_StreamsPerGroup = persistentContext->DecompressSequences_StreamsPerGroup;
+        context->executeIndirectWorkaround = persistentContext->executeIndirectWorkaround;
 
         context->srts.heap = NULL;
         context->srts.heapOffset = 0;
@@ -2177,8 +2182,35 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequest
 
 #endif
 
+// For executeIndirectWorkaround, this is the DispatchArg buffer's after state from before state UAV.
+static const D3D12_RESOURCE_STATES D3D12_RESOURCE_STATE_INDIRECT_AND_SRV = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT |
+                                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+static void zstdgpu_DispatchExecuteIndirectWorkaround(
+    zstdgpu_PerRequestContext req,
+    ID3D12GraphicsCommandList *cmdList,
+    uint32_t srtRootConstSlot,
+    uint32_t dispatchSlot)
+{
+    // See comments in HLSL function zstdgpu_EmitDispatch for an extension to this to avoid exceeding 16 bits
+    // in the X dimension, but as those comments say, that is unnecessary.
+
+    const uint32_t data[2] = { 0, ~dispatchSlot }; // { tgOffset, encoded workItemCount }
+    cmdList->SetComputeRoot32BitConstants(srtRootConstSlot, 2, data, 0);
+
+    cmdList->ExecuteIndirect(
+        req->dispatchCmdSig, 1, // plain DispatchIndirect signature and MaxCommandCount=1
+        req->resData.gpuOnly.DispatchArgs, // args buffer
+        // The workaround does not change the layout of argument buffer, skip tgOffset and workItemCount to land in the grid dims:
+        dispatchSlot * kzstdgpu_DispatchSlot_StrideInUInt32 * sizeof(uint32_t) + 2 * sizeof(uint32_t),
+        nullptr, 0); // no indirect count
+}
+
 #define zstdgpu_DispatchIndirect(cmdList, kernelName, counterName) \
-    cmdList->ExecuteIndirect(req->kernelName##_CmdSig, kzstdgpu_DispatchSlot_CmdsPerSlot, req->resData.gpuOnly.DispatchArgs, kzstdgpu_DispatchSlot_##counterName * kzstdgpu_DispatchSlot_StrideInUInt32 * sizeof(uint32_t), req->resData.gpuOnly.DispatchCnts, kzstdgpu_DispatchSlot_##counterName * sizeof(uint32_t));
+    (req->executeIndirectWorkaround \
+        ? zstdgpu_DispatchExecuteIndirectWorkaround(req, cmdList, kzstdgpu_SrtConstsRootSlot_##kernelName, kzstdgpu_DispatchSlot_##counterName) \
+        : cmdList->ExecuteIndirect(req->kernelName##_CmdSig, kzstdgpu_DispatchSlot_CmdsPerSlot, req->resData.gpuOnly.DispatchArgs, kzstdgpu_DispatchSlot_##counterName * kzstdgpu_DispatchSlot_StrideInUInt32 * sizeof(uint32_t), req->resData.gpuOnly.DispatchCnts, kzstdgpu_DispatchSlot_##counterName * sizeof(uint32_t)) \
+    );
 
 void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
 {
@@ -2337,6 +2369,17 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
+    // executeIndirectWorkaround: The prefix sums above bind DispatchArgs as a root-SRV as its first use.
+    // UpdateDispatchArgs needs it in state UAV, otherwise the debug later will flag RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH.
+    {
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Barrier for ExecuteIndirectWorkaround]");
+        D3D12_RESOURCE_BARRIER barriers[1];
+        uint32_t bc = 0;
+        setResourceState(barriers, bc++, req->resData.gpuOnly.DispatchArgs, NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS);
+        ZSTDGPU_ASSERT(bc <= _countof(barriers));
+        cmdList->ResourceBarrier(bc, barriers);
+        PIXEndEvent(cmdList);
+    }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: Stage 0]");
         zstdgpu_Bind_UpdateDispatchArgs(cmdList, req->srts, req->resData.gpuOnly, req->DecompressSequences_StreamsPerGroup,
@@ -2345,7 +2388,8 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->zstdRawBlockCountMax,
             req->zstdRleBlockCountMax,
             /* litByteCountMax, unused for stage 0 */0,
-            /* seqElemCountMax, unused for stage 0 */0
+            /* seqElemCountMax, unused for stage 0 */0,
+            req->executeIndirectWorkaround
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage0, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -2371,7 +2415,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
             // last written by [Update Dispatch Args :: Stage 0]
             // next read by ExecuteIndirect calls as argument/count buffers
-            setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+            setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_AND_SRV);
             setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
 
             // last written by [Update Dispatch Args :: Stage 0]
@@ -2657,7 +2701,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         // last read by ExecuteIndirect as INDIRECT_ARGUMENT
         // next written by [Update Dispatch Args :: Stage 1]
-        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, INDIRECT_AND_SRV, UNORDERED_ACCESS);
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
 
         if (0 == zstdgpu_IsReadbackRequired(req, 0))
@@ -2681,7 +2725,8 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->zstdRawBlockCountMax,
             req->zstdRleBlockCountMax,
             req->zstdUncompressedLitByteCountMax,
-            req->zstdUncompressedSeqElemCountMax
+            req->zstdUncompressedSeqElemCountMax,
+            req->executeIndirectWorkaround
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage1, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -2695,7 +2740,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         uint32_t bc = 0;
         // last written by [Update Dispatch Args]
         // next read by [Propagate FSE Index] / [Compute `Per-Huffman Table` Literal Stream Count Prefix] via ExecuteIndirect
-        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_AND_SRV);
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
 
         if (0 == zstdgpu_IsReadbackRequired(req, 1))
@@ -2810,7 +2855,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavSync(barriers, 0, req->resData.gpuOnly.Counters);
         // last read by [Compute `Per-Huffman Table` Literal Stream Count Prefix] as INDIRECT_ARGUMENT
         // next written by [Update Dispatch Args :: DecompressLiterals]
-        setResourceState(barriers, 1, req->resData.gpuOnly.DispatchArgs, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
+        setResourceState(barriers, 1, req->resData.gpuOnly.DispatchArgs, INDIRECT_AND_SRV, UNORDERED_ACCESS);
         setResourceState(barriers, 2, req->resData.gpuOnly.DispatchCnts, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
         cmdList->ResourceBarrier(_countof(barriers), barriers);
         PIXEndEvent(cmdList);
@@ -2825,7 +2870,8 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->zstdRawBlockCountMax,
             req->zstdRleBlockCountMax,
             /* litByteCountMax, unused for stage == 2 */0,
-            /* seqElemCountMax, unused for stage == 2 */0
+            /* seqElemCountMax, unused for stage == 2 */0,
+            req->executeIndirectWorkaround
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_DecompressLiterals, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -2842,7 +2888,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavToSrvCopyIndirectSync(barriers, bc ++, req->resData.gpuOnly.Counters);
         // last written by [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         // next read by ExecuteIndirect calls as argument buffer
-        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_ARGUMENT);
+        setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchArgs, UNORDERED_ACCESS, INDIRECT_AND_SRV);
         // last written by [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]
         // next read by ExecuteIndirect calls as count buffer
         setResourceState(barriers, bc ++, req->resData.gpuOnly.DispatchCnts, UNORDERED_ACCESS, INDIRECT_ARGUMENT);

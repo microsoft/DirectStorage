@@ -58,56 +58,74 @@ static uint32_t zstdgpu_ConvertTo32BitGroupId(uint32_t2 groupId, uint32_t tgOffs
 }
 #endif
 
-static void zstdgpu_EmitDispatch(ZSTDGPU_RW_BUFFER(uint32_t) dispatchArgs, ZSTDGPU_RW_BUFFER(uint32_t) dispatchCnts, uint32_t slot, uint32_t elemCount, uint32_t elemsPerTGroup)
+static void zstdgpu_EmitDispatch(ZSTDGPU_RW_BUFFER(uint32_t) dispatchArgs, ZSTDGPU_RW_BUFFER(uint32_t) dispatchCnts, uint32_t slot, uint32_t elemCount, uint32_t elemsPerTGroup, bool executeIndirectWorkaround)
 {
     const uint32_t tgCount = ZSTDGPU_TG_COUNT(elemCount, elemsPerTGroup);
     const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-    // dispatch 0: no problems with # of threadgroup per dimension, support 32-bit
-    dispatchArgs[baseIdx + 0] = 0;          // tgOffset
-    dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
-    dispatchArgs[baseIdx + 2] = tgCount;
-    dispatchArgs[baseIdx + 3] = 1;
-    dispatchArgs[baseIdx + 4] = 1;
-    dispatchCnts[slot] = 1;
+    const bool writeSingleArgumentRecordOnly = true;
 #else
-    const uint32_t tgCountY = tgCount >> kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;
-    const uint32_t tgCountX = tgCount & ((1u << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2) - 1u);
+    // Part of the executeIndirectWorkaround requires MaxCommandCount=1 and avoiding an indirect count buffer.
+    // We could ensure that while still avoiding the potential to exceed a 16-bit group count in one dimension:
+    //  - Unconditionally record two plain dispatches on the command list. The second will often be empty.
+    //  - Set tgOffset directly to a special encoded value before the second dispatch that the shader checks
+    //    and fixes up, like is done for workItemCount.
+    // However, that is unnecessary because:
+    //  - GPUs/drivers that may need executeIndirectWorkaround support 32-bits in the _X_ dimension.
+    //  - The current D3D debug layer nor GBV warn about an _indirect_-dispatch exceeding 16-bits in any dimension.
+    const bool writeSingleArgumentRecordOnly = executeIndirectWorkaround;
+#endif
 
-    if (tgCountY > 0)
+    if (writeSingleArgumentRecordOnly)
     {
-        // dispatch 0: most of threadgroups are launched via 2d dispatch with the maximal possible number of threadgroups per dimension
-        dispatchArgs[baseIdx + 0] = 0;          // tgOffset
-        dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
-        dispatchArgs[baseIdx + 2] = 1u << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;
-        dispatchArgs[baseIdx + 3] = tgCountY;
-        dispatchArgs[baseIdx + 4] = 1;
-
-        // dispatch 1: the remaining threadgroups are launched via 1d dispatch
-        dispatchArgs[baseIdx + 5] = tgCountY << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;  // tgOffset
-        dispatchArgs[baseIdx + 6] = elemCount;  // workItemCount
-        dispatchArgs[baseIdx + 7] = tgCountX;
-        dispatchArgs[baseIdx + 8] = 1;
-        dispatchArgs[baseIdx + 9] = 1;
-        dispatchCnts[slot] = 2;
-    }
-    else
-    {
-        // dispatch 0: all threadgroups fit into the limit of single dimension
+        // dispatch 0: no problems with # of threadgroup per dimension, support 32-bit
         dispatchArgs[baseIdx + 0] = 0;          // tgOffset
         dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
         dispatchArgs[baseIdx + 2] = tgCount;
         dispatchArgs[baseIdx + 3] = 1;
         dispatchArgs[baseIdx + 4] = 1;
-        // dispatch 1: zeroed (unused but written)
-        dispatchArgs[baseIdx + 5] = 0;
-        dispatchArgs[baseIdx + 6] = elemCount;  // workItemCount
-        dispatchArgs[baseIdx + 7] = 0;
-        dispatchArgs[baseIdx + 8] = 1;
-        dispatchArgs[baseIdx + 9] = 1;
         dispatchCnts[slot] = 1;
     }
-#endif
+    else
+    {
+        const uint32_t tgCountY = tgCount >> kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;
+        const uint32_t tgCountX = tgCount & ((1u << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2) - 1u);
+
+        if (tgCountY > 0)
+        {
+            // dispatch 0: most of threadgroups are launched via 2d dispatch with the maximal possible number of threadgroups per dimension
+            dispatchArgs[baseIdx + 0] = 0;          // tgOffset
+            dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
+            dispatchArgs[baseIdx + 2] = 1u << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;
+            dispatchArgs[baseIdx + 3] = tgCountY;
+            dispatchArgs[baseIdx + 4] = 1;
+
+            // dispatch 1: the remaining threadgroups are launched via 1d dispatch
+            dispatchArgs[baseIdx + 5] = tgCountY << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2;  // tgOffset
+            dispatchArgs[baseIdx + 6] = elemCount;  // workItemCount
+            dispatchArgs[baseIdx + 7] = tgCountX;
+            dispatchArgs[baseIdx + 8] = 1;
+            dispatchArgs[baseIdx + 9] = 1;
+            dispatchCnts[slot] = 2;
+        }
+        else
+        {
+            // dispatch 0: all threadgroups fit into the limit of single dimension
+            dispatchArgs[baseIdx + 0] = 0;          // tgOffset
+            dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
+            dispatchArgs[baseIdx + 2] = tgCount;
+            dispatchArgs[baseIdx + 3] = 1;
+            dispatchArgs[baseIdx + 4] = 1;
+            // dispatch 1: zeroed (unused but written)
+            dispatchArgs[baseIdx + 5] = 0;
+            dispatchArgs[baseIdx + 6] = elemCount;  // workItemCount
+            dispatchArgs[baseIdx + 7] = 0;
+            dispatchArgs[baseIdx + 8] = 1;
+            dispatchArgs[baseIdx + 9] = 1;
+            dispatchCnts[slot] = 1;
+        }
+    }
 }
 
 static uint32_t zstdgpu_GlobalExclusivePrefixSum(ZSTDGPU_RW_BUFFER_GLC(uint32_t) lookback,

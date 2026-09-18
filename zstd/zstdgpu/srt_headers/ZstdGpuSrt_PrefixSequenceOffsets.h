@@ -27,6 +27,7 @@ ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMinIdx               
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameBlockCountAll                 : register(t1);
 ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInSeqStreamToBlockId                    : register(t2);
 ZSTDGPU_RO_BUFFER(zstdgpu_Counters) ZstdInCounters                              : register(t3);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs                          : register(t4);
 
 typedef struct zstdgpu_PrefixSequenceOffsets_Consts
 {
@@ -37,7 +38,7 @@ typedef struct zstdgpu_PrefixSequenceOffsets_Consts
 
 ConstantBuffer<zstdgpu_PrefixSequenceOffsets_Consts> ZstdConstants_PrefixSequenceOffsets : register(b0);
 
-#define ZSTDGPU_SRT_RS_PrefixSequenceOffsets "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", UAV(u4)" ", UAV(u5)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_PrefixSequenceOffsets "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", UAV(u4)" ", UAV(u5)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PrefixSequenceOffsets_SRT) srt)
 {
@@ -51,9 +52,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PrefixSequenceOffsets_S
     srt.inPerFrameBlockCountAll                 = ZstdInPerFrameBlockCountAll;
     srt.inSeqStreamToBlockId                    = ZstdInSeqStreamToBlockId;
     srt.inCounters                              = ZstdInCounters;
+    srt.inDispatchArgs                          = ZstdInDispatchArgs;
     srt.tgOffset                                = ZstdConstants_PrefixSequenceOffsets.tgOffset;
     srt.workItemCount                           = ZstdConstants_PrefixSequenceOffsets.workItemCount;
     srt.frameCount                              = ZstdConstants_PrefixSequenceOffsets.frameCount;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -73,6 +82,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_PrefixSequenceOffsets_SRT &srt, const zstdg
     srt.inPerFrameBlockCountAll                 = cpuRes.PerFrameBlockCountAll;
     srt.inSeqStreamToBlockId                    = cpuRes.SeqStreamToBlockId;
     srt.inCounters                              = cpuRes.Counters;
+    srt.inDispatchArgs                          = cpuRes.DispatchArgs;
     srt.tgOffset                                = tgOffset;
     srt.workItemCount                           = workItemCount;
     srt.frameCount                              = frameCount;
