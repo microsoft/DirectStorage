@@ -484,6 +484,10 @@ typedef struct uint32_t4
 {
     uint32_t x, y, z, w;
 } uint32_t4;
+typedef struct uint32_t2
+{
+    uint32_t x, y;
+} uint32_t2;
 static inline void GroupMemoryBarrierWithGroupSync(void) { }
 static inline void DeviceMemoryBarrierWithGroupSync(void) { }
 static inline bool WaveIsFirstLane(void) { return true; }

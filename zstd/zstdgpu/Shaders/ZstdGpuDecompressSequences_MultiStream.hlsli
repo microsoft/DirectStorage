@@ -23,6 +23,11 @@
 #   error 'kzstdgpu_DecompressSequences_StreamsPerTG' must be defined before including this '.hlsli'
 #endif
 
+// SEQ_CODE_INFO_USE_LDS does seem to improve performance a bit on RDNA3, even when overlapping
+// DecompressLiterals_LdsStoreCache, but perhaps not enough to warrant using LDS since
+// there may be non-Zstd work on the GPU, and also to make it easy to remove the SEQ_CODE_INFO_USE_LDS
+// implementation if it definitely isn't wanted.
+/// #define SEQ_CODE_INFO_USE_LDS 1
 #include "../zstdgpu_shaders.h"
 
 #include "../srt_headers/ZstdGpuSrt_DecompressSequences.h"
