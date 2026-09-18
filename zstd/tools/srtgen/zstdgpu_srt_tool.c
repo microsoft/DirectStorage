@@ -935,7 +935,22 @@ static void emitHLSLResourceAssignment(StrBuilder *b, const Entry *e, int c, con
     else
     {
         for (int i = 0; i < c; ++i)
-            sb_Fmt(b, "    srt.%-*s= %s.%s;\n", memberTextLen, nameToCStr(e[i].memberText), structName, nameToCStr(e[i].name));
+        {
+            if (kNameIdEmpty != e[i].asfx)
+            {
+                /* Aliased view: the CPU resource pointer keeps the resource's own element
+                 * type (e.g. uint8_t*), but this bind entry re-interprets the same buffer
+                 * under its own type (e.g. uint32_t*). Emit an explicit reinterpret cast so
+                 * the C++ emulation build compiles; the HLSL path binds a distinct typed
+                 * view of the same underlying resource. */
+                sb_Fmt(b, "    srt.%-*s= (%s%s *)%s.%s;\n", memberTextLen, nameToCStr(e[i].memberText),
+                       (kAccessRO == e[i].access) ? "const " : "", nameToCStr(e[i].dataType), structName, nameToCStr(e[i].name));
+            }
+            else
+            {
+                sb_Fmt(b, "    srt.%-*s= %s.%s;\n", memberTextLen, nameToCStr(e[i].memberText), structName, nameToCStr(e[i].name));
+            }
+        }
     }
 }
 

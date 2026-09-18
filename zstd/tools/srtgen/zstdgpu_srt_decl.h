@@ -163,6 +163,7 @@ ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(InitHuffmanTableAndDecompressLiterals, Indirect)
     ZSTDGPU_SRT_USE_BIND_GROUP(LiteralStreams)
+    ZSTDGPU_SRT_USE_BIND_GROUP(LiteralDwords)
     ZSTDGPU_SRT_USE_BIND_GROUP(HuffmanWeights)
 
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )

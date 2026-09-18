@@ -2736,9 +2736,21 @@ static void zstdgpu_PreInitHuffmanTableToLds(ZSTDGPU_RO_TYPED_BUFFER(uint32_t, u
 ZSTDGPU_INIT_HUFFMAN_TABLE_LDS(0, InitHuffmanTable);
 #include "zstdgpu_lds_decl_undef.h"
 
+// When set, Huffman-decompressed literals are written with DWORD-coalesced stores
+// (head/tail bytes handled individually, the dword-aligned interior written as packed
+// 32-bit stores of 4 symbols each) instead of per-byte stores. This recovers store
+// bandwidth on GPU-bound (occupancy-limited) parts without any extra LDS. The decode
+// order -- and therefore the byte value written at every output offset -- is identical
+// to the per-byte path, so the output is bit-for-bit unchanged. Requires the
+// LiteralDwords SRT view (a u32 raw alias of the DecompressedLiterals buffer).
+#ifndef ZSTDGPU_COALESCE_LITERAL_STORES
+#define ZSTDGPU_COALESCE_LITERAL_STORES 1
+#endif
+
 static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
                                                                ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                                ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
+                                                               ZSTDGPU_RW_BUFFER(uint32_t) DecompressedLiteralsAsDwords,
                                                                ZSTDGPU_PARAM_LDS_IN(uint32_t) GS_HuffmanTable,
                                                                uint32_t groupId,
                                                                uint32_t threadId,
@@ -2912,6 +2924,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         srt.inCompressedData,
         srt.inLitRefs,
         srt.inoutDecompressedLiterals,
+        srt.inoutDecompressedLiterals_Dwords,
         GS_HuffmanTable,
         groupId,
         threadId,
@@ -2938,6 +2951,7 @@ static inline void zstdgpu_SampleHuffmanSymbolAndBitcnt(ZSTDGPU_PARAM_INOUT(uint
 void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t) CompressedData,
                                                  ZSTDGPU_RO_BUFFER(zstdgpu_LitStreamInfo) LitRefs,
                                                  ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t) DecompressedLiterals,
+                                                 ZSTDGPU_RW_BUFFER(uint32_t) DecompressedLiteralsAsDwords,
                                                  ZSTDGPU_PARAM_LDS_IN(uint32_t) GS_HuffmanTable,
                                                  uint32_t groupId,
                                                  uint32_t threadId,
@@ -2958,32 +2972,76 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
         const uint32_t literalStreamId = htLiteralStart + thisGroupLiteralStart + literalIndex;
 
         zstdgpu_LitStreamInfo compressedLiteral = LitRefs[literalStreamId];
-        uint32_t decodedByteCnt = 0;
-#if 0
-        const uint32_t maxBitcntMask = (1u << bitsMax) - 1u;
-        zstdgpu_Backward_BitBuffer_V0 bitBuffer;
-        zstdgpu_Backward_BitBuffer_V0_InitWithSegment(bitBuffer, CompressedData, compressedLiteral.src);
+#if ZSTDGPU_COALESCE_LITERAL_STORES
+        const uint32_t byteAlignedEnd  = compressedLiteral.dst.offs + compressedLiteral.dst.size;
+        const uint32_t dwordAlignedEnd = zstdgpu_MaxU32(compressedLiteral.dst.offs, byteAlignedEnd & ~3u);
+        const uint32_t dwordAlignedBeg = zstdgpu_MinU32((compressedLiteral.dst.offs + 3u) & ~3u, dwordAlignedEnd);
 
-        uint32_t state = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitsMax, bitsMax);
-        for (;;)
+        zstdgpu_HuffmanStream stream;
+        zstdgpu_HuffmanStream_InitWithSegment(stream, CompressedData, compressedLiteral.src, bitsMax);
+
+        uint32_t symbol = 0;
+        uint32_t bitcnt = 0;
+        uint32_t state = 0;
+
+        // Head bytes (up to 3) before the first dword-aligned output address.
+        // See @last_peek / lane-fetch-accumulation notes in zstdgpu_HuffmanStream: a fetch loads 64 bits
+        // and each decode consumes <= 11, so at most one zstdgpu_HuffmanStream_ConditionalFetch is needed
+        // per 4 zstdgpu_HuffmanStream_GetFromFetched.
+        uint32_t byteCursor = compressedLiteral.dst.offs;
+        ZSTDGPU_LOOP while (byteCursor < dwordAlignedBeg)
         {
-            uint32_t symbol = 0;
-            uint32_t bitcnt = 0;
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            zstdgpu_TypedStoreU8(DecompressedLiterals, byteCursor ++, symbol);
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+            zstdgpu_HuffmanStream_ConditionalFetch(stream);
+        }
 
-            // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
-            // and then to memory. At least try small LDS cache of 32-dwords per literal
-            zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
+        // Interior: whole dwords (4 decoded symbols each) written as coalesced 32-bit stores
+        uint32_t dwordIdx = dwordAlignedBeg >> 2;
+        const uint32_t dwordIdxEnd = dwordAlignedEnd >> 2;
+        ZSTDGPU_LOOP for (; dwordIdx < dwordIdxEnd; ++dwordIdx)
+        {
+            uint32_t dword = 0;
 
-            if (decodedByteCnt == compressedLiteral.dst.size)
-            {
-                break;
-            }
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            dword |= symbol;
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
 
-            const uint32_t rest = zstdgpu_Backward_BitBuffer_V0_Get_Huffman(bitBuffer, bitcnt, bitsMax);
-            state = ((state << bitcnt) + rest) & maxBitcntMask;
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            dword |= symbol << 8;
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            dword |= symbol << 16;
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_HuffmanStream_ConditionalFetch(stream); // place to maximize instructions overlapping the fetch
+            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            dword |= symbol << 24;
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+
+            DecompressedLiteralsAsDwords[dwordIdx] = dword;
+        }
+
+        // Tail bytes (up to 3) after the last dword-aligned output address
+        byteCursor = dwordAlignedEnd;
+        ZSTDGPU_LOOP while (byteCursor < byteAlignedEnd)
+        {
+            state = zstdgpu_HuffmanStream_GetFromFetched(stream);
+            zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
+            zstdgpu_TypedStoreU8(DecompressedLiterals, byteCursor ++, symbol);
+            zstdgpu_HuffmanStream_Consume(stream, bitcnt);
+            zstdgpu_HuffmanStream_ConditionalFetch(stream);
         }
 #else
+        ZSTDGPU_UNUSED(DecompressedLiteralsAsDwords);
+        uint32_t decodedByteCnt = 0;
         zstdgpu_HuffmanStream stream;
         zstdgpu_HuffmanStream_InitWithSegment(stream, CompressedData, compressedLiteral.src, bitsMax);
         do
@@ -2993,10 +3051,7 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
             uint32_t symbol = 0;
             uint32_t bitcnt = 0;
             zstdgpu_SampleHuffmanSymbolAndBitcnt(symbol, bitcnt, state, GS_HuffmanTable);
-            // FIXME/TODO(pamartis): Experiment with storing data to LDS first (we have some allocated but unused)
-            // and then to memory. At least try small LDS cache of 32-dwords per literal
             zstdgpu_TypedStoreU8(DecompressedLiterals, compressedLiteral.dst.offs + decodedByteCnt++, symbol);
-            // It could make sense to mid-break on (decodedByteCnt == compressedLiteral.dst.size) instead.
             zstdgpu_HuffmanStream_Consume(stream, bitcnt);
         } while (decodedByteCnt < compressedLiteral.dst.size);
 #endif

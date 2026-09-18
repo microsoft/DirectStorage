@@ -95,7 +95,7 @@ enum
  */
 static const uint32_t kzstdgpu_SrtConstsRootSlot_ParseFrames              = 1;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_Memset                   = 2;
-static const uint32_t kzstdgpu_SrtConstsRootSlot_InitHuffmanTableAndDecompressLiterals = 3;
+static const uint32_t kzstdgpu_SrtConstsRootSlot_InitHuffmanTableAndDecompressLiterals = 4;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_PrefixSum                = 3;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_PropagateFseIndex        = 3;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_ComputePrefixSum         = 6;
@@ -850,8 +850,9 @@ static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12Grap
     d3d12aid_ComputeRsPs_Set(&srts.InitHuffmanTableAndDecompressLiterals, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
     cmdList->SetComputeRootDescriptorTable(0 /* LiteralStreams */, srts.stage2.LiteralStreams);
-    cmdList->SetComputeRootDescriptorTable(1 /* HuffmanWeights */, srts.stage2.HuffmanWeights);
-    cmdList->SetComputeRootShaderResourceView(2 /* DispatchArgs */, b.DispatchArgs->GetGPUVirtualAddress());
+    cmdList->SetComputeRootDescriptorTable(1 /* LiteralDwords */, srts.stage2.LiteralDwords);
+    cmdList->SetComputeRootDescriptorTable(2 /* HuffmanWeights */, srts.stage2.HuffmanWeights);
+    cmdList->SetComputeRootShaderResourceView(3 /* DispatchArgs */, b.DispatchArgs->GetGPUVirtualAddress());
 }
 
 static void zstdgpu_Bind_ComputePrefixSum(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t literalsPerGroup)

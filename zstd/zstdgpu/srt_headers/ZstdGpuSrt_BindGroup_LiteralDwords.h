@@ -32,7 +32,7 @@ static void zstdgpu_Srt_FillBindGroup_LiteralDwords(ZSTDGPU_PARAM_INOUT(T) srt)
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_LiteralDwords(T &srt, const zstdgpu_ResourceDataCpu &cpuRes)
 {
-    srt.inoutDecompressedLiterals_Dwords    = cpuRes.DecompressedLiterals;
+    srt.inoutDecompressedLiterals_Dwords    = (uint32_t *)cpuRes.DecompressedLiterals;
 }
 
 #endif /* #ifdef __hlsl_dx_compiler */
