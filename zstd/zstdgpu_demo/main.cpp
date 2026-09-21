@@ -535,7 +535,7 @@ static uint32_t zstdgpu_HufLitStreamCountToGroupCount(zstdgpu_ResourceDataCpu & 
                                              : hufLitStreamCountTotal;
             hufLitStreamCount = hufLitStreamEnd - hufLitStreamStart;
         }
-        const uint32_t groupCount = hufLitStreamCount; // streamsPerGroup == 1 on CPU
+        const uint32_t groupCount = ZSTDGPU_TG_COUNT(hufLitStreamCount, kzstdgpu_StreamsPerGroup_DecompressLiterals);
         groupPrefix += groupCount;
         zstdCpu.LitGroupEndPerHuffmanTable[i] = groupPrefix;
     }
@@ -564,15 +564,16 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
         zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
+        zstdgpu_Srt_FillBindGroup_LiteralDwords(srt, cpuRes);
         const uint32_t htSlotCount = gpuReadbackRes.Counters->Blocks_CMP;
         const uint32_t hufLitCount = gpuReadbackRes.Counters->HufLit;
         const uint32_t hufLitStreamCountTotal = gpuReadbackRes.Counters->HUF_Streams;
 
         uint32_t *tmpLitGroupEndPerHuffmanTable = gpuReadbackRes.LitGroupEndPerHuffmanTable;
 
-        // NOTE(pamartis): Because we need to re-run [Decompress Literals] on CPU with tgSize == 1,
-        // we need to recompute `srt.inLitGroupEndPerHuffmanTable`, so we re-use cpuRes buffer to  replace GPU buffer
-        // temporally
+        // CPU replay uses the default shader stride, independently of the device's variant.
+        // Recompute its group boundaries rather than reusing the GPU's prefixes.
+        // CPU emulation still uses tgSize == 1, but processes every stream in each group.
         gpuReadbackRes.LitGroupEndPerHuffmanTable = cpuRes.LitGroupEndPerHuffmanTable;
         const uint32_t groupCount = zstdgpu_HufLitStreamCountToGroupCount(gpuReadbackRes, hufLitCount, hufLitStreamCountTotal, htSlotCount);
 

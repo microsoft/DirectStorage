@@ -77,6 +77,7 @@ ZSTDGPU_WARN_POP_MSVC()
 #include "ZstdGpuFinaliseSequenceOffsets.h"
 #include "ZstdGpuInitFseTable.h"
 #include "ZstdGpuInitHuffmanTableAndDecompressLiterals.h"
+#include "ZstdGpuInitHuffmanTableAndDecompressLiterals_AMD.h"
 #include "ZstdGpuInitResources.h"
 #include "ZstdGpuMemset.h"
 #include "ZstdGpuMemsetMemcpy.h"
@@ -599,6 +600,7 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     ZSTDGPU_KERNEL(FinaliseSequenceOffsets                          ,   L"Finalise Sequence Offsets")                                           \
     ZSTDGPU_KERNEL(InitFseTable                                     ,   L"Init Fse Table")                                                      \
     ZSTDGPU_KERNEL(InitHuffmanTableAndDecompressLiterals            ,   L"Init Huffman Table and Decompress Literals")                          \
+    ZSTDGPU_KERNEL(InitHuffmanTableAndDecompressLiterals_AMD        ,   L"Init Huffman Table and Decompress Literals (AMD Stream Density)")     \
     ZSTDGPU_KERNEL(InitResources                                    ,   L"Init Resources")                                                      \
     ZSTDGPU_KERNEL(Memset                                           ,   L"Memset")                                                              \
     ZSTDGPU_KERNEL(MemsetMemcpy                                     ,   L"Memset-Memcpy")                                                       \
@@ -757,6 +759,7 @@ struct zstdgpu_PersistentContextImpl
     #define ZSTDGPU_KERNEL(name) d3d12aid_ComputeRsPs name;
         ZSTDGPU_RUNTIME_KERNEL_LIST()
     #undef ZSTDGPU_KERNEL
+    uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
     bool                    executeIndirectWorkaround;
 };
@@ -781,6 +784,7 @@ struct zstdgpu_PerRequestContextImpl
         ZSTDGPU_DISPATCH32_CMD_SIG_LIST()
     #undef ZSTDGPU_DISPATCH32_CMD_SIG
 
+    uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
     bool                    executeIndirectWorkaround;
 
@@ -889,6 +893,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             ZSTDGPU_RUNTIME_KERNEL_LIST_SPECIALISED()
         #undef ZSTDGPU_KERNEL
 
+        context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
+
 #if defined(_GAMING_XBOX_SCARLETT)
         ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_LdsFseCache32);
         context->DecompressSequences_StreamsPerGroup = 1;
@@ -912,6 +918,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
 
         if (desc.VendorId == 0x1002)
         {
+            ZSTDGPU_KERNEL_MAP(InitHuffmanTableAndDecompressLiterals, InitHuffmanTableAndDecompressLiterals_AMD);
+            context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD;
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
@@ -1046,6 +1054,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
             context->srts.name.ps->AddRef();
             ZSTDGPU_RUNTIME_KERNEL_LIST()
         #undef ZSTDGPU_KERNEL
+        context->DecompressLiterals_StreamsPerGroup = persistentContext->DecompressLiterals_StreamsPerGroup;
         context->DecompressSequences_StreamsPerGroup = persistentContext->DecompressSequences_StreamsPerGroup;
         context->executeIndirectWorkaround = persistentContext->executeIndirectWorkaround;
 
@@ -2789,10 +2798,8 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute `Per-Huffman Table` Literal Stream Count Prefix]");
 
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
-        // NOTE(pamartis): The fused [Init Huffman Table and Decompress Literals] kernel decodes
-        // kzstdgpu_TgSizeX_DecompressLiterals streams per group, so the per-Huffman-table group
-        // boundaries and dispatch group count must be laid out with the same stride.
-        const uint32_t literalsPerGroup = kzstdgpu_TgSizeX_DecompressLiterals;
+        // Prefix boundaries must use the stride of the selected literal shader variant.
+        const uint32_t literalsPerGroup = req->DecompressLiterals_StreamsPerGroup;
         zstdgpu_Bind_ComputePrefixSum(cmdList, req->srts, req->resData.gpuOnly, literalsPerGroup);
 
         ZSTDGPU_KERNEL_SCOPE(ComputePrefixSum, cmdList,
