@@ -980,7 +980,15 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             context->DecompressLiterals_LdsStoreCache_StreamsPerGroup = 16;
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
-            ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences32);
+            // Copy strides use WaveGetLaneCount(), so the group must cover the hardware wave.
+            if (featureOptions1.WaveLaneCountMax == 64)
+            {
+                ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
+            }
+            else
+            {
+                ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences32);
+            }
         }
 #endif
         #undef ZSTDGPU_KERNEL_GET
