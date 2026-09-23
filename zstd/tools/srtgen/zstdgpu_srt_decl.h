@@ -369,19 +369,6 @@ ZSTDGPU_SRT_BEGIN(ExecuteSequences, Direct)
     ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_CompressedBlockData   , CompressedBlocks              )
 ZSTDGPU_SRT_END()
 
-ZSTDGPU_SRT_BEGIN(ComputeDestSequenceOffsets, Direct)
-    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , DestSequenceOffsets           )
-
-    ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_Counters              , Counters                      )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , BlockDestOffs                 )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , DecompressedSequenceMLen      )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , PerSeqStreamSeqStart          )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , SeqStreamToBlockId            )
-
-    ZSTDGPU_SRT_CONST(uint32_t                              , tgOffset                      )
-    ZSTDGPU_SRT_CONST(uint32_t                              , workItemCount                 )
-ZSTDGPU_SRT_END()
-
 ZSTDGPU_SRT_BEGIN(MemsetMemcpy, Indirect)
     ZSTDGPU_SRT_USE_BIND_GROUP(FrameOutput)
 
