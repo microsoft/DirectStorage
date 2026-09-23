@@ -1303,7 +1303,7 @@ static void emitConstsRootSlots(StrBuilder *b)
         {
             sb_StrLitEoL(b, "/**\n"
                             " * Root parameter index of an SRT's constants block bound that must be set by Indirect arguments\n"
-                            " * Pass this to ZSTDGPU_DISPATCH32_CMD_SIG or zstdgpu_Dispatch32Bit instead of a hand-written number.\n"
+                            " * Pass this to ZSTDGPU_DISPATCH32_CMD_SIG instead of a hand-written number.\n"
                             " */");
             emitted = 1;
         }
