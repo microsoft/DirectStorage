@@ -438,17 +438,24 @@ static const uint32_t kzstdgpu_TgSizeX_DecompressSequences = 128;
 // The fused kernel uses the full threadgroup for Huffman table construction.
 // Literal-stream grouping is controlled independently below.
 #if defined(_GAMING_XBOX_XBOXONE) || defined(__XBOX_ONE)
-static const uitn32_t kzstdgpu_TgSizeX_DecompressLiterals = 64;
+static const uint32_t kzstdgpu_TgSizeX_DecompressLiterals = 64;
 #else
 static const uint32_t kzstdgpu_TgSizeX_DecompressLiterals = 32;
 #endif
 
-// AMD's smaller PC stream groups trade table builds for independently schedulable groups.
-// Console geometry is unchanged.
+// The AMD stream-density literal variant only differs from the default kernel on PC. On
+// consoles the default kernel already targets the single known AMD architecture, so the
+// variant is not built there -- it would be byte-identical to the default. This macro gates
+// both the extra compiled shader and its C++ wiring.
 #if defined(_GAMING_XBOX) || defined(_GAMING_XBOX_SCARLETT) || defined(_GAMING_XBOX_XBOXONE) \
     || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD = kzstdgpu_TgSizeX_DecompressLiterals;
+#define ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT 0
 #else
+#define ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT 1
+#endif
+
+#if ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT
+// AMD's smaller PC stream groups trade table builds for independently schedulable groups.
 static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD = 16;
 #endif
 
