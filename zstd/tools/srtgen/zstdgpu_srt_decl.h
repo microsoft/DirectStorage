@@ -168,6 +168,7 @@ ZSTDGPU_SRT_BEGIN(InitHuffmanTableAndDecompressLiterals, Indirect)
 
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
+    ZSTDGPU_SRT_CONST(uint32_t                              , streamsPerGroup               )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(PrefixSum, Indirect)

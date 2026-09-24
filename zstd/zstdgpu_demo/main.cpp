@@ -561,7 +561,7 @@ static void zstdgpu_Test_DecompressLiterals(zstdgpu_ResourceDataCpu & cpuRes, zs
     {
         // NOTE(pamartis): When GPU output data is potentially broken, compute it on CPU (to debug) using same inputs as on GPU
         zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT srt;
-        zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0);
+        zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0, kzstdgpu_StreamsPerGroup_DecompressLiterals);
         srt.inCompressedData            = cpuRes.CompressedData;
         srt.inoutDecompressedLiterals   = cpuRes.DecompressedLiterals;
         zstdgpu_Srt_FillBindGroup_LiteralDwords(srt, cpuRes);
@@ -1009,7 +1009,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
         // Run Literal Decompression
         zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT srt;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */groupPrefix);
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */groupPrefix, kzstdgpu_StreamsPerGroup_DecompressLiterals);
         for (uint32_t groupId = 0; groupId < groupPrefix; ++groupId)
         {
             zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(srt, groupId, 0, 1);

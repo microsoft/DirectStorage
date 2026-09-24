@@ -63,6 +63,7 @@ typedef struct zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
+    uint32_t                                                streamsPerGroup;
 } zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT;
 
 typedef struct zstdgpu_PrefixSum_SRT

@@ -2707,6 +2707,7 @@ static inline void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BU
                                                                uint32_t htGroupStart,
                                                                uint32_t htLiteralStart,
                                                                uint32_t htLiteralCount,
+                                                               uint32_t streamsPerGroup,
                                                                uint32_t bitsMax,
                                                                uint32_t tgSize);
 
@@ -2864,6 +2865,7 @@ static void zstdgpu_ShaderEntry_InitHuffmanTable_And_DecompressLiterals(ZSTDGPU_
         htGroupStart,
         htLiteralStart,
         htLiteralCount,
+        srt.streamsPerGroup,
         bitsMax,
         tgSize
     );
@@ -2891,6 +2893,7 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
                                                  uint32_t htGroupStart,
                                                  uint32_t htLiteralStart,
                                                  uint32_t htLiteralCount,
+                                                 uint32_t streamsPerGroup,
                                                  uint32_t bitsMax,
                                                  uint32_t tgSize)
 {
@@ -2903,7 +2906,6 @@ void zstdgpu_DecompressHuffmanCompressedLiterals(ZSTDGPU_RO_RAW_BUFFER(uint32_t)
     //
     // The start of decompression of Huffman-compressed literals
     //
-    const uint32_t streamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
     const uint32_t thisGroupLiteralStart = (groupId - htGroupStart) * streamsPerGroup;
     const uint32_t thisGroupLiteralRemain = zstdgpu_MinU32(htLiteralCount - thisGroupLiteralStart, streamsPerGroup);
     ZSTDGPU_FOR_WORK_ITEMS(literalIndex, thisGroupLiteralRemain, threadId, tgSize)

@@ -77,9 +77,6 @@ ZSTDGPU_WARN_POP_MSVC()
 #include "ZstdGpuFinaliseSequenceOffsets.h"
 #include "ZstdGpuInitFseTable.h"
 #include "ZstdGpuInitHuffmanTableAndDecompressLiterals.h"
-#if ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT
-#include "ZstdGpuInitHuffmanTableAndDecompressLiterals_AMD.h"
-#endif
 #include "ZstdGpuInitResources.h"
 #include "ZstdGpuMemset.h"
 #include "ZstdGpuMemsetMemcpy.h"
@@ -578,14 +575,6 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     return zstdgpu_kSrtStageDescCount[stageIndex];
 }
 
-// The AMD stream-density literal variant is a PC-only compiled shader (see
-// ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT); it collapses to nothing in the kernel list on consoles.
-#if ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT
-#define ZSTDGPU_KERNEL_LIST_AMD_LITERAL() ZSTDGPU_KERNEL(InitHuffmanTableAndDecompressLiterals_AMD, L"Init Huffman Table and Decompress Literals (AMD Stream Density)")
-#else
-#define ZSTDGPU_KERNEL_LIST_AMD_LITERAL()
-#endif
-
 #define ZSTDGPU_KERNEL_LIST()                                                                                                           \
     ZSTDGPU_KERNEL(ComputeDestBlockOffsets                          ,   L"Compute Destination Block Offsets")                                   \
     ZSTDGPU_KERNEL(ComputePrefixSum                                 ,   L"Compute Prefix of Literal and TG Count for Literal Decompression")    \
@@ -610,7 +599,6 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     ZSTDGPU_KERNEL(FinaliseSequenceOffsets                          ,   L"Finalise Sequence Offsets")                                           \
     ZSTDGPU_KERNEL(InitFseTable                                     ,   L"Init Fse Table")                                                      \
     ZSTDGPU_KERNEL(InitHuffmanTableAndDecompressLiterals            ,   L"Init Huffman Table and Decompress Literals")                          \
-    ZSTDGPU_KERNEL_LIST_AMD_LITERAL()     \
     ZSTDGPU_KERNEL(InitResources                                    ,   L"Init Resources")                                                      \
     ZSTDGPU_KERNEL(Memset                                           ,   L"Memset")                                                              \
     ZSTDGPU_KERNEL(MemsetMemcpy                                     ,   L"Memset-Memcpy")                                                       \
@@ -928,10 +916,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
 
         if (desc.VendorId == 0x1002)
         {
-#if ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT
-            ZSTDGPU_KERNEL_MAP(InitHuffmanTableAndDecompressLiterals, InitHuffmanTableAndDecompressLiterals_AMD);
+            // The fused literal kernel decodes fewer streams per group on AMD PC parts; the
+            // width is a runtime root constant, so no per-vendor shader variant is needed.
             context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD;
-#endif
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
@@ -2991,7 +2978,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decompress Literals]");
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
-        zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(cmdList, req->srts, req->resData.gpuOnly);
+        zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(cmdList, req->srts, req->resData.gpuOnly, req->DecompressLiterals_StreamsPerGroup);
         ZSTDGPU_KERNEL_SCOPE(DecompressLiterals, cmdList,
             zstdgpu_DispatchIndirect(cmdList, InitHuffmanTableAndDecompressLiterals, DecompressLiterals);
         );

@@ -443,27 +443,19 @@ static const uint32_t kzstdgpu_TgSizeX_DecompressLiterals = 64;
 static const uint32_t kzstdgpu_TgSizeX_DecompressLiterals = 32;
 #endif
 
-// The AMD stream-density literal variant only differs from the default kernel on PC. On
-// consoles the default kernel already targets the single known AMD architecture, so the
-// variant is not built there -- it would be byte-identical to the default. This macro gates
-// both the extra compiled shader and its C++ wiring.
+// The fused kernel runs the full threadgroup for Huffman-table construction. The number of
+// literal streams each group then decodes ("streams per group") is passed to the shader as a
+// runtime root constant, so a single compiled kernel serves every GPU. AMD PC parts decode
+// fewer streams per group (more independently schedulable groups); every other target uses
+// the full threadgroup width. Consoles target the single known AMD architecture already
+// handled by the default width.
 #if defined(_GAMING_XBOX) || defined(_GAMING_XBOX_SCARLETT) || defined(_GAMING_XBOX_XBOXONE) \
     || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
-#define ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT 0
+static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD = kzstdgpu_TgSizeX_DecompressLiterals;
 #else
-#define ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT 1
-#endif
-
-#if ZSTDGPU_ENABLE_AMD_LITERAL_VARIANT
-// AMD's smaller PC stream groups trade table builds for independently schedulable groups.
 static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD = 16;
 #endif
-
-#if defined(ZSTDGPU_AMD_LITERAL_STREAM_DENSITY)
-static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals = kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD;
-#else
-static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals = kzstdgpu_TgSizeX_DecompressLiterals;
-#endif
+static const uint32_t kzstdgpu_StreamsPerGroup_DecompressLiterals     = kzstdgpu_TgSizeX_DecompressLiterals;
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_TgSizeX_FinaliseSequenceOffsets = 64;

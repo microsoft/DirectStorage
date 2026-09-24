@@ -845,7 +845,7 @@ static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, countBlocksOnly, 2 /* countBlocksOnly */);
 }
 
-static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b)
+static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t streamsPerGroup)
 {
     d3d12aid_ComputeRsPs_Set(&srts.InitHuffmanTableAndDecompressLiterals, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -853,6 +853,7 @@ static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12Grap
     cmdList->SetComputeRootDescriptorTable(1 /* LiteralDwords */, srts.stage2.LiteralDwords);
     cmdList->SetComputeRootDescriptorTable(2 /* HuffmanWeights */, srts.stage2.HuffmanWeights);
     cmdList->SetComputeRootShaderResourceView(3 /* DispatchArgs */, b.DispatchArgs->GetGPUVirtualAddress());
+    cmdList->SetComputeRoot32BitConstant(4 /* Consts */, streamsPerGroup, 2 /* streamsPerGroup */);
 }
 
 static void zstdgpu_Bind_ComputePrefixSum(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t literalsPerGroup)
