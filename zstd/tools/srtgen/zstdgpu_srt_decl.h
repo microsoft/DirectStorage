@@ -251,6 +251,7 @@ ZSTDGPU_SRT_BEGIN(UpdateDispatchArgs, Direct)
     ZSTDGPU_SRT_CONST(uint32_t                              , rleBlockCountMax              )
     ZSTDGPU_SRT_CONST(uint32_t                              , litByteCountMax               )
     ZSTDGPU_SRT_CONST(uint32_t                              , seqElemCountMax               )
+    ZSTDGPU_SRT_CONST(uint32_t                              , executeIndirectWorkaround     )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(DecompressHuffmanWeights, Indirect)

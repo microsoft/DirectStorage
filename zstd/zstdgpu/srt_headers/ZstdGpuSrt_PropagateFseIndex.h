@@ -19,6 +19,7 @@
 
 ZSTDGPU_RW_BUFFER(uint32_t)     ZstdInOutFseIds             : register(u0);
 ZSTDGPU_RW_BUFFER_GLC(uint32_t) ZstdInOutFseIndexLookback   : register(u1);
+ZSTDGPU_RO_BUFFER(uint32_t)     ZstdInDispatchArgs          : register(t0);
 
 typedef struct zstdgpu_PropagateFseIndex_Consts
 {
@@ -28,14 +29,22 @@ typedef struct zstdgpu_PropagateFseIndex_Consts
 
 ConstantBuffer<zstdgpu_PropagateFseIndex_Consts> ZstdConstants_PropagateFseIndex : register(b0);
 
-#define ZSTDGPU_SRT_RS_PropagateFseIndex "UAV(u0)" ", UAV(u1)" ", RootConstants(b0, num32BitConstants=2)"
+#define ZSTDGPU_SRT_RS_PropagateFseIndex "UAV(u0)" ", UAV(u1)" ", SRV(t0)" ", RootConstants(b0, num32BitConstants=2)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PropagateFseIndex_SRT) srt)
 {
     srt.inoutFseIds             = ZstdInOutFseIds;
     srt.inoutFseIndexLookback   = ZstdInOutFseIndexLookback;
+    srt.inDispatchArgs          = ZstdInDispatchArgs;
     srt.tgOffset                = ZstdConstants_PropagateFseIndex.tgOffset;
     srt.workItemCount           = ZstdConstants_PropagateFseIndex.workItemCount;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -43,28 +52,30 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_PropagateFseIndex_SRT) 
 static void zstdgpu_Srt_Fill(zstdgpu_PropagateFseIndex_SRT &srt, const zstdgpu_ResourceDataCpu &,
                              ZSTDGPU_RW_BUFFER(uint32_t)      inoutFseIds,
                              ZSTDGPU_RW_BUFFER_GLC(uint32_t)  inoutFseIndexLookback,
+                             ZSTDGPU_RO_BUFFER(uint32_t)      inDispatchArgs,
                              uint32_t                         tgOffset,
                              uint32_t                         workItemCount)
 {
     srt.inoutFseIds             = inoutFseIds;
     srt.inoutFseIndexLookback   = inoutFseIndexLookback;
+    srt.inDispatchArgs          = inDispatchArgs;
     srt.tgOffset                = tgOffset;
     srt.workItemCount           = workItemCount;
 }
 
 static void zstdgpu_Srt_Fill_LLen(zstdgpu_PropagateFseIndex_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToLLenFseId, cpuRes.FseIndexLookbackLLen, tgOffset, workItemCount);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToLLenFseId, cpuRes.FseIndexLookbackLLen, cpuRes.DispatchArgs, tgOffset, workItemCount);
 }
 
 static void zstdgpu_Srt_Fill_Offs(zstdgpu_PropagateFseIndex_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToOffsFseId, cpuRes.FseIndexLookbackOffs, tgOffset, workItemCount);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToOffsFseId, cpuRes.FseIndexLookbackOffs, cpuRes.DispatchArgs, tgOffset, workItemCount);
 }
 
 static void zstdgpu_Srt_Fill_MLen(zstdgpu_PropagateFseIndex_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToMLenFseId, cpuRes.FseIndexLookbackMLen, tgOffset, workItemCount);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqStreamToMLenFseId, cpuRes.FseIndexLookbackMLen, cpuRes.DispatchArgs, tgOffset, workItemCount);
 }
 
 #endif

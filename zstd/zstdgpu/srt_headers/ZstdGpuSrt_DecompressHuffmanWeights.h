@@ -24,6 +24,7 @@ ZSTDGPU_RO_RAW_BUFFER(uint32_t)             ZstdInCompressedData    : register(t
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInHufRefs           : register(t2);
 ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)          ZstdInFseInfos          : register(t3);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInFseElems          : register(t4);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInDispatchArgs      : register(t5);
 
 typedef struct zstdgpu_DecompressHuffmanWeights_Consts
 {
@@ -33,7 +34,7 @@ typedef struct zstdgpu_DecompressHuffmanWeights_Consts
 
 ConstantBuffer<zstdgpu_DecompressHuffmanWeights_Consts> ZstdConstants_DecompressHuffmanWeights : register(b0);
 
-#define ZSTDGPU_SRT_RS_DecompressHuffmanWeights ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeightsWrite ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", RootConstants(b0, num32BitConstants=2)"
+#define ZSTDGPU_SRT_RS_DecompressHuffmanWeights ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeightsWrite ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", RootConstants(b0, num32BitConstants=2)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressHuffmanWeights_SRT) srt)
 {
@@ -44,8 +45,16 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressHuffmanWeight
     srt.inHufRefs           = ZstdInHufRefs;
     srt.inFseInfos          = ZstdInFseInfos;
     srt.inFseElems          = ZstdInFseElems;
+    srt.inDispatchArgs      = ZstdInDispatchArgs;
     srt.tgOffset            = ZstdConstants_DecompressHuffmanWeights.tgOffset;
     srt.workItemCount       = ZstdConstants_DecompressHuffmanWeights.workItemCount;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -61,6 +70,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_DecompressHuffmanWeights_SRT &srt, const zs
     srt.inHufRefs           = cpuRes.HufRefs;
     srt.inFseInfos          = cpuRes.FseInfos;
     srt.inFseElems          = cpuRes.FseElems;
+    srt.inDispatchArgs      = cpuRes.DispatchArgs;
     srt.tgOffset            = tgOffset;
     srt.workItemCount       = workItemCount;
 }

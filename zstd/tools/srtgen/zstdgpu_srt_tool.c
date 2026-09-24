@@ -458,6 +458,10 @@ static void groupEnd(void)
     g_currentGroup = -1;
 }
 
+/** forward declarations: srtEnd()/passEnd() auto-bind DispatchArgs for Indirect SRTs via these, defined further below */
+static void addBuf(uint16_t access, uint16_t kind, uint16_t glc, const char *hlslType, const char *dataType, const char *name, const char *aliasPostfix);
+static void passBind(const char *slot, const char *resource);
+
 static int checkDispatch(const char *what, const char *name, int dispatch)
 {
     if (Direct != dispatch && Indirect != dispatch)
@@ -483,6 +487,14 @@ static void srtBegin(const char *name, int dispatch)
 
 static void srtEnd(void)
 {
+    if (g_currentSrt >= 0 && Indirect == g_srts[g_currentSrt].indirect)
+    {
+        /** Every Indirect SRT needs to read the real workItemCount out of DispatchArgs when
+         *  it was invoked via the executeIndirectWorkaround path (see the fixup code emitted
+         *  in emitSrtHeader() for any SRT with a kConstIndirect const) -- so bind it here for
+         *  every Indirect SRT instead of requiring each one to declare it by hand. */
+        addBuf(kAccessRO, kKindStruct, 0, "uint32_t", "uint32_t", "DispatchArgs", "");
+    }
     g_currentSrt = -1;
 }
 
@@ -700,6 +712,13 @@ static void passEnd(void)
         Pass *pass = &g_passes[g_currentPass];
         Srt  *srt = &g_srts[pass->srtIdx];
         int   i;
+
+        if (Indirect == srt->indirect)
+        {
+            /** executeIndirectWorkaround: DispatchArgs is auto-bound for every pass of an Indirect SRT (see srtEnd()),
+             *  regardless of whether this particular pass itself dispatches Direct or Indirect. */
+            passBind("DispatchArgs", "DispatchArgs");
+        }
 
         for (i = 0; i < srt->rootBufCount; ++i)
         {
@@ -1115,6 +1134,23 @@ static void emitSrtHeader(const char *dir, int srtIdx)
     /** emit HLSL side assignment of SRT-derived structure members corresponding to constats */
     for (i = 0; i < srt->boundConstCount; ++i)
         sb_Fmt(b, "    srt.%-*s= ZstdConstants_%s.%s;\n", maxNameLen, nameToCStr(boundConsts[i].name), nameToCStr(srt->name), nameToCStr(boundConsts[i].name));
+
+    /** check if this srt has an indirect-constant */
+    for (i = 0; i < srt->constCount; ++i)
+    {
+        if (kConstIndirect == srt->consts[i].kind)
+        {
+            /** indirect const found, emit code for executeIndirectWorkaround */
+            sb_StrLitEoL(b, "    // fixup code for executeIndirectWorkaround");
+            sb_StrLitEoL(b, "    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)"); /** for practical cases, only an encoded slot has the sign bit set */
+            sb_StrLitEoL(b, "    {");
+            sb_StrLitEoL(b, "        const uint32_t slot = ~srt.workItemCount;"); /** decode slot */
+            sb_StrLitEoL(b, "        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;");
+            sb_StrLitEoL(b, "        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];"); /** skip tgOffset to load the actual workItemCount */
+            sb_StrLitEoL(b, "    }");
+            break;
+        }
+    }
 
     sb_StrLitEoL(b, "}\n\n#else\n");
 

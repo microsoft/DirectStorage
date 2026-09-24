@@ -25,6 +25,7 @@ ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockDestOffs         : regist
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockSizePrefixTyped  : register(t3);
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInBlocksRefsTyped       : register(t4);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInGlobalBlockIndexTyped : register(t5);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInDispatchArgs          : register(t6);
 
 typedef struct zstdgpu_MemsetMemcpy_Consts
 {
@@ -35,7 +36,7 @@ typedef struct zstdgpu_MemsetMemcpy_Consts
 
 ConstantBuffer<zstdgpu_MemsetMemcpy_Consts> ZstdConstants_MemsetMemcpy : register(b0);
 
-#define ZSTDGPU_SRT_RS_MemsetMemcpy ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_MemsetMemcpy ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_MemsetMemcpy_SRT) srt)
 {
@@ -47,9 +48,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_MemsetMemcpy_SRT) srt)
     srt.inBlockSizePrefixTyped  = ZstdInBlockSizePrefixTyped;
     srt.inBlocksRefsTyped       = ZstdInBlocksRefsTyped;
     srt.inGlobalBlockIndexTyped = ZstdInGlobalBlockIndexTyped;
+    srt.inDispatchArgs          = ZstdInDispatchArgs;
     srt.tgOffset                = ZstdConstants_MemsetMemcpy.tgOffset;
     srt.workItemCount           = ZstdConstants_MemsetMemcpy.workItemCount;
     srt.flags                   = ZstdConstants_MemsetMemcpy.flags;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -61,6 +70,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_MemsetMemcpy_SRT &srt, const zstdgpu_Resour
                              ZSTDGPU_RO_BUFFER(uint32_t)                  inBlockSizePrefixTyped,
                              ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)     inBlocksRefsTyped,
                              ZSTDGPU_RO_BUFFER(uint32_t)                  inGlobalBlockIndexTyped,
+                             ZSTDGPU_RO_BUFFER(uint32_t)                  inDispatchArgs,
                              uint32_t                                     tgOffset,
                              uint32_t                                     workItemCount,
                              uint32_t                                     flags)
@@ -73,6 +83,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_MemsetMemcpy_SRT &srt, const zstdgpu_Resour
     srt.inBlockSizePrefixTyped  = inBlockSizePrefixTyped;
     srt.inBlocksRefsTyped       = inBlocksRefsTyped;
     srt.inGlobalBlockIndexTyped = inGlobalBlockIndexTyped;
+    srt.inDispatchArgs          = inDispatchArgs;
     srt.tgOffset                = tgOffset;
     srt.workItemCount           = workItemCount;
     srt.flags                   = flags;
@@ -80,12 +91,12 @@ static void zstdgpu_Srt_Fill(zstdgpu_MemsetMemcpy_SRT &srt, const zstdgpu_Resour
 
 static void zstdgpu_Srt_Fill_MemcpyRAW(zstdgpu_MemsetMemcpy_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t flags)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.Counters, cpuRes.CompressedData, cpuRes.BlockDestOffs, cpuRes.RawBlockSizePrefix, cpuRes.BlocksRAWRefs, cpuRes.GlobalBlockIndexPerRawBlock, tgOffset, workItemCount, flags);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.Counters, cpuRes.CompressedData, cpuRes.BlockDestOffs, cpuRes.RawBlockSizePrefix, cpuRes.BlocksRAWRefs, cpuRes.GlobalBlockIndexPerRawBlock, cpuRes.DispatchArgs, tgOffset, workItemCount, flags);
 }
 
 static void zstdgpu_Srt_Fill_MemsetRLE(zstdgpu_MemsetMemcpy_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t flags)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.Counters, cpuRes.CompressedData, cpuRes.BlockDestOffs, cpuRes.RleBlockSizePrefix, cpuRes.BlocksRLERefs, cpuRes.GlobalBlockIndexPerRleBlock, tgOffset, workItemCount, flags);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.Counters, cpuRes.CompressedData, cpuRes.BlockDestOffs, cpuRes.RleBlockSizePrefix, cpuRes.BlocksRLERefs, cpuRes.GlobalBlockIndexPerRleBlock, cpuRes.DispatchArgs, tgOffset, workItemCount, flags);
 }
 
 #endif

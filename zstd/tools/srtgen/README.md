@@ -48,3 +48,8 @@ with `/Zc:preprocessor` (required), runs it, and overwrites the contents of
   path (it already is, via the project's `IncludePath`).
 - Build intermediates land in `zstd\tools\srtgen\.build\` and can be deleted
   freely.
+- Every `Indirect`-kind SRT automatically gets a read-only `DispatchArgs` root
+  descriptor bound to all of its passes (see `srtEnd()`/`passEnd()` in
+  `zstdgpu_srt_tool.c`) — this backs the `executeIndirectWorkaround` fixup that
+  the tool also injects into `zstdgpu_Srt_Fill()` for such SRTs. Don't declare
+  `DispatchArgs` by hand in `zstdgpu_srt_decl.h`.

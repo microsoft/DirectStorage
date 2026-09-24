@@ -31,11 +31,12 @@ typedef struct zstdgpu_UpdateDispatchArgs_Consts
     uint32_t    rleBlockCountMax;
     uint32_t    litByteCountMax;
     uint32_t    seqElemCountMax;
+    uint32_t    executeIndirectWorkaround;
 } zstdgpu_UpdateDispatchArgs_Consts;
 
 ConstantBuffer<zstdgpu_UpdateDispatchArgs_Consts> ZstdConstants_UpdateDispatchArgs : register(b0);
 
-#define ZSTDGPU_SRT_RS_UpdateDispatchArgs "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", RootConstants(b0, num32BitConstants=7)"
+#define ZSTDGPU_SRT_RS_UpdateDispatchArgs "UAV(u0)" ", UAV(u1)" ", UAV(u2)" ", UAV(u3)" ", RootConstants(b0, num32BitConstants=8)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_UpdateDispatchArgs_SRT) srt)
 {
@@ -50,6 +51,7 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_UpdateDispatchArgs_SRT)
     srt.rleBlockCountMax                    = ZstdConstants_UpdateDispatchArgs.rleBlockCountMax;
     srt.litByteCountMax                     = ZstdConstants_UpdateDispatchArgs.litByteCountMax;
     srt.seqElemCountMax                     = ZstdConstants_UpdateDispatchArgs.seqElemCountMax;
+    srt.executeIndirectWorkaround           = ZstdConstants_UpdateDispatchArgs.executeIndirectWorkaround;
 }
 
 #else
@@ -61,7 +63,8 @@ static void zstdgpu_Srt_Fill(zstdgpu_UpdateDispatchArgs_SRT &srt, const zstdgpu_
                              uint32_t     rawBlockCountMax,
                              uint32_t     rleBlockCountMax,
                              uint32_t     litByteCountMax,
-                             uint32_t     seqElemCountMax)
+                             uint32_t     seqElemCountMax,
+                             uint32_t     executeIndirectWorkaround)
 {
     srt.inoutCounters                       = cpuRes.Counters;
     srt.inoutDispatchArgs                   = cpuRes.DispatchArgs;
@@ -74,6 +77,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_UpdateDispatchArgs_SRT &srt, const zstdgpu_
     srt.rleBlockCountMax                    = rleBlockCountMax;
     srt.litByteCountMax                     = litByteCountMax;
     srt.seqElemCountMax                     = seqElemCountMax;
+    srt.executeIndirectWorkaround           = executeIndirectWorkaround;
 }
 
 #endif

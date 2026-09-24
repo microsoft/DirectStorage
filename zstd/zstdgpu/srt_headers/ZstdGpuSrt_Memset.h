@@ -17,7 +17,8 @@
 
 #ifdef __hlsl_dx_compiler
 
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDest   : register(u0);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDest       : register(u0);
+ZSTDGPU_RO_BUFFER(uint32_t) ZstdInDispatchArgs  : register(t0);
 
 typedef struct zstdgpu_Memset_Consts
 {
@@ -28,25 +29,35 @@ typedef struct zstdgpu_Memset_Consts
 
 ConstantBuffer<zstdgpu_Memset_Consts> ZstdConstants_Memset : register(b0);
 
-#define ZSTDGPU_SRT_RS_Memset "UAV(u0)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_Memset "UAV(u0)" ", SRV(t0)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_Memset_SRT) srt)
 {
     srt.inoutDest       = ZstdInOutDest;
+    srt.inDispatchArgs  = ZstdInDispatchArgs;
     srt.tgOffset        = ZstdConstants_Memset.tgOffset;
     srt.workItemCount   = ZstdConstants_Memset.workItemCount;
     srt.value           = ZstdConstants_Memset.value;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
 
 static void zstdgpu_Srt_Fill(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &,
                              ZSTDGPU_RW_BUFFER(uint32_t)  inoutDest,
+                             ZSTDGPU_RO_BUFFER(uint32_t)  inDispatchArgs,
                              uint32_t                     tgOffset,
                              uint32_t                     workItemCount,
                              uint32_t                     value)
 {
     srt.inoutDest       = inoutDest;
+    srt.inDispatchArgs  = inDispatchArgs;
     srt.tgOffset        = tgOffset;
     srt.workItemCount   = workItemCount;
     srt.value           = value;
@@ -54,102 +65,102 @@ static void zstdgpu_Srt_Fill(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceData
 
 static void zstdgpu_Srt_Fill_SeqStreamMinIdx(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameSeqStreamMinIdx, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameSeqStreamMinIdx, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountRawLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRAWLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRAWLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountRleLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRLELookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountRLELookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountCmpLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountCMPLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountCMPLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockCountAllLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountAllLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountAllLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_RawBlockSizePrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RawBlockSizePrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RawBlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_RleBlockSizePrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RleBlockSizePrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RleBlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_LitGroupEndPerHuffmanTableLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.LitGroupEndPerHuffmanTableLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.LitGroupEndPerHuffmanTableLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_PerSeqStreamFinalOffset1Lookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset1Lookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset1Lookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_PerSeqStreamFinalOffset2Lookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset2Lookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset2Lookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_PerSeqStreamFinalOffset3Lookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset3Lookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerSeqStreamFinalOffset3Lookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_SeqCountPrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqCountPrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.SeqCountPrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockSeqCountPrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSeqCountPrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSeqCountPrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_LitStreamCountPrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.LitStreamCountPrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.LitStreamCountPrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_HufLitCompactionLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.HufLitCompactionLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.HufLitCompactionLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_FseIndexLookbackLLen(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackLLen, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackLLen, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_FseIndexLookbackOffs(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackOffs, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackOffs, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_FseIndexLookbackMLen(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackMLen, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseIndexLookbackMLen, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_HufWIdToHufLitId(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.HufWIdToHufLitId, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.HufWIdToHufLitId, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 static void zstdgpu_Srt_Fill_BlockSizePrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
-    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSizePrefixLookback, tgOffset, workItemCount, value);
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.BlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
 #endif

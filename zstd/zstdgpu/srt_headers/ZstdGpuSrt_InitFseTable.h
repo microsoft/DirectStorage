@@ -22,6 +22,7 @@
 ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutFseElems   : register(u0);
 ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)  ZstdInFseInfos      : register(t0);
 ZSTDGPU_RO_BUFFER(zstdgpu_Counters) ZstdInCounters      : register(t1);
+ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInDispatchArgs  : register(t2);
 
 typedef struct zstdgpu_InitFseTable_Consts
 {
@@ -32,7 +33,7 @@ typedef struct zstdgpu_InitFseTable_Consts
 
 ConstantBuffer<zstdgpu_InitFseTable_Consts> ZstdConstants_InitFseTable : register(b0);
 
-#define ZSTDGPU_SRT_RS_InitFseTable ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead ", UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_InitFseTable ZSTDGPU_SRT_RS_BIND_GROUP_FseProbsRead ", UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_InitFseTable_SRT) srt)
 {
@@ -41,9 +42,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_InitFseTable_SRT) srt)
     srt.inoutFseElems   = ZstdInOutFseElems;
     srt.inFseInfos      = ZstdInFseInfos;
     srt.inCounters      = ZstdInCounters;
+    srt.inDispatchArgs  = ZstdInDispatchArgs;
     srt.tgOffset        = ZstdConstants_InitFseTable.tgOffset;
     srt.workItemCount   = ZstdConstants_InitFseTable.workItemCount;
     srt.tableType       = ZstdConstants_InitFseTable.tableType;
+    // fixup code for executeIndirectWorkaround
+    ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
+    {
+        const uint32_t slot = ~srt.workItemCount;
+        const uint32_t baseIdx = slot * kzstdgpu_DispatchSlot_StrideInUInt32;
+        srt.workItemCount = ZstdInDispatchArgs[baseIdx + 1];
+    }
 }
 
 #else
@@ -58,6 +67,7 @@ static void zstdgpu_Srt_Fill(zstdgpu_InitFseTable_SRT &srt, const zstdgpu_Resour
     srt.inoutFseElems   = cpuRes.FseElems;
     srt.inFseInfos      = cpuRes.FseInfos;
     srt.inCounters      = cpuRes.Counters;
+    srt.inDispatchArgs  = cpuRes.DispatchArgs;
     srt.tgOffset        = tgOffset;
     srt.workItemCount   = workItemCount;
     srt.tableType       = tableType;
