@@ -17,15 +17,15 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_SequenceOutputs "DescriptorTable(UAV(u0, space=8, numDescriptors=7))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_SequenceOutputs "DescriptorTable(UAV(u0, space=6, numDescriptors=7))"
 
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceLLen   : register(u0, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceMLen   : register(u1, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceOffs   : register(u2, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutBlockSizePrefix            : register(u3, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset1   : register(u4, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset2   : register(u5, space8);
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset3   : register(u6, space8);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceLLen   : register(u0, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceMLen   : register(u1, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedSequenceOffs   : register(u2, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutBlockSizePrefix            : register(u3, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset1   : register(u4, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset2   : register(u5, space6);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutPerSeqStreamFinalOffset3   : register(u6, space6);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_SequenceOutputs(ZSTDGPU_PARAM_INOUT(T) srt)

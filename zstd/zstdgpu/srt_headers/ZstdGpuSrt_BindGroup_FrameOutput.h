@@ -17,9 +17,9 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput "DescriptorTable(UAV(u0, space=11, numDescriptors=1))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_FrameOutput "DescriptorTable(UAV(u0, space=9, numDescriptors=1))"
 
-ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutUnCompressedFramesData : register(u0, space11);
+ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutUnCompressedFramesData : register(u0, space9);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_FrameOutput(ZSTDGPU_PARAM_INOUT(T) srt)

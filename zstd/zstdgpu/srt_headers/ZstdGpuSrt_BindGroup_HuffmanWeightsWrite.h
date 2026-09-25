@@ -17,10 +17,10 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeightsWrite "DescriptorTable(UAV(u0, space=6, numDescriptors=2))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeightsWrite "DescriptorTable(UAV(u0, space=5, numDescriptors=2))"
 
-ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutDecompressedHuffmanWeights     : register(u0, space6);
-ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutDecompressedHuffmanWeightCount : register(u1, space6);
+ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutDecompressedHuffmanWeights     : register(u0, space5);
+ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInOutDecompressedHuffmanWeightCount : register(u1, space5);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_HuffmanWeightsWrite(ZSTDGPU_PARAM_INOUT(T) srt)

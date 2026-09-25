@@ -16,6 +16,7 @@
 #define ZSTDGPU_SRT_GENERATED_InitHuffmanTableAndDecompressLiterals_H
 
 #include "ZstdGpuSrt_BindGroup_LiteralStreams.h"
+#include "ZstdGpuSrt_BindGroup_LiteralDwords.h"
 #include "ZstdGpuSrt_BindGroup_HuffmanWeights.h"
 
 #ifdef __hlsl_dx_compiler
@@ -26,20 +27,23 @@ typedef struct zstdgpu_InitHuffmanTableAndDecompressLiterals_Consts
 {
     uint32_t    tgOffset;
     uint32_t    workItemCount;
+    uint32_t    streamsPerGroup;
 } zstdgpu_InitHuffmanTableAndDecompressLiterals_Consts;
 
 ConstantBuffer<zstdgpu_InitHuffmanTableAndDecompressLiterals_Consts> ZstdConstants_InitHuffmanTableAndDecompressLiterals : register(b0);
 
-#define ZSTDGPU_SRT_RS_InitHuffmanTableAndDecompressLiterals ZSTDGPU_SRT_RS_BIND_GROUP_LiteralStreams ", " ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeights ", SRV(t0)" ", RootConstants(b0, num32BitConstants=2)"
+#define ZSTDGPU_SRT_RS_InitHuffmanTableAndDecompressLiterals ZSTDGPU_SRT_RS_BIND_GROUP_LiteralStreams ", " ZSTDGPU_SRT_RS_BIND_GROUP_LiteralDwords ", " ZSTDGPU_SRT_RS_BIND_GROUP_HuffmanWeights ", SRV(t0)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT) srt)
 {
     zstdgpu_Srt_FillBindGroup_LiteralStreams(srt);
+    zstdgpu_Srt_FillBindGroup_LiteralDwords(srt);
     zstdgpu_Srt_FillBindGroup_HuffmanWeights(srt);
 
     srt.inDispatchArgs  = ZstdInDispatchArgs;
     srt.tgOffset        = ZstdConstants_InitHuffmanTableAndDecompressLiterals.tgOffset;
     srt.workItemCount   = ZstdConstants_InitHuffmanTableAndDecompressLiterals.workItemCount;
+    srt.streamsPerGroup = ZstdConstants_InitHuffmanTableAndDecompressLiterals.streamsPerGroup;
     // fixup code for executeIndirectWorkaround
     ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
     {
@@ -53,14 +57,17 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_InitHuffmanTableAndDeco
 
 static void zstdgpu_Srt_Fill(zstdgpu_InitHuffmanTableAndDecompressLiterals_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
                              uint32_t     tgOffset,
-                             uint32_t     workItemCount)
+                             uint32_t     workItemCount,
+                             uint32_t     streamsPerGroup)
 {
     zstdgpu_Srt_FillBindGroup_LiteralStreams(srt, cpuRes);
+    zstdgpu_Srt_FillBindGroup_LiteralDwords(srt, cpuRes);
     zstdgpu_Srt_FillBindGroup_HuffmanWeights(srt, cpuRes);
 
     srt.inDispatchArgs  = cpuRes.DispatchArgs;
     srt.tgOffset        = tgOffset;
     srt.workItemCount   = workItemCount;
+    srt.streamsPerGroup = streamsPerGroup;
 }
 
 #endif

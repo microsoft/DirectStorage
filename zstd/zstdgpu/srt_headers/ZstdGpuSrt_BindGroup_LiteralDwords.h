@@ -17,9 +17,9 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_LiteralDwords "DescriptorTable(UAV(u0, space=4, numDescriptors=1))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_LiteralDwords "DescriptorTable(UAV(u0, space=3, numDescriptors=1))"
 
-ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedLiterals_Dwords    : register(u0, space4);
+ZSTDGPU_RW_BUFFER(uint32_t) ZstdInOutDecompressedLiterals_Dwords    : register(u0, space3);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_LiteralDwords(ZSTDGPU_PARAM_INOUT(T) srt)
@@ -32,7 +32,7 @@ static void zstdgpu_Srt_FillBindGroup_LiteralDwords(ZSTDGPU_PARAM_INOUT(T) srt)
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_LiteralDwords(T &srt, const zstdgpu_ResourceDataCpu &cpuRes)
 {
-    srt.inoutDecompressedLiterals_Dwords    = cpuRes.DecompressedLiterals;
+    srt.inoutDecompressedLiterals_Dwords    = (uint32_t *)cpuRes.DecompressedLiterals;
 }
 
 #endif /* #ifdef __hlsl_dx_compiler */

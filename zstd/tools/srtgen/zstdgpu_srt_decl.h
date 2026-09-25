@@ -76,12 +76,6 @@ ZSTDGPU_SRT_BIND_GROUP_BEGIN(LiteralStreams, Stage2)
     ZSTDGPU_SRT_BUF_RW_TYPED(uint32_t, uint8_t              , DecompressedLiterals          )
 ZSTDGPU_SRT_BIND_GROUP_END()
 
-ZSTDGPU_SRT_BIND_GROUP_BEGIN(HuffmanTable, Stage2)
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , HuffmanTableInfo              )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , HuffmanTableCodeAndSymbol     )
-    ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , HuffmanTableRankIndex         )
-ZSTDGPU_SRT_BIND_GROUP_END()
-
 ZSTDGPU_SRT_BIND_GROUP_BEGIN(LiteralDwords, Stage2)
     ZSTDGPU_SRT_BUF_RW_STRUCT_ALIAS(uint32_t                , DecompressedLiterals, Dwords  )
 ZSTDGPU_SRT_BIND_GROUP_END()
@@ -94,12 +88,6 @@ ZSTDGPU_SRT_BIND_GROUP_END()
 ZSTDGPU_SRT_BIND_GROUP_BEGIN(HuffmanWeightsWrite, Stage2)
     ZSTDGPU_SRT_BUF_RW_TYPED(uint32_t, uint8_t              , DecompressedHuffmanWeights    )
     ZSTDGPU_SRT_BUF_RW_TYPED(uint32_t, uint8_t              , DecompressedHuffmanWeightCount)
-ZSTDGPU_SRT_BIND_GROUP_END()
-
-ZSTDGPU_SRT_BIND_GROUP_BEGIN(HuffmanTableWrite, Stage2)
-    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , HuffmanTableInfo              )
-    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , HuffmanTableCodeAndSymbol     )
-    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , HuffmanTableRankIndex         )
 ZSTDGPU_SRT_BIND_GROUP_END()
 
 ZSTDGPU_SRT_BIND_GROUP_BEGIN(SequenceOutputs, Stage2)
@@ -173,21 +161,14 @@ ZSTDGPU_SRT_BEGIN(Memset, Indirect)
     ZSTDGPU_SRT_CONST(uint32_t                              , value                         )
 ZSTDGPU_SRT_END()
 
-ZSTDGPU_SRT_BEGIN(DecompressLiterals, Indirect)
-    ZSTDGPU_SRT_USE_BIND_GROUP(LiteralStreams)
-    ZSTDGPU_SRT_USE_BIND_GROUP(HuffmanTable)
-    ZSTDGPU_SRT_USE_BIND_GROUP(LiteralDwords)
-
-    ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
-    ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
-ZSTDGPU_SRT_END()
-
 ZSTDGPU_SRT_BEGIN(InitHuffmanTableAndDecompressLiterals, Indirect)
     ZSTDGPU_SRT_USE_BIND_GROUP(LiteralStreams)
+    ZSTDGPU_SRT_USE_BIND_GROUP(LiteralDwords)
     ZSTDGPU_SRT_USE_BIND_GROUP(HuffmanWeights)
 
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
+    ZSTDGPU_SRT_CONST(uint32_t                              , streamsPerGroup               )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(PrefixSum, Indirect)
@@ -277,17 +258,6 @@ ZSTDGPU_SRT_BEGIN(DecodeHuffmanWeights, Indirect)
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
     ZSTDGPU_SRT_CONST(uint32_t                              , compressedBufferSizeInBytes   )
-ZSTDGPU_SRT_END()
-
-ZSTDGPU_SRT_BEGIN(InitHuffmanTable, Indirect)
-    ZSTDGPU_SRT_USE_BIND_GROUP(HuffmanWeights)
-    ZSTDGPU_SRT_USE_BIND_GROUP(HuffmanTableWrite)
-
-    ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_Counters              , Counters                      )
-
-    ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
-    ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
-    ZSTDGPU_SRT_CONST(uint32_t                              , fseCompressed                 )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(DecompressSequences, Indirect)

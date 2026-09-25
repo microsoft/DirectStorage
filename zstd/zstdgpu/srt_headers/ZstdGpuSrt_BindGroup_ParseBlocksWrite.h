@@ -17,30 +17,30 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite "DescriptorTable(UAV(u0, space=13, numDescriptors=22))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite "DescriptorTable(UAV(u0, space=11, numDescriptors=22))"
 
-ZSTDGPU_RW_BUFFER(zstdgpu_Counters)             ZstdInOutCounters                       : register(u0, space13);
-ZSTDGPU_RW_BUFFER(zstdgpu_FseInfo)              ZstdInOutFseInfos                       : register(u1, space13);
-ZSTDGPU_RW_BUFFER(zstdgpu_CompressedBlockData)  ZstdInOutCompressedBlocks               : register(u2, space13);
-ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)        ZstdInOutHufRefs                        : register(u3, space13);
-ZSTDGPU_RW_BUFFER(zstdgpu_LitStreamInfo)        ZstdInOutLitRefs                        : register(u4, space13);
-ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)        ZstdInOutSeqStreamToRef                 : register(u5, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToLLenFseId           : register(u6, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToOffsFseId           : register(u7, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToMLenFseId           : register(u8, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToBlockId             : register(u9, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutBlockSizePrefix                : register(u10, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutPerFrameSeqStreamMinIdx        : register(u11, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutPerSeqStreamSeqStart           : register(u12, space13);
-ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutSeqCountPrefixLookback         : register(u13, space13);
-ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutBlockSeqCountPrefixLookback    : register(u14, space13);
-ZSTDGPU_RW_TYPED_BUFFER(int32_t, int16_t)       ZstdInOutFseProbs                       : register(u15, space13);
-ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)      ZstdInOutDecompressedHuffmanWeightCount : register(u16, space13);
-ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutLitStreamCountPrefixLookback   : register(u17, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufWIdToHufLitId               : register(u18, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToLitStreamId          : register(u19, space13);
-ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToHufWId_DBG           : register(u20, space13);
-ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutHufLitCompactionLookback       : register(u21, space13);
+ZSTDGPU_RW_BUFFER(zstdgpu_Counters)             ZstdInOutCounters                       : register(u0, space11);
+ZSTDGPU_RW_BUFFER(zstdgpu_FseInfo)              ZstdInOutFseInfos                       : register(u1, space11);
+ZSTDGPU_RW_BUFFER(zstdgpu_CompressedBlockData)  ZstdInOutCompressedBlocks               : register(u2, space11);
+ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)        ZstdInOutHufRefs                        : register(u3, space11);
+ZSTDGPU_RW_BUFFER(zstdgpu_LitStreamInfo)        ZstdInOutLitRefs                        : register(u4, space11);
+ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)        ZstdInOutSeqStreamToRef                 : register(u5, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToLLenFseId           : register(u6, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToOffsFseId           : register(u7, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToMLenFseId           : register(u8, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutSeqStreamToBlockId             : register(u9, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutBlockSizePrefix                : register(u10, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutPerFrameSeqStreamMinIdx        : register(u11, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutPerSeqStreamSeqStart           : register(u12, space11);
+ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutSeqCountPrefixLookback         : register(u13, space11);
+ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutBlockSeqCountPrefixLookback    : register(u14, space11);
+ZSTDGPU_RW_TYPED_BUFFER(int32_t, int16_t)       ZstdInOutFseProbs                       : register(u15, space11);
+ZSTDGPU_RW_TYPED_BUFFER(uint32_t, uint8_t)      ZstdInOutDecompressedHuffmanWeightCount : register(u16, space11);
+ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutLitStreamCountPrefixLookback   : register(u17, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufWIdToHufLitId               : register(u18, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToLitStreamId          : register(u19, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToHufWId_DBG           : register(u20, space11);
+ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutHufLitCompactionLookback       : register(u21, space11);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_ParseBlocksWrite(ZSTDGPU_PARAM_INOUT(T) srt)

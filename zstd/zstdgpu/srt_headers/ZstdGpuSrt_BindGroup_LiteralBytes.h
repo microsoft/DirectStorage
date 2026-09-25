@@ -17,10 +17,10 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_LiteralBytes "DescriptorTable(SRV(t0, space=9, numDescriptors=2))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_LiteralBytes "DescriptorTable(SRV(t0, space=7, numDescriptors=2))"
 
-ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInCompressedData        : register(t0, space9);
-ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInDecompressedLiterals  : register(t1, space9);
+ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInCompressedData        : register(t0, space7);
+ZSTDGPU_RO_TYPED_BUFFER(uint32_t, uint8_t)  ZstdInDecompressedLiterals  : register(t1, space7);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_LiteralBytes(ZSTDGPU_PARAM_INOUT(T) srt)
