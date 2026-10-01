@@ -95,7 +95,7 @@ static zstdgpu_ResourceInfo GZstdInfo;
 void zstdgpu_ReferenceStore_AllocateMemory(void)
 {
     zstdgpu_ResourceInfo_Stage_0_Init(&GZstdInfo, GFrameCount, GZstdDataSize, 0);
-    zstdgpu_ResourceInfo_Stage_1_Init(&GZstdInfo, GBlockCountRAW, GBlockCountRLE, GBlockCountCMP);
+    zstdgpu_ResourceInfo_Stage_1_Init(&GZstdInfo, GBlockCountRAW, GBlockCountRLE, GBlockCountCMP, /* fseArenaStreamCapacity */ 0);
     zstdgpu_ResourceInfo_Stage_2_Init(&GZstdInfo, 4 * 1024 * 1024 /*literal count*/, 4 * 1024 * 1024 /*sequence count*/, 0, 0);
 
     zstdgpu_ResourceDataCpu_InitZero(&GZstd);
@@ -778,7 +778,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
         return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
     // Validate Referred FSE Tables
-    #define VALIDATE_FSE_TABLE_CONTENT(refIdx, tstIdx, infoOfs, elemFn) \
+    #define VALIDATE_FSE_TABLE_CONTENT(refIdx, tstIdx, infoOfs, elemFn, tstElems) \
         izstdgpu_ReferenceStore_Validate_FseTable(          \
             refIdx,                                         \
             tstIdx,                                         \
@@ -788,8 +788,17 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
             ref->FseProbs,                                  \
             tst->FseProbs,                                  \
             ref->FseElems,                                  \
-            tst->FseElems                                   \
+            tstElems                                        \
         )
+
+    // With the FSE arena, sequence tables are built on the fly and never persisted, so only their
+    // seeds (FseInfos/FseProbs), which fully determine the tables, can be validated.
+#if ZSTDGPU_FSE_ARENA
+    const uint32_t *tstSeqFseElems = NULL;
+#else
+    const uint32_t *tstSeqFseElems = tst->FseElems;
+#endif
+
     for (uint32_t i = 0; i < GHufLitIndex; ++i)
     {
         if (ref->HufLitIdToHufWId_DBG[i] < GFseProbTableIndexHufW)
@@ -801,7 +810,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
 
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(ref->HufLitIdToHufWId_DBG[i],
                                                                                    tst->HufLitIdToHufWId_DBG[i],
-                                                                                   kzstdgpu_FseRleTableCount, zstdgpu_ComputeFseDataStartHufW)
+                                                                                   kzstdgpu_FseRleTableCount, zstdgpu_ComputeFseDataStartHufW,
+                                                                                   tst->FseElems)
                )
             {
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -828,19 +838,19 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
                     ref->SeqStreamToLLenFseId[refSeqStreamIdx],
                     tst->SeqStreamToLLenFseId[tstSeqStreamIdx],
-                    0, zstdgpu_ComputeFseDataStartFromFseIndexLLen))
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexLLen, tstSeqFseElems))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
                     ref->SeqStreamToOffsFseId[refSeqStreamIdx],
                     tst->SeqStreamToOffsFseId[tstSeqStreamIdx],
-                    0, zstdgpu_ComputeFseDataStartFromFseIndexOffs))
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexOffs, tstSeqFseElems))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
             if (ZSTDGPU_ENUM_CONST(Validate_Success) != VALIDATE_FSE_TABLE_CONTENT(
                     ref->SeqStreamToMLenFseId[refSeqStreamIdx],
                     tst->SeqStreamToMLenFseId[tstSeqStreamIdx],
-                    0, zstdgpu_ComputeFseDataStartFromFseIndexMLen))
+                    0, zstdgpu_ComputeFseDataStartFromFseIndexMLen, tstSeqFseElems))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
 

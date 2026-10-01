@@ -762,6 +762,7 @@ struct zstdgpu_PersistentContextImpl
     #undef ZSTDGPU_KERNEL
     uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+    uint32_t                DecompressSequences_FseArenaStreamCapacity;
     bool                    executeIndirectWorkaround;
 };
 
@@ -775,6 +776,15 @@ static const uint32_t kzstdgpu_SetupFlags_InputsMask = kzstdgpu_SetupFlags_Input
 
 static uint32_t zstdgpu_HasFlag(uint32_t flags, uint32_t flag) { return (flags & flag) != 0; }
 
+// Sizes the FSE arena so that [Decompress Sequences] groups rarely wait for a slot. One slot per 16 lanes
+// (8 per 128-lane NVIDIA SM) exceeds the groups the kernel's LDS footprint lets reside on the GPU at once.
+// The floor only guards adapters reporting few lanes; a batch below the capacity sizes the arena to its own blocks.
+static uint32_t zstdgpu_ComputeFseArenaStreamCapacity(uint32_t totalLaneCount, uint32_t streamsPerGroup)
+{
+    const uint32_t streamCount = zstdgpu_AlignUp((totalLaneCount / 16u) * streamsPerGroup, kzstdgpu_FseArena_StreamAlign);
+    return zstdgpu_MaxU32(streamCount, kzstdgpu_FseArena_MinStreamCapacity);
+}
+
 struct zstdgpu_PerRequestContextImpl
 {
     void                    *thisMemoryBlock;
@@ -787,6 +797,7 @@ struct zstdgpu_PerRequestContextImpl
 
     uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+    uint32_t                DecompressSequences_FseArenaStreamCapacity;
     bool                    executeIndirectWorkaround;
 
     zstdgpu_Srts            srts;
@@ -895,6 +906,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         #undef ZSTDGPU_KERNEL
 
         context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
+        context->DecompressSequences_FseArenaStreamCapacity = 0;
 
 #if defined(_GAMING_XBOX_SCARLETT)
         ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_LdsFseCache32);
@@ -940,6 +952,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             // But we choose "throughput" maximising kernel.
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
+            context->DecompressSequences_FseArenaStreamCapacity = ZSTDGPU_FSE_ARENA ? zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequences_StreamsPerGroup) : 0;
 
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
         }
@@ -953,6 +966,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         {
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
+            context->DecompressSequences_FseArenaStreamCapacity = ZSTDGPU_FSE_ARENA ? zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequences_StreamsPerGroup) : 0;
             // Copy strides use WaveGetLaneCount(), so the group must cover the hardware wave.
             if (featureOptions1.WaveLaneCountMax == 64)
             {
@@ -1058,6 +1072,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         #undef ZSTDGPU_KERNEL
         context->DecompressLiterals_StreamsPerGroup = persistentContext->DecompressLiterals_StreamsPerGroup;
         context->DecompressSequences_StreamsPerGroup = persistentContext->DecompressSequences_StreamsPerGroup;
+        context->DecompressSequences_FseArenaStreamCapacity = persistentContext->DecompressSequences_FseArenaStreamCapacity;
         context->executeIndirectWorkaround = persistentContext->executeIndirectWorkaround;
 
         context->srts.heap = NULL;
@@ -1469,7 +1484,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         {
             uint32_t cntRaw, cntRle, cntCmp;
             zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
-            zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
+            zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp, req->DecompressSequences_FseArenaStreamCapacity);
 
         }
         else if (stageIndex == 2)
@@ -1497,7 +1512,7 @@ static void zstdgpu_GetAllStageGpuMemoryRequirementInternal(uint64_t *outDefault
     zstdgpu_ResourceInfo_Stage_0_Init(&req->resInfo, req->zstdFrameCount, req->zstdCompressedFramesByteCount, zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory) ? 1u : 0u);
 
     zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
-    zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
+    zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp, req->DecompressSequences_FseArenaStreamCapacity);
 
     zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, req);
     zstdgpu_ResourceInfo_Stage_2_Init(&req->resInfo, cntLit, cntSeq, req->zstdUncompressedFramesByteCount, req->zstdUncompressedFrameCount);
@@ -1797,7 +1812,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
         {
             uint32_t cntRaw, cntRle, cntCmp;
             zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
-            zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp);
+            zstdgpu_ResourceInfo_Stage_1_Init(&req->resInfo, cntRaw, cntRle, cntCmp, req->DecompressSequences_FseArenaStreamCapacity);
         }
         else if (stageIndex == 2)
         {
@@ -2510,6 +2525,15 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
         PIXEndEvent(cmdList);
     }
+    if (0 != req->DecompressSequences_FseArenaStreamCapacity)
+    {
+        PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[InitResources :: Memset :: Stage 1 :: FSE Arena Slots]");
+        // Marks every FSE arena slot as free for [Decompress Sequences].
+        const uint32_t headerDwCount = zstdgpu_FseArena_HeaderDwCount(req->resInfo.FseArena_StreamCount);
+        zstdgpu_Bind_Memset_FseArenaHeader(cmdList, req->srts, req->resData.gpuOnly, /* tgOffset */0, /* workItemCount */headerDwCount, /* memset value */0);
+        cmdList->Dispatch(ZSTDGPU_TG_COUNT(headerDwCount, kzstdgpu_TgSizeX_Memset), 1, 1);
+        PIXEndEvent(cmdList);
+    }
     {
         // Resources needed by for Parse Frames
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Parse Frames :: Collect Blocks]");
@@ -2916,20 +2940,24 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseHufW);
             PIXEndEvent(cmdList);
 
-            PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Literal Lengths");
-            cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 1u /* LLen */, 2);
-            zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseLLen);
-            PIXEndEvent(cmdList);
+            // [Decompress Sequences] builds its own sequence tables in the FSE arena.
+            if (0 == req->DecompressSequences_FseArenaStreamCapacity)
+            {
+                PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Literal Lengths");
+                cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 1u /* LLen */, 2);
+                zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseLLen);
+                PIXEndEvent(cmdList);
 
-            PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Offsets");
-            cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 2u /* Offs */, 2);
-            zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseOffs);
-            PIXEndEvent(cmdList);
+                PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Offsets");
+                cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 2u /* Offs */, 2);
+                zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseOffs);
+                PIXEndEvent(cmdList);
 
-            PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Match Lengths");
-            cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 3u /* MLen */, 2);
-            zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseMLen);
-            PIXEndEvent(cmdList);
+                PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"FSEs for Match Lengths");
+                cmdList->SetComputeRoot32BitConstant(kzstdgpu_SrtConstsRootSlot_InitFseTable, 3u /* MLen */, 2);
+                zstdgpu_DispatchIndirect(cmdList, InitFseTable, FseMLen);
+                PIXEndEvent(cmdList);
+            }
             PIXEndEvent(cmdList);
         });
     }
@@ -3005,7 +3033,14 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     // NOTE(pamartis): (can run in parallel with FSE-compressed Huffman Weight Decompression, right after FSE table initialisation)
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Decompress Sequences]");
-        zstdgpu_Bind_DecompressSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly);
+        if (0 != req->DecompressSequences_FseArenaStreamCapacity)
+        {
+            D3D12_RESOURCE_BARRIER barriers[1];
+            // last written by [InitResources :: Memset :: Stage 1 :: FSE Arena Slots]
+            setResourceUavSync(barriers, 0, req->resData.gpuOnly.FseArena);
+            cmdList->ResourceBarrier(_countof(barriers), barriers);
+        }
+        zstdgpu_Bind_DecompressSequences_Stage2(cmdList, req->srts, req->resData.gpuOnly, req->resInfo.FseArena_StreamCount);
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
 
         ZSTDGPU_KERNEL_SCOPE(DecompressSequences, cmdList,
