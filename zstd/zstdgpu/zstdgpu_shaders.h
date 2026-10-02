@@ -3451,7 +3451,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 // LDS partitioning macro lists for sequence decompression with in-LDS output caching
 // Cache stores kzstdgpu_DecompressSequences_LdsStoreCache_DwCount triplets (llen, mlen, offs) per stream, laid out as 3 SoA regions.
 // Bank conflicts are avoided via index swizzling
-// With ZSTDGPU_FSE_ARENA, the caches double as the FSE table build's LDS before decoding starts. The arena
+// With the FSE arena, the caches double as the FSE table build's LDS before decoding starts. The arena
 // adds no LDS of its own: at 12 KB per group, a single extra dword drops NVIDIA Ada from 7 to 6 resident groups.
 #define ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(base, size)      \
     ZSTDGPU_LDS_SIZE(size)                                              \
@@ -3475,11 +3475,18 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 #define kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF 1
 #endif
 
+// Whether the kernel builds its LL/OF/ML decode tables in the FSE arena (1) or reads the tables
+// [Init FSE Tables] persisted in FseElems (0).
+#ifndef kzstdgpu_DecompressSequences_FseArena
+#define kzstdgpu_DecompressSequences_FseArena ZSTDGPU_FSE_ARENA
+#define kzstdgpu_DecompressSequences_FseArena_UNDEF 1
+#endif
+
 #include "zstdgpu_lds_decl_size.h"
 ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
 #include "zstdgpu_lds_decl_undef.h"
 
-#if ZSTDGPU_FSE_ARENA
+#if kzstdgpu_DecompressSequences_FseArena
 // Before decoding starts, the store caches hold the group's table build: the FSE index and owner of each
 // build item, the group's arena slot (padded to keep the scratch bank-aligned), then the LDS scratch of each
 // wave that builds tables.
@@ -3660,7 +3667,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
     #include "zstdgpu_lds_decl_undef.h"
 
-#if ZSTDGPU_FSE_ARENA
+#if kzstdgpu_DecompressSequences_FseArena
     // Build items are type-major, one per stream and table type. Until decoding starts, the store caches
     // hold the FSE index and owner of each build item, the group's arena slot, and the scratch of each
     // building wave.
@@ -3795,7 +3802,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId];
     uint32_t totalMLen = 0;
 
-#if ZSTDGPU_FSE_ARENA
+#if kzstdgpu_DecompressSequences_FseArena
     // Valid states are below the table size; masking keeps the reads of corrupt streams inside the group's slot.
     #define ZSTDGPU_FSE_TABLE_INDEX(start, state) ((start) + ((state) & (kzstdgpu_MaxCount_FseElems - 1u)))
     #define ZSTDGPU_FSE_TABLE_ELEM(index) srt.inoutFseArena[index]
@@ -3906,7 +3913,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
         srt.inoutPerSeqStreamFinalOffset3[seqStreamIdx] = offset3;
     }
 
-#if ZSTDGPU_FSE_ARENA
+#if kzstdgpu_DecompressSequences_FseArena
     // Release the slot once every thread is done reading the group's tables.
     AllMemoryBarrierWithGroupSync();
     if (threadId == 0)
@@ -3933,6 +3940,11 @@ ZSTDGPU_WARN_POP_MSVC()
 #ifdef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
 #undef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
 #undef kzstdgpu_DecompressSequences_ThreadsPerStream
+#endif
+
+#ifdef kzstdgpu_DecompressSequences_FseArena_UNDEF
+#undef kzstdgpu_DecompressSequences_FseArena_UNDEF
+#undef kzstdgpu_DecompressSequences_FseArena
 #endif
 
 static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets_SRT) srt, uint32_t threadId)
