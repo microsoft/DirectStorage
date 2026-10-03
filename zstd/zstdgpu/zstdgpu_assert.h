@@ -17,24 +17,29 @@
 #ifndef ZSTDGPU_ASSERT_H
 #define ZSTDGPU_ASSERT_H
 
+#define ZSTDGPU_ASSERT_BACKEND_NONE 0
+#define ZSTDGPU_ASSERT_BACKEND_TTA  1
+
+#ifndef ZSTDGPU_ASSERT_BACKEND
+    /*
+     *  TTA remains the default for existing zstdgpu builds. Consumers that
+     *  don't require host assertions can define ZSTDGPU_ASSERT_BACKEND as
+     *  ZSTDGPU_ASSERT_BACKEND_NONE for every zstdgpu translation unit.
+     */
+#   define ZSTDGPU_ASSERT_BACKEND ZSTDGPU_ASSERT_BACKEND_TTA
+#endif
+
 #ifndef ZSTDGPU_ASSERT
 #   ifdef __hlsl_dx_compiler
 #       define ZSTDGPU_ASSERT(cond)
 #       define ZSTDGPU_ASSERT_MSG(cond, msg, ...)
+#   elif ZSTDGPU_ASSERT_BACKEND == ZSTDGPU_ASSERT_BACKEND_NONE
+#       define ZSTDGPU_ASSERT(cond) ((void)sizeof((cond) != 0))
+#       define ZSTDGPU_ASSERT_MSG(cond, msg, ...) ((void)sizeof((cond) != 0))
+#   elif ZSTDGPU_ASSERT_BACKEND == ZSTDGPU_ASSERT_BACKEND_TTA
+#       include "zstdgpu_assert_tta.h"
 #   else
-#       ifdef NDEBUG
-            /**
-             *  NOTE(pamartis): it's not a bug, we keep asserts in instrumented mode
-             *  while the development is ongoing. Without debugger, they are configured
-             *  to not break and produce useful output to the log if something breaks
-             */
-#           define TTA_ASSERT_MODE TTA_ASSERT_MODE_INSTRUMENTED
-#       else
-#           define TTA_ASSERT_MODE TTA_ASSERT_MODE_INSTRUMENTED
-#       endif
-#       include <tta_assert.h>
-#       define ZSTDGPU_ASSERT(cond) TTA_ASSERT(cond)
-#       define ZSTDGPU_ASSERT_MSG(cond, msg, ...) TTA_ASSERT_MSG(cond, msg, __VA_ARGS__)
+#       error Unknown ZSTDGPU_ASSERT_BACKEND.
 #   endif
 #endif
 

@@ -865,6 +865,8 @@ D3D12AID_API void d3d12aid_MappedBuffer_EndTransfer(D3D12_RESOURCE_BARRIER *outB
     d3d12aid_Resource_TransitionBarrier(outBarrier, inoutBuffer->bufGpu, D3D12_RESOURCE_STATE_COPY_DEST, nextState);
 }
 
+#ifndef D3D12AID_EXCLUDE_CMD_QUEUE
+
 #ifndef D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT
 #define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 3
 #endif
@@ -1102,6 +1104,8 @@ D3D12AID_API ID3D12GraphicsCommandList *d3d12aid_CmdQueue_StartCmdList(d3d12aid_
 {
     return d3d12aid_CmdQueue_StartMultiCmdLists(queue, cmdListId, 1)[0];
 }
+
+#endif /** D3D12AID_EXCLUDE_CMD_QUEUE */
 
 #endif /** D3D12AID_H */
 

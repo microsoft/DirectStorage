@@ -42,7 +42,7 @@
 
 #define D3D12AID_ASSERT(cond) ZSTDGPU_ASSERT(cond)
 
-#define D3D12AID_CMD_QUEUE_LATENCY_FRAME_MAX_COUNT 2
+#define D3D12AID_EXCLUDE_CMD_QUEUE 1
 #define D3D12AID_API_STATIC 1
 #include "d3d12aid.h"
 #include <pix3.h>
