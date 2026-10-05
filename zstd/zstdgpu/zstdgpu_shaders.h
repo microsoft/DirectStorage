@@ -1070,8 +1070,8 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
     //
     const uint32_t literalBlockSzFmt = zstdgpu_Forward_BitBuffer_GetNoRefill(buffer, 2);
 
-    const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
     #ifdef __hlsl_dx_compiler
+        const uint32_t hufLitStreamCount = (literalBlockType >= 2u) ? ((0x0u == literalBlockSzFmt) ? 1u : 4u) : 0u;
         const uint32_t hufLitStreamStart = zstdgpu_OrderedAppendIndex(srt.inoutLitStreamCountPrefixLookback, hufLitStreamCount, threadId, kzstdgpu_TgSizeX_ParseCompressedBlocks);
     #else
         const uint32_t hufLitStreamStart = srt.inoutCounters[0].HUF_Streams;
@@ -3450,6 +3450,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
 #include "zstdgpu_lds_decl_undef.h"
 
+ZSTDGPU_WARN_PUSH_MSVC()
+ZSTDGPU_WARN_STOP_MSVC(6262) /**< CPU reference path emulates shader LDS with an intentionally large local array. */
 static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt,
                                                                 uint32_t groupId,
                                                                 uint32_t threadId,
@@ -3612,6 +3614,7 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     #undef ZSTDGPU_BACKWARD_BITBUF
     //ZSTDGPU_ASSERT(bitBuffer.hadlastrefill && bitBuffer.bitcnt == 0);
 }
+ZSTDGPU_WARN_POP_MSVC()
 
 #ifdef kzstdgpu_DecompressSequences_LdsStoreCache_DwCount_UNDEF
 #undef kzstdgpu_DecompressSequences_LdsStoreCache_DwCount_UNDEF
