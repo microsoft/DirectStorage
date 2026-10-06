@@ -791,13 +791,9 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_FseTables(const zs
             tstElems                                        \
         )
 
-    // With the FSE arena, sequence tables are built on the fly and never persisted, so only their
+    // Sequence tables are built on the fly in the FSE arena and never persisted, so only their
     // seeds (FseInfos/FseProbs), which fully determine the tables, can be validated.
-#if ZSTDGPU_FSE_ARENA
     const uint32_t *tstSeqFseElems = NULL;
-#else
-    const uint32_t *tstSeqFseElems = tst->FseElems;
-#endif
 
     for (uint32_t i = 0; i < GHufLitIndex; ++i)
     {

@@ -3475,10 +3475,10 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 #define kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF 1
 #endif
 
-// Whether the kernel builds its LL/OF/ML decode tables in the FSE arena (1) or reads the tables
-// [Init FSE Tables] persisted in FseElems (0).
+// Whether the kernel builds its LL/OF/ML decode tables in the FSE arena (1, the default) or reads the
+// tables [Init FSE Tables] persisted in FseElems (0).
 #ifndef kzstdgpu_DecompressSequences_FseArena
-#define kzstdgpu_DecompressSequences_FseArena ZSTDGPU_FSE_ARENA
+#define kzstdgpu_DecompressSequences_FseArena 1
 #define kzstdgpu_DecompressSequences_FseArena_UNDEF 1
 #endif
 

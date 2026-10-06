@@ -967,13 +967,11 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals_AMD;
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_ScalarFseLoad32);
             context->DecompressSequences_StreamsPerGroup = 1;
-#if ZSTDGPU_FSE_ARENA
             // Batches with more compressed blocks than the FSE arena holds switch to the arena-backed multi-stream
             // kernel, which bounds their FSE table memory and outpaces the single-stream kernel at that size.
             ZSTDGPU_KERNEL_MAP(DecompressSequencesFseArena, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequencesFseArena_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
             context->DecompressSequences_FseArenaStreamCapacity = zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequencesFseArena_StreamsPerGroup);
-#endif
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
 
             context->executeIndirectWorkaround = (desc.DeviceId >= 0x7500);
@@ -990,13 +988,11 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             // But we choose "throughput" maximising kernel.
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32_FseElems);
             context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
-#if ZSTDGPU_FSE_ARENA
             // Batches with more compressed blocks than the FSE arena holds switch to the arena-backed kernel,
             // which bounds their FSE table memory.
             ZSTDGPU_KERNEL_MAP(DecompressSequencesFseArena, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequencesFseArena_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
             context->DecompressSequences_FseArenaStreamCapacity = zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequencesFseArena_StreamsPerGroup);
-#endif
 
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
         }
@@ -1010,13 +1006,11 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         {
             ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_MultiStream_4_LdsOutCache_32_FseElems);
             context->DecompressSequences_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
-#if ZSTDGPU_FSE_ARENA
             // Batches with more compressed blocks than the FSE arena holds switch to the arena-backed kernel,
             // which bounds their FSE table memory.
             ZSTDGPU_KERNEL_MAP(DecompressSequencesFseArena, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequencesFseArena_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
             context->DecompressSequences_FseArenaStreamCapacity = zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequencesFseArena_StreamsPerGroup);
-#endif
             // Copy strides use WaveGetLaneCount(), so the group must cover the hardware wave.
             if (featureOptions1.WaveLaneCountMax == 64)
             {

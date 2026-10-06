@@ -280,9 +280,6 @@ static const uint32_t kzstdgpu_FseRleTableCount = 256;
 // from FseProbs into an arena slot it owns while it runs. Groups acquire a slot from an ownership
 // bitmap on entry and release it on exit, so the arena only has to cover the groups resident on the
 // GPU at once. Groups that find no free slot wait for one, which bounds concurrency but not correctness.
-#ifndef ZSTDGPU_FSE_ARENA
-#define ZSTDGPU_FSE_ARENA 1
-#endif
 
 // A slot holds the LL, OF and ML tables of each of its streams, `StreamDwCount` dwords per stream:
 // stream `i` of a slot owns dwords `[i * StreamDwCount, (i + 1) * StreamDwCount)`, with each table
