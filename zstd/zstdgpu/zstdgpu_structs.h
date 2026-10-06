@@ -466,7 +466,7 @@ static const uint32_t kzstdgpu_TgSizeX_FinaliseSequenceOffsets = 256;
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
 static const uint32_t kzstdgpu_TgSizeX_MemsetMemcpy = 64;
 #else
-static const uint32_t kzstdgpu_TgSizeX_MemsetMemcpy = 32;
+static const uint32_t kzstdgpu_TgSizeX_MemsetMemcpy = 128;
 #endif
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
@@ -504,6 +504,10 @@ typedef struct uint32_t4
 {
     uint32_t x, y, z, w;
 } uint32_t4;
+typedef struct uint32_t2
+{
+    uint32_t x, y;
+} uint32_t2;
 static inline void GroupMemoryBarrierWithGroupSync(void) { }
 static inline void DeviceMemoryBarrierWithGroupSync(void) { }
 static inline bool WaveIsFirstLane(void) { return true; }
