@@ -5,21 +5,26 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
-import re
 import shutil
 import struct
-import subprocess
 import tempfile
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from functools import partial
+from typing import Any
+
+from factory_common import (
+    directory_is_empty, load_module, set_lock as common_set_lock,
+    run_command, tool_version as common_tool_version, validate_executable, write_bytes_atomic,
+)
+from factory_contracts import TRANSFORM_CONTRACT, ZSTD_COMPRESSION_LEVEL
+
 
 DDS_MAGIC = 0x20534444
 FOURCC_DX10 = 0x30315844
+# Older DDS headers use four-character codes to describe their BC format.
 FOURCC_FORMATS = {
     0x31545844: ("BC1", "DXT1", 8),
     0x35545844: ("BC3", "DXT5", 16),
@@ -30,6 +35,7 @@ FOURCC_FORMATS = {
     0x55354342: ("BC5", "BC5U", 16),
     0x53354342: ("BC5", "BC5S", 16),
 }
+# DX10 DDS headers use numeric DXGI formats instead.
 DXGI_FORMATS = {
     70: ("BC1", "DXGI_FORMAT_BC1_TYPELESS", 8),
     71: ("BC1", "DXGI_FORMAT_BC1_UNORM", 8),
@@ -47,17 +53,14 @@ DXGI_FORMATS = {
     98: ("BC7", "DXGI_FORMAT_BC7_UNORM", 16),
     99: ("BC7", "DXGI_FORMAT_BC7_UNORM_SRGB", 16),
 }
-TRANSFORM_IDS = {"BC1": 1, "BC3": 2, "BC4": 3, "BC5": 4, "BC7": 7}
-TRANSFORM_NAMES = {
-    "BC1": "GACL_SHUFFLE_TRANSFORM_ZSTD_BC1_224",
-    "BC3": "GACL_SHUFFLE_TRANSFORM_ZSTD_BC3_116224",
-    "BC4": "GACL_SHUFFLE_TRANSFORM_ZSTD_BC4_116",
-    "BC5": "GACL_SHUFFLE_TRANSFORM_ZSTD_BC5_116116",
-    "BC7": "GACL_SHUFFLE_TRANSFORM_ZSTD_ONLY",
-}
+
+# Use the same transform names and IDs that the manifest validator checks.
+TRANSFORM_IDS = {name: item[0] for name, item in TRANSFORM_CONTRACT.items()}
+TRANSFORM_NAMES = {name: item[1] for name, item in TRANSFORM_CONTRACT.items()}
 
 
 @dataclass(frozen=True)
+# Describe the first image's top mip; the payload is read separately.
 class DDSFirstMip:
     format: str
     format_name: str
@@ -70,14 +73,7 @@ class DDSFirstMip:
 
 
 def load_driver():
-    path = Path(__file__).with_name("process-set.py")
-    spec = importlib.util.spec_from_file_location("process_set", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load Content Factory driver: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+    return load_module("process_set", "process-set.py")
 
 def read_u32(data: bytes, offset: int) -> int:
     if offset < 0 or offset + 4 > len(data):
@@ -86,6 +82,7 @@ def read_u32(data: bytes, offset: int) -> int:
 
 
 def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
+    # Check the basic DDS header before reading dimensions and format fields.
     if len(data) < 128 or read_u32(data, 0) != DDS_MAGIC or read_u32(data, 4) != 124:
         raise ValueError("not a valid DDS file")
     width = read_u32(data, 16)
@@ -96,6 +93,7 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
     fourcc = read_u32(data, 84)
     offset = 128
     array_size = 1
+    # Read the extra DX10 header only when the file says it is present.
     if fourcc == FOURCC_DX10:
         if len(data) < 148:
             raise ValueError("truncated DDS DX10 header")
@@ -114,6 +112,7 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
             format_name, exact_name, bytes_per_block = FOURCC_FORMATS[fourcc]
         except KeyError as error:
             raise ValueError(f"unsupported DDS FourCC: 0x{fourcc:08X}") from error
+    # BC textures use 4-by-4 pixel blocks, including partial blocks at the edges.
     blocks_x = (width + 3) // 4
     blocks_y = (height + 3) // 4
     size = blocks_x * blocks_y * bytes_per_block
@@ -122,63 +121,15 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
     return DDSFirstMip(format_name, exact_name, width, height, mip_count, array_size, offset, size)
 
 
-def run_tool(arguments: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError(f"GACLContentTool timed out after {timeout} seconds") from error
-    except OSError as error:
-        raise RuntimeError(f"could not execute GACLContentTool: {error}") from error
+run_tool = partial(run_command, operation="GACLContentTool", text=True)
 
-
-def tool_version(executable: Path) -> str:
-    result = run_tool([str(executable), "--version"], timeout=30)
-    text = (result.stdout or result.stderr).strip()
-    if result.returncode != 0:
-        raise RuntimeError(f"GACLContentTool --version failed: {text}")
-    match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
-    if not match:
-        raise RuntimeError("GACLContentTool --version returned no recognizable version")
-    return match.group(1)
-
+tool_version = partial(common_tool_version, label="GACLContentTool")
 
 def output_relative_path(source: str, set_name: str) -> str:
     source_path = Path(source)
     filename = f"{source_path.name}.gacl"
     parent = source_path.parent.as_posix()
     return f"gacl/{set_name}/{parent + '/' if parent != '.' else ''}{filename}"
-
-
-def directory_is_empty(path: Path) -> bool:
-    return not path.exists() or (path.is_dir() and not any(path.iterdir()))
-
-
-def write_bytes_atomic(path: Path, data: bytes) -> None:
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-@contextmanager
-def set_lock(root: Path, set_name: str) -> Iterator[None]:
-    lock = root / "manifests" / f".{set_name}.gacl.lock"
-    try:
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise RuntimeError(f"another GACL operation is active for set '{set_name}'") from error
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(str(os.getpid()))
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def build_variants(
@@ -192,34 +143,35 @@ def build_variants(
     set_name = document["set_name"]
     records: list[dict[str, Any]] = []
     for source in document["sources"]:
+        # Only DDS inputs participate in this texture-conditioning stage.
         if Path(source["path"]).suffix.lower() != ".dds":
             continue
         source_path = root / "originals" / set_name / Path(source["path"])
         source_data = source_path.read_bytes()
         info = parse_dds_first_mip(source_data)
+        # Pass the first mip's block bytes to the codec, not the DDS container.
         payload = source_data[info.data_offset:info.data_offset + info.data_size]
         relative = output_relative_path(source["path"], set_name)
         output = output_root / Path(relative).relative_to(Path("gacl") / set_name)
         output.parent.mkdir(parents=True, exist_ok=True)
         payload_path = output.with_suffix(output.suffix + ".payload")
         payload_path.write_bytes(payload)
+        # Generate the conditioned stream and compare its decoded payload to the original.
         try:
-            result = run_tool([
+            run_tool([
                 str(executable), "--input", str(payload_path), "--output", str(output),
                 "--format", info.format, "--zstd-level", str(zstd_level),
                 "--target-block-size", str(target_block_size),
             ])
-            if result.returncode != 0:
-                raise RuntimeError(f"GACL generation failed for {source['path']}: {(result.stderr or result.stdout).strip()}")
-            verify = run_tool([
+            run_tool([
                 str(executable), "--verify", "--input", str(output),
                 "--original", str(payload_path), "--format", info.format,
             ])
-            if verify.returncode != 0:
-                raise RuntimeError(f"GACL verification failed for {source['path']}: {(verify.stderr or verify.stdout).strip()}")
+        # The extracted payload is temporary and must not remain beside the derivative.
         finally:
             payload_path.unlink(missing_ok=True)
         data = output.read_bytes()
+        # Record the transform and the exact mip selection needed to interpret this output.
         records.append({
             "path": relative,
             "size": len(data),
@@ -253,6 +205,16 @@ def build_variants(
     return sorted(records, key=lambda item: item["path"])
 
 
+set_lock = partial(common_set_lock, stage="gacl", label="GACL")
+
+
+def validate_options(zstd_level: int, target_block_size: int) -> None:
+    if zstd_level < 1 or zstd_level > 22:
+        raise ValueError("Zstd level must be from 1 through 22")
+    if target_block_size < 1 or target_block_size > 1024 * 1024:
+        raise ValueError("target block size must be from 1 through 1048576")
+
+
 def process(
     root: Path,
     set_name: str,
@@ -261,18 +223,12 @@ def process(
     target_block_size: int,
     overwrite: bool,
 ) -> Path:
-    if zstd_level < 1 or zstd_level > 22:
-        raise ValueError("Zstd level must be from 1 through 22")
-    if target_block_size < 1 or target_block_size > 1024 * 1024:
-        raise ValueError("target block size must be from 1 through 1048576")
+    # Validate settings and identify the encoder before changing any outputs.
+    validate_options(zstd_level, target_block_size)
     driver = load_driver()
     root = root.resolve()
     set_name = driver.validate_set_name(set_name)
-    if executable.is_symlink():
-        raise ValueError("GACL executable cannot be a symbolic link")
-    executable = executable.resolve()
-    if not executable.is_file():
-        raise FileNotFoundError(f"GACL executable does not exist: {executable}")
+    executable = validate_executable(executable)
     version = tool_version(executable)
     manifest = driver.manifest_path(root, set_name)
 
@@ -286,6 +242,7 @@ def process(
         if (existing or not directory_is_empty(final_root)) and not overwrite:
             raise FileExistsError("GACL outputs already exist; use --overwrite")
 
+        # Build replacements separately so the previous texture outputs remain available.
         parent = root / "gacl"
         parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{set_name}.gacl.stage.", dir=parent))
@@ -297,6 +254,7 @@ def process(
         try:
             records = build_variants(root, document, stage, executable, zstd_level, target_block_size)
             updated = dict(document)
+            # Replace GACL records only; leave other codec records unchanged.
             updated["derivatives"] = sorted(
                 [item for item in document["derivatives"] if item["format"] != "gacl"] + records,
                 key=lambda item: item["path"],
@@ -304,6 +262,7 @@ def process(
             updated["tools"] = dict(document["tools"])
             updated["tools"]["GACLContentTool"] = {"version": version}
             driver.validate_manifest(updated)
+            # Save the previous tree before installing the new one.
             if final_root.exists():
                 os.replace(final_root, backup)
                 old_tree_moved = True
@@ -312,6 +271,7 @@ def process(
             try:
                 driver.write_json_atomic(manifest, updated)
                 driver.verify_files(root, set_name, updated)
+            # Try to restore the previous outputs and manifest together on failure.
             except Exception as original_error:
                 rollback_errors: list[str] = []
                 try:
@@ -329,6 +289,7 @@ def process(
                 raise
             shutil.rmtree(backup, ignore_errors=True)
             return manifest
+        # Clean up temporary directories after success or failure.
         finally:
             shutil.rmtree(stage, ignore_errors=True)
             if backup.exists() and not final_root.exists():
@@ -341,8 +302,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("set_name")
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    # These options control conditioning of the selected DDS payloads.
     parser.add_argument("--gacl-exe", type=Path, required=True)
-    parser.add_argument("--zstd-level", type=int, default=12)
+    parser.add_argument("--zstd-level", type=int, default=ZSTD_COMPRESSION_LEVEL)
     parser.add_argument("--target-block-size", type=int, default=64 * 1024)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()

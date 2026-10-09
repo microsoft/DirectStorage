@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Validate and optionally extract a DirectStorage HLK content archive.
+"""Validate the structure of a DirectStorage HLK content archive.
 
-The format is defined by the internal DirectStorage HLK makehlkcontent tool:
+Archive layout:
 8-byte header (<version, entry count>) followed by 12-byte entries
 (<content type, payload offset, payload size>) and payload bytes.
 """
@@ -9,19 +9,21 @@ The format is defined by the internal DirectStorage HLK makehlkcontent tool:
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+from factory_contracts import CONTENT_TYPES as CONTENT_TYPE_NAMES
+
+# Read the on-disk layout independently of the archive writer.
 HEADER = struct.Struct("<II")
 ENTRY = struct.Struct("<III")
 VERSION = 1
-VALID_TYPES = {0, 1, 2, 3}
+VALID_TYPES = set(CONTENT_TYPE_NAMES.values())
 
 
 @dataclass(frozen=True)
+# Keep each table entry's position and byte range for structure and payload checks.
 class ArchiveEntry:
     index: int
     content_type: int
@@ -32,6 +34,7 @@ class ArchiveEntry:
 def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
     file_size = path.stat().st_size
     with path.open("rb") as stream:
+        # Validate the header before trusting its entry count.
         raw_header = stream.read(HEADER.size)
         if len(raw_header) != HEADER.size:
             raise ValueError("archive header is truncated")
@@ -39,11 +42,13 @@ def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
         if version != VERSION:
             raise ValueError(f"unsupported archive version {version}")
 
+        # The complete table must fit before any payload can begin.
         table_end = HEADER.size + count * ENTRY.size
         if table_end > file_size:
             raise ValueError("entry table extends beyond the archive")
 
         entries: list[ArchiveEntry] = []
+        # Require payloads to stay ordered and avoid overlap with the table or each other.
         previous_end = table_end
         for index in range(count):
             raw_entry = stream.read(ENTRY.size)
@@ -54,6 +59,7 @@ def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
                 raise ValueError(f"entry {index} has invalid content type {content_type}")
             if offset < previous_end:
                 raise ValueError(f"entry {index} overlaps the archive header, table, or previous entry")
+            # Every recorded byte range must end inside the actual archive file.
             if offset + size > file_size:
                 raise ValueError(f"entry {index} extends beyond the archive")
             entries.append(ArchiveEntry(index, content_type, offset, size))
@@ -62,52 +68,15 @@ def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
     return entries, file_size
 
 
-def extract_entries(archive: Path, entries: list[ArchiveEntry], output: Path) -> dict[int, tuple[str, str]]:
-    output.mkdir(parents=True, exist_ok=True)
-    extracted: dict[int, tuple[str, str]] = {}
-    with archive.open("rb") as stream:
-        for entry in entries:
-            stream.seek(entry.offset)
-            payload = stream.read(entry.size)
-            if len(payload) != entry.size:
-                raise ValueError(f"entry {entry.index} payload is truncated")
-            output_path = output / f"entry-{entry.index:04d}.bin"
-            output_path.write_bytes(payload)
-            extracted[entry.index] = (hashlib.sha256(payload).hexdigest(), output_path.name)
-    return extracted
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
-    parser.add_argument("--extract", type=Path, help="directory receiving raw entry payloads")
-    parser.add_argument("--report", type=Path, help="optional JSON validation report")
     args = parser.parse_args()
 
+    # Read-only validation does not extract payloads or write reports.
     entries, file_size = parse_archive(args.archive)
-    extracted = extract_entries(args.archive, entries, args.extract) if args.extract else {}
-    report: dict[str, object] = {
-        "schema_version": 1,
-        "archive": str(args.archive),
-        "archive_size": file_size,
-        "entry_count": len(entries),
-        "entries": [
-            {
-                **entry.__dict__,
-                "sha256": extracted.get(entry.index, (None, None))[0],
-                "output": extracted.get(entry.index, (None, None))[1],
-            }
-            for entry in entries
-        ],
-    }
-
-    if args.report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-
     print(f"Validated {len(entries)} entries in {args.archive} ({file_size} bytes)")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -15,18 +15,16 @@ import struct
 import tempfile
 from pathlib import Path
 
+from factory_contracts import CONTENT_TYPES as CONTENT_TYPE_NAMES
+
+# The header stores version and count; the table stores type, offset, and size.
 HEADER = struct.Struct("<II")
 ENTRY = struct.Struct("<III")
 VERSION = 1
-VALID_TYPES = {0, 1, 2, 3}
+VALID_TYPES = set(CONTENT_TYPE_NAMES.values())
 UINT32_MAX = (1 << 32) - 1
 
-CONTENT_TYPE_NAMES = {
-    "unknown": 0,
-    "texture": 1,
-    "geometry": 2,
-    "text": 3,
-}
+
 
 
 
@@ -36,16 +34,19 @@ def align_up(value: int, alignment: int) -> int:
 
 def load_entries(manifest: Path, source_root: Path | None) -> list[tuple[int, Path]]:
     document = json.loads(manifest.read_text(encoding="utf-8"))
+    # Input order determines archive entry order.
     raw_entries = document.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise ValueError("manifest must contain a non-empty entries array")
 
+    # Resolve all payload paths relative to one root and keep them inside it.
     root = source_root.resolve() if source_root else manifest.parent.resolve()
     entries: list[tuple[int, Path]] = []
     seen: set[Path] = set()
     for index, item in enumerate(raw_entries):
         if not isinstance(item, dict):
             raise ValueError(f"entry {index} is not an object")
+        # Accept friendly type names as well as their numeric archive values.
         content_type = item.get("content_type")
         if isinstance(content_type, str):
             content_type = CONTENT_TYPE_NAMES.get(content_type.lower())
@@ -54,6 +55,7 @@ def load_entries(manifest: Path, source_root: Path | None) -> list[tuple[int, Pa
         raw_path = item.get("path")
         if not isinstance(raw_path, str) or not raw_path:
             raise ValueError(f"entry {index} has no path")
+        # Reject paths outside the root, duplicate sources, and missing files.
         source = (root / raw_path).resolve()
         try:
             source.relative_to(root)
@@ -73,27 +75,32 @@ def create_archive(manifest: Path, output: Path, source_root: Path | None, align
         raise ValueError("alignment must be a positive power of two")
 
     inputs = load_entries(manifest, source_root)
+    # Calculate payload offsets before writing any archive bytes.
     table_end = HEADER.size + len(inputs) * ENTRY.size
     offset = align_up(table_end, alignment)
     table: list[tuple[int, int, int]] = []
 
     for content_type, source in inputs:
         size = source.stat().st_size
+        # The archive format has 32-bit offsets and sizes; reject anything that will not fit.
         if size > UINT32_MAX or offset > UINT32_MAX or offset + size > UINT32_MAX:
             raise ValueError("archive exceeds the HLK format's 32-bit offset/size limit")
         table.append((content_type, offset, size))
         offset = align_up(offset + size, alignment)
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a sibling temporary file so readers do not see an unfinished archive.
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
         with temporary.open("wb") as stream:
+            # Write the header and table first, then pad to the first payload.
             stream.write(HEADER.pack(VERSION, len(table)))
             for entry in table:
                 stream.write(ENTRY.pack(*entry))
             stream.write(b"\0" * (table[0][1] - stream.tell()))
+            # Copy payloads in order and check that sizes stayed stable while reading.
             for (_, source), (_, entry_offset, size) in zip(inputs, table):
                 if stream.tell() != entry_offset:
                     raise RuntimeError("internal archive offset calculation mismatch")
@@ -102,9 +109,11 @@ def create_archive(manifest: Path, output: Path, source_root: Path | None, align
                         stream.write(chunk)
                 if stream.tell() != entry_offset + size:
                     raise RuntimeError(f"source size changed while reading: {source}")
+                # Fill alignment gaps with zero bytes for repeatable output.
                 padding = align_up(stream.tell(), alignment) - stream.tell()
                 if padding:
                     stream.write(b"\0" * padding)
+        # Publish only the completed archive; clean up the temporary file on failure.
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)

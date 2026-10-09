@@ -132,3 +132,92 @@ def test_manifest_rejects_incomplete_or_non_lockstep_hlk_groups(tmp_path: Path) 
     target["entries"][0]["content_type"] = "unknown" if target["entries"][0]["content_type"] != "unknown" else "text"
     with pytest.raises(ValueError, match="not lockstep"):
         process_set.validate_manifest(mismatch)
+
+
+
+@pytest.mark.parametrize("returned_level", [9, 12])
+def test_hlk_requests_default_gdeflate_level_and_rejects_mismatch(tmp_path: Path, monkeypatch, returned_level: int) -> None:
+    # Inspect the native call and wrapper without launching any executable.
+    source = tmp_path / "input.bin"
+    source.write_bytes(b"sample")
+    calls = []
+    payload = b"encoded-payload"
+
+    def fake_run_tool(arguments, **kwargs):
+        calls.append(arguments)
+        if "--output" in arguments:
+            assert arguments[arguments.index("--level") + 1] == "9"
+            output = Path(arguments[arguments.index("--output") + 1])
+            header = struct.pack("<IHHIIQQ", 0x31464447, 1, 32, returned_level, 0,
+                                 source.stat().st_size, len(payload))
+            output.write_bytes(header + payload)
+
+    monkeypatch.setattr(hlk, "run_tool", fake_run_tool)
+    if returned_level == 9:
+        assert hlk.compress_gdeflate(tmp_path / "unused-tool.exe", source, tmp_path) == payload
+    else:
+        with pytest.raises(RuntimeError, match="HLK payload contract"):
+            hlk.compress_gdeflate(tmp_path / "unused-tool.exe", source, tmp_path)
+    assert len(calls) == 2
+    assert calls[1][1] == "--verify"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["archive_install", "manifest_write", "post_verify"])
+def test_hlk_commit_failure_restores_archives_and_manifest(tmp_path: Path, monkeypatch, existing: bool, failure: str) -> None:
+    # No codec runs: inject publication failures after constructing valid archive containers.
+    initialize(tmp_path)
+    placeholder = tmp_path / "unused-tool.exe"
+    placeholder.write_bytes(b"never executed")
+    monkeypatch.setattr(hlk, "verify_tool", lambda *args: None)
+    monkeypatch.setattr(hlk, "compress_zstd", lambda tool, data: b"zstd:" + data)
+    monkeypatch.setattr(hlk, "compress_gdeflate", lambda tool, source, workspace: b"gdeflate:" + source.read_bytes())
+    if existing:
+        hlk.process(tmp_path, "sample", "dstoragetest", placeholder, placeholder, 1, False)
+    manifest_path = process_set.manifest_path(tmp_path, "sample")
+    old_manifest = manifest_path.read_bytes()
+    output_root = tmp_path / "dstorage" / "sample"
+    before = {path.name: path.read_bytes() for path in output_root.glob("*") if path.is_file()}
+    triggered = []
+    original_loader = hlk.load_module
+    original_replace = hlk.os.replace
+
+    def fail_once():
+        if not triggered:
+            triggered.append(failure)
+            raise OSError("injected publication failure")
+
+    if failure == "archive_install":
+        def replace_with_failure(source, destination):
+            if Path(destination).parent == output_root and Path(destination).name == "dstoragetest.gdeflate" and ".hlk.stage." in str(source):
+                fail_once()
+            return original_replace(source, destination)
+        monkeypatch.setattr(hlk.os, "replace", replace_with_failure)
+    else:
+        def load_with_failure(name, filename):
+            module = original_loader(name, filename)
+            if filename == "process-set.py":
+                if failure == "manifest_write":
+                    original_write = module.write_json_atomic
+                    def write_with_failure(path, document):
+                        fail_once()
+                        return original_write(path, document)
+                    module.write_json_atomic = write_with_failure
+                else:
+                    original_verify = module.verify_files
+                    calls = []
+                    def verify_with_failure(*args):
+                        calls.append(True)
+                        if len(calls) == 2:
+                            fail_once()
+                        return original_verify(*args)
+                    module.verify_files = verify_with_failure
+            return module
+        monkeypatch.setattr(hlk, "load_module", load_with_failure)
+    with pytest.raises(RuntimeError, match="rolled back"):
+        hlk.process(tmp_path, "sample", "dstoragetest", placeholder, placeholder, 1, existing)
+    assert triggered == [failure]
+    assert manifest_path.read_bytes() == old_manifest
+    assert {path.name: path.read_bytes() for path in output_root.glob("*") if path.is_file()} == before
+    assert not list(output_root.glob(".hlk.stage.*"))
+    assert not list((tmp_path / "manifests").glob("*.lock"))

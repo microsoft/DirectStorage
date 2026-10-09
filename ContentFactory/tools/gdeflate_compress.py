@@ -1,93 +1,80 @@
 #!/usr/bin/env python3
-"""Generate deterministic GDeflate variants for one Content Factory set."""
+"""Generate deterministic GDeflate derivatives at selected levels for a Content Factory set."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
-import re
 import shutil
-import struct
-import subprocess
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from functools import partial
+from typing import Any
 
-DEFAULT_LEVELS = tuple(range(1, 13))
-HEADER = struct.Struct("<IHHIIQQ")
-MAGIC = 0x31464447
-FILE_VERSION = 1
+from factory_common import (
+    directory_is_empty, load_module, set_lock as common_set_lock,
+    run_command, tool_version as common_tool_version, validate_executable, write_bytes_atomic,
+)
+from factory_contracts import parse_gdeflate_header
+
+
+# Match the native tool default; HLK encoding keeps its separate fixed level.
+DEFAULT_LEVEL = 9
 
 
 def load_driver():
-    path = Path(__file__).with_name("process-set.py")
-    spec = importlib.util.spec_from_file_location("process_set", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load Content Factory driver: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module("process_set", "process-set.py")
 
 
-def run_tool(arguments: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError(f"GDeflateContentTool timed out after {timeout} seconds") from error
-    except OSError as error:
-        raise RuntimeError(f"could not execute GDeflateContentTool: {error}") from error
+run_tool = partial(run_command, operation="GDeflateContentTool", text=True)
+
+tool_version = partial(common_tool_version, label="GDeflateContentTool")
 
 
-def tool_version(executable: Path) -> str:
-    result = run_tool([str(executable), "--version"], timeout=30)
-    text = (result.stdout or result.stderr).strip()
-    if result.returncode != 0:
-        raise RuntimeError(f"GDeflateContentTool --version failed: {text}")
-    match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
-    if not match:
-        raise RuntimeError("GDeflateContentTool --version returned no recognizable version")
-    return match.group(1)
+def validate_level(value: int) -> int:
+    # Select one supported level before starting the native tool.
+    if type(value) is not int or not 1 <= value <= 12:
+        raise ValueError("GDeflate level must be an integer from 1 through 12")
+    return value
 
 
 def validate_levels(values: list[int] | tuple[int, ...]) -> tuple[int, ...]:
-    if not values or any(type(value) is not int or value < 1 or value > 12 for value in values):
-        raise ValueError("GDeflate levels must be unique integers from 1 through 12")
-    if len(set(values)) != len(values):
+    # Stable, unique levels keep output names and processing order predictable.
+    if not values:
+        raise ValueError("GDeflate levels cannot be empty")
+    checked = tuple(validate_level(value) for value in values)
+    if len(set(checked)) != len(checked):
         raise ValueError("GDeflate levels cannot contain duplicates")
-    return tuple(sorted(values))
+    return tuple(sorted(checked))
+
+
+def resolve_levels(
+    levels: list[int] | tuple[int, ...] | None = None,
+    all_levels: bool = False,
+) -> tuple[int, ...]:
+    # A list covers one or several levels; the full sweep is an explicit alternative.
+    if levels is not None and all_levels:
+        raise ValueError("level list and all-levels cannot be combined")
+    if all_levels:
+        return tuple(range(1, 13))
+    return validate_levels((DEFAULT_LEVEL,) if levels is None else levels)
 
 
 def output_relative_path(source: str, set_name: str, level: int) -> str:
     source_path = Path(source)
+    # Preserve source subfolders and include the compression level in the name.
     filename = f"{source_path.name}-level{level}.gdeflate"
     parent = source_path.parent.as_posix()
     return f"gdeflate/{set_name}/{parent + '/' if parent != '.' else ''}{filename}"
 
 
 def read_header(path: Path) -> dict[str, int]:
-    data = path.read_bytes()
-    if len(data) < HEADER.size:
-        raise RuntimeError(f"GDeflate header is truncated: {path}")
-    magic, version, header_size, level, reserved, uncompressed_size, compressed_size = HEADER.unpack_from(data)
-    if magic != MAGIC or version != FILE_VERSION or header_size != HEADER.size or reserved != 0:
-        raise RuntimeError(f"invalid GDeflate header: {path}")
-    if level < 1 or level > 12:
-        raise RuntimeError(f"invalid GDeflate level in header: {path}")
-    if len(data) != header_size + compressed_size:
-        raise RuntimeError(f"GDeflate file size does not match header: {path}")
-    return {
-        "level": level,
-        "header_size": header_size,
-        "uncompressed_size": uncompressed_size,
-        "compressed_size": compressed_size,
-    }
+    return parse_gdeflate_header(path.read_bytes())
 
 
-def build_variants(
+def build_derivatives(
     root: Path,
     document: dict[str, Any],
     output_root: Path,
@@ -100,22 +87,21 @@ def build_variants(
         source_path = root / "originals" / set_name / Path(source["path"])
         if source["size"] == 0:
             raise ValueError(f"GDeflate source cannot be empty: {source['path']}")
+        # Generate only the levels selected for this source.
         for level in levels:
             relative = output_relative_path(source["path"], set_name, level)
             output = output_root / Path(relative).relative_to(Path("gdeflate") / set_name)
             output.parent.mkdir(parents=True, exist_ok=True)
-            result = run_tool([
+            run_tool([
                 str(executable), "--input", str(source_path), "--output", str(output),
                 "--level", str(level),
             ])
-            if result.returncode != 0:
-                raise RuntimeError(f"GDeflate generation failed: {(result.stderr or result.stdout).strip()}")
-            verify = run_tool([str(executable), "--verify", str(output)])
-            if verify.returncode != 0:
-                raise RuntimeError(f"GDeflate verification failed: {(verify.stderr or verify.stdout).strip()}")
+            # Check the generated stream before trusting the header or recording it.
+            run_tool([str(executable), "--verify", str(output)])
             header = read_header(output)
             if header["level"] != level or header["uncompressed_size"] != source["size"]:
                 raise RuntimeError(f"GDeflate metadata mismatch: {relative}")
+            # Record the exact file bytes, including the native tool's file header.
             data = output.read_bytes()
             records.append({
                 "path": relative,
@@ -134,47 +120,16 @@ def build_variants(
     return sorted(records, key=lambda item: item["path"])
 
 
-def directory_is_empty(path: Path) -> bool:
-    return not path.exists() or (path.is_dir() and not any(path.iterdir()))
-
-
-def write_bytes_atomic(path: Path, data: bytes) -> None:
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-@contextmanager
-def set_lock(root: Path, set_name: str) -> Iterator[None]:
-    lock = root / "manifests" / f".{set_name}.gdeflate.lock"
-    try:
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise RuntimeError(f"another GDeflate operation is active for set '{set_name}'") from error
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(str(os.getpid()))
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
+set_lock = partial(common_set_lock, stage="gdeflate", label="GDeflate")
 
 
 def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...], overwrite: bool) -> Path:
     driver = load_driver()
     root = root.resolve()
     set_name = driver.validate_set_name(set_name)
-    if executable.is_symlink():
-        raise ValueError("GDeflate executable cannot be a symbolic link")
-    executable = executable.resolve()
-    if not executable.is_file():
-        raise FileNotFoundError(f"GDeflate executable does not exist: {executable}")
+    levels = validate_levels(levels)
+    executable = validate_executable(executable)
+    # Record the encoder version so outputs can be traced back to their tool.
     version = tool_version(executable)
     manifest = driver.manifest_path(root, set_name)
 
@@ -188,6 +143,7 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
         if (existing or not directory_is_empty(final_root)) and not overwrite:
             raise FileExistsError("GDeflate outputs already exist; use --overwrite")
 
+        # Keep existing outputs intact while building their replacements.
         parent = root / "gdeflate"
         parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{set_name}.gdeflate.stage.", dir=parent))
@@ -197,8 +153,9 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
         old_tree_moved = False
         new_tree_installed = False
         try:
-            records = build_variants(root, document, stage, executable, levels)
+            records = build_derivatives(root, document, stage, executable, levels)
             updated = dict(document)
+            # Update only GDeflate records and retain other codecs' results.
             updated["derivatives"] = sorted(
                 [item for item in document["derivatives"] if item["format"] != "gdeflate"] + records,
                 key=lambda item: item["path"],
@@ -206,6 +163,7 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
             updated["tools"] = dict(document["tools"])
             updated["tools"]["GDeflateContentTool"] = {"version": version}
             driver.validate_manifest(updated)
+            # Back up the previous tree before installing the staged outputs.
             if final_root.exists():
                 os.replace(final_root, backup)
                 old_tree_moved = True
@@ -214,6 +172,7 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
             try:
                 driver.write_json_atomic(manifest, updated)
                 driver.verify_files(root, set_name, updated)
+            # Try to restore the old tree and manifest if committing the new set fails.
             except Exception as original_error:
                 rollback_errors: list[str] = []
                 try:
@@ -231,6 +190,7 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
                 raise
             shutil.rmtree(backup, ignore_errors=True)
             return manifest
+        # Remove staging files and recover any old tree that was not replaced.
         finally:
             shutil.rmtree(stage, ignore_errors=True)
             if backup.exists() and not final_root.exists():
@@ -240,15 +200,20 @@ def process(root: Path, set_name: str, executable: Path, levels: tuple[int, ...]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # Exact option names prevent the removed --level from abbreviating --levels.
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("set_name")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--gdeflate-exe", type=Path, required=True)
-    parser.add_argument("--levels", nargs="+", type=int, default=list(DEFAULT_LEVELS))
+    # One-item or multi-item lists and complete coverage are mutually exclusive.
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--levels", nargs="+", type=int, help="one or more levels from 1 through 12 (default: 9)")
+    selection.add_argument("--all-levels", action="store_true", help="explicitly generate all levels 1 through 12")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     try:
-        output = process(args.root, args.set_name, args.gdeflate_exe, validate_levels(args.levels), args.overwrite)
+        levels = resolve_levels(args.levels, args.all_levels)
+        output = process(args.root, args.set_name, args.gdeflate_exe, levels, args.overwrite)
         print(f"Updated {output}")
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

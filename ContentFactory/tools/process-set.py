@@ -11,14 +11,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from factory_common import write_bytes_atomic
+from factory_contracts import CONTENT_TYPES, TRANSFORM_CONTRACT
+
 SCHEMA_VERSION = 1
 TOOL_VERSION = "0.1.0"
+# Set names become directory names, so exclude unsafe Windows names.
 SET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FORMAT_DIRECTORIES = ("originals", "zstd", "gdeflate", "gacl", "dstorage")
 WINDOWS_RESERVED_NAMES = {
@@ -43,6 +45,7 @@ def validate_set_name(value: str) -> str:
 
 
 def sha256_file(path: Path) -> str:
+    # Hash in small reads rather than loading the whole file into memory.
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
@@ -61,6 +64,7 @@ def inventory_sources(root: Path, set_name: str) -> list[dict[str, Any]]:
     if not source_root.is_dir():
         raise FileNotFoundError(f"source set does not exist: {source_root}")
 
+    # Inspect links first, then sort files so inventories are repeatable.
     entries = list(source_root.rglob("*"))
     for path in entries:
         if path.is_symlink():
@@ -72,6 +76,7 @@ def inventory_sources(root: Path, set_name: str) -> list[dict[str, Any]]:
     if not files:
         raise ValueError(f"source set contains no files: {source_root}")
 
+    # Keep every source inside the set and record its exact size and hash.
     resolved_source_root = source_root.resolve()
     records: list[dict[str, Any]] = []
     for path in files:
@@ -87,6 +92,7 @@ def inventory_sources(root: Path, set_name: str) -> list[dict[str, Any]]:
     return records
 
 
+# New sets start with originals only; later stages add output records.
 def create_manifest(root: Path, set_name: str) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -102,6 +108,7 @@ def create_manifest(root: Path, set_name: str) -> dict[str, Any]:
 def validate_relative_manifest_path(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} must be a non-empty string")
+    # Manifest paths use forward slashes and must stay relative to the root.
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or "." in path.parts or "\\" in value:
         raise ValueError(f"{field} must be a safe normalized relative path")
@@ -114,6 +121,7 @@ def validate_file_record(record: object, field: str) -> dict[str, Any]:
     validate_relative_manifest_path(record.get("path"), f"{field}.path")
     if not isinstance(record.get("size"), int) or record["size"] < 0:
         raise ValueError(f"{field}.size must be a non-negative integer")
+    # A file record must contain a complete lowercase SHA-256 digest.
     digest = record.get("sha256")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError(f"{field}.sha256 must be a lowercase SHA-256")
@@ -134,6 +142,7 @@ def validate_output_path(path: str, format_name: str, set_name: str, field: str)
 def validate_manifest(document: object) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ValueError("manifest must be an object")
+    # Validate the overall shape before looking at individual records.
     required = {"schema_version", "set_name", "source_root", "sources", "derivatives", "archives", "tools"}
     if set(document) != required:
         raise ValueError(f"manifest keys must be exactly: {', '.join(sorted(required))}")
@@ -145,6 +154,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
     if document["source_root"] != f"originals/{set_name}":
         raise ValueError("source_root must match originals/<set-name>")
 
+    # Require a stable, unique source list to anchor all generated outputs.
     sources = document["sources"]
     if not isinstance(sources, list) or not sources:
         raise ValueError("sources must be a non-empty array")
@@ -156,6 +166,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
     if source_paths != sorted(source_paths) or len(source_paths) != len(set(source_paths)):
         raise ValueError("sources must be uniquely sorted by path")
 
+    # Each generated file records its source, codec settings, and verification result.
     derivatives = document["derivatives"]
     if not isinstance(derivatives, list):
         raise ValueError("derivatives must be an array")
@@ -169,9 +180,17 @@ def validate_manifest(document: object) -> dict[str, Any]:
             raise ValueError(f"derivatives[{index}].format is invalid")
         if not isinstance(item["parameters"], dict) or not isinstance(item["metadata"], dict):
             raise ValueError(f"derivatives[{index}] parameters and metadata must be objects")
+        # Check the metadata fields specific to each codec.
         if item["format"] == "zstd":
-            if set(item["parameters"]) != {"block_size_kb", "chunk_size_kb"}:
+            # Older records omitted the level; keep them readable without inventing a value.
+            keys = set(item["parameters"])
+            if keys not in ({"block_size_kb", "chunk_size_kb"},
+                            {"block_size_kb", "chunk_size_kb", "compression_level"}):
                 raise ValueError(f"derivatives[{index}] has invalid Zstd parameters")
+            if "compression_level" in item["parameters"]:
+                level = item["parameters"]["compression_level"]
+                if type(level) is not int or not 1 <= level <= 22:
+                    raise ValueError(f"derivatives[{index}] has invalid Zstd compression level")
             block_kb = item["parameters"]["block_size_kb"]
             chunk_kb = item["parameters"]["chunk_size_kb"]
             if (type(block_kb) is not int or type(chunk_kb) is not int or
@@ -182,6 +201,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
             if (type(item["metadata"]["frame_count"]) is not int or item["metadata"]["frame_count"] <= 0 or
                     type(item["metadata"]["uncompressed_size"]) is not int or item["metadata"]["uncompressed_size"] <= 0):
                 raise ValueError(f"derivatives[{index}] has invalid Zstd metadata values")
+        # GDeflate files include a header as well as the compressed bytes.
         elif item["format"] == "gdeflate":
             if set(item["parameters"]) != {"compression_level"}:
                 raise ValueError(f"derivatives[{index}] has invalid GDeflate parameters")
@@ -196,6 +216,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
                     metadata["uncompressed_size"] <= 0 or
                     item["size"] != metadata["header_size"] + metadata["compressed_size"]):
                 raise ValueError(f"derivatives[{index}] has invalid GDeflate metadata values")
+        # GACL must identify the texture format, transform, and selected mip.
         elif item["format"] == "gacl":
             parameter_keys = {
                 "texture_format", "zstd_level", "target_block_size", "transform_id",
@@ -209,16 +230,10 @@ def validate_manifest(document: object) -> dict[str, Any]:
                 raise ValueError(f"derivatives[{index}] has invalid GACL parameters or metadata")
             parameters = item["parameters"]
             metadata = item["metadata"]
-            transform_contract = {
-                "BC1": (1, "GACL_SHUFFLE_TRANSFORM_ZSTD_BC1_224"),
-                "BC3": (2, "GACL_SHUFFLE_TRANSFORM_ZSTD_BC3_116224"),
-                "BC4": (3, "GACL_SHUFFLE_TRANSFORM_ZSTD_BC4_116"),
-                "BC5": (4, "GACL_SHUFFLE_TRANSFORM_ZSTD_BC5_116116"),
-                "BC7": (7, "GACL_SHUFFLE_TRANSFORM_ZSTD_ONLY"),
-            }
+            # The transform ID and name must agree with the recorded texture format.
             texture_format = parameters["texture_format"]
-            if texture_format not in transform_contract or (
-                    parameters["transform_id"], parameters["transform_name"]) != transform_contract[texture_format]:
+            if texture_format not in TRANSFORM_CONTRACT or (
+                    parameters["transform_id"], parameters["transform_name"]) != TRANSFORM_CONTRACT[texture_format]:
                 raise ValueError(f"derivatives[{index}] has an unsupported GACL transform")
             if (type(parameters["zstd_level"]) is not int or not 1 <= parameters["zstd_level"] <= 22 or
                     type(parameters["target_block_size"]) is not int or
@@ -235,6 +250,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
                     type(metadata["compressed_size"]) is not int or metadata["compressed_size"] <= 0 or
                     metadata["compressed_size"] != item["size"] or metadata["container"] != "raw_zstd_stream"):
                 raise ValueError(f"derivatives[{index}] has invalid GACL metadata values")
+        # Tie the output to a known source and reject repeated output paths.
         validate_output_path(item["path"], item["format"], set_name, f"derivatives[{index}].path")
         validate_relative_manifest_path(item["source"], f"derivatives[{index}].source")
         if item["source"] not in source_paths:
@@ -248,6 +264,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
     if derivative_order != sorted(derivative_order):
         raise ValueError("derivatives must be sorted by path")
 
+    # Preserve validation of legacy derivative archives; new tools create only HLK triplets.
     archives = document["archives"]
     if not isinstance(archives, list):
         raise ValueError("archives must be an array")
@@ -268,6 +285,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
             raise ValueError(f"archives[{index}] has an invalid format or validation state")
         validate_output_path(item["path"], "dstorage", set_name, f"archives[{index}].path")
         archive_paths.append(item["path"])
+        # Entry indices and references must match the archive's recorded order.
         entries = item["entries"]
         if not isinstance(entries, list) or not entries:
             raise ValueError(f"archives[{index}].entries must be non-empty")
@@ -284,7 +302,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
                     raise ValueError(f"archives[{index}] references an unknown source")
             elif entry["derivative"] not in derivative_paths:
                 raise ValueError(f"archives[{index}] references an unknown derivative")
-            if entry["content_type"] not in {"unknown", "texture", "geometry", "text"}:
+            if entry["content_type"] not in CONTENT_TYPES:
                 raise ValueError(f"archives[{index}] has an invalid content type")
         if is_hlk_set:
             group = hlk_groups.setdefault(item["archive_group"], {})
@@ -295,6 +313,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
             ]
     if archive_paths != sorted(archive_paths) or len(archive_paths) != len(set(archive_paths)):
         raise ValueError("archives must be uniquely sorted by path")
+    # All three HLK archives must describe the same sources in the same order.
     for group_name, codecs in hlk_groups.items():
         if set(codecs) != {"uncompressed", "gdeflate", "zstd"}:
             raise ValueError(f"HLK archive group {group_name!r} must contain all three payload codecs")
@@ -302,6 +321,7 @@ def validate_manifest(document: object) -> dict[str, Any]:
         if any(membership != memberships[0] for membership in memberships[1:]):
             raise ValueError(f"HLK archive group {group_name!r} entries are not lockstep")
 
+    # Keep enough tool information to identify how the set was generated.
     tools = document["tools"]
     if not isinstance(tools, dict):
         raise ValueError("tools must be an object")
@@ -323,22 +343,14 @@ def manifest_path(root: Path, set_name: str) -> Path:
 
 def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(document, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
+    # Use sorted keys and a final newline so repeated writes produce the same bytes.
+    data = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    write_bytes_atomic(path, data)
 
 def reject_symlink_components(root: Path, relative: str, field: str) -> Path:
     path = root / Path(relative)
     current = root
+    # Check each directory component, not just the final file, for symbolic links.
     for part in Path(relative).parts:
         current /= part
         if current.is_symlink():
@@ -351,10 +363,12 @@ def reject_symlink_components(root: Path, relative: str, field: str) -> Path:
 
 
 def verify_files(root: Path, set_name: str, document: dict[str, Any]) -> None:
+    # Reinventory originals to catch missing, added, or changed source files.
     actual_sources = inventory_sources(root, set_name)
     if actual_sources != document["sources"]:
         raise ValueError("source inventory differs from the manifest")
 
+    # Check generated files against the sizes and hashes already recorded.
     for group in ("derivatives", "archives"):
         for record in document[group]:
             path = reject_symlink_components(root, record["path"], f"{group} path")
@@ -378,6 +392,7 @@ def process(root: Path, set_name: str, verify_only: bool, overwrite: bool) -> Pa
     set_name = validate_set_name(set_name)
     output = manifest_path(root, set_name)
 
+    # Verification reads the existing set without regenerating its manifest.
     if verify_only:
         document = load_manifest(output)
         if document["set_name"] != set_name:
@@ -385,6 +400,7 @@ def process(root: Path, set_name: str, verify_only: bool, overwrite: bool) -> Pa
         verify_files(root, set_name, document)
         return output
 
+    # Do not replace an inventory that would lose existing output records.
     if output.exists() and not overwrite:
         raise FileExistsError(f"manifest already exists; use --overwrite: {output}")
     if output.exists():
@@ -392,6 +408,7 @@ def process(root: Path, set_name: str, verify_only: bool, overwrite: bool) -> Pa
         if existing["derivatives"] or existing["archives"]:
             raise ValueError("--overwrite cannot discard recorded derivatives or archives")
 
+    # Create the inventory and empty output folders only after those checks pass.
     document = validate_manifest(create_manifest(root, set_name))
     ensure_format_directories(root, set_name)
     write_json_atomic(output, document)
