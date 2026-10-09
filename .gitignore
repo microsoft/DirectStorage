@@ -127,3 +127,10 @@ reports/
 #CMake output folders
 [Oo]ut
 [Bb]uild
+build-*/
+
+# Python and local test outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+TestTemp/

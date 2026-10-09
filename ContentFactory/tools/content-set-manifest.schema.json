@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DirectStorage Content Factory set manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "set_name", "source_root", "sources", "derivatives", "archives", "tools"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "set_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?$"
+    },
+    "source_root": { "type": "string", "pattern": "^originals/[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sourceRecord" }
+    },
+    "derivatives": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/derivativeRecord" }
+    },
+    "archives": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/archiveRecord" }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/toolRecord" }
+    }
+  },
+  "$defs": {
+    "safePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "fileFields": {
+      "type": "object",
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safePath" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "sourceRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/fileFields" },
+        { "type": "object", "additionalProperties": false, "required": ["path", "size", "sha256"], "properties": {
+          "path": { "$ref": "#/$defs/safePath" }, "size": { "type": "integer", "minimum": 0 }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }}
+      ]
+    },
+    "derivativeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256", "source", "format", "parameters", "metadata", "validation"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safePath" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "source": { "$ref": "#/$defs/safePath" },
+        "format": { "enum": ["zstd", "gdeflate", "gacl"] },
+        "parameters": { "type": "object" },
+        "metadata": { "type": "object" },
+        "validation": { "const": "pass" }
+      }
+    },
+    "archiveRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256", "format", "entries", "validation"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safePath" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "format": { "const": "dstorage" },
+        "archive_group": { "type": "string", "minLength": 1 },
+        "payload_codec": { "enum": ["uncompressed", "gdeflate", "zstd"] },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "content_type"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "derivative": { "$ref": "#/$defs/safePath" },
+              "source": { "$ref": "#/$defs/safePath" },
+              "content_type": { "enum": ["unknown", "texture", "geometry", "text"] }
+            },
+            "oneOf": [
+              { "required": ["derivative"] },
+              { "required": ["source"] }
+            ]
+          }
+        },
+        "validation": { "const": "pass" }
+      }
+    },
+    "toolRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "revision": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
