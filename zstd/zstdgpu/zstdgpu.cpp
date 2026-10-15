@@ -820,7 +820,7 @@ struct zstdgpu_PerRequestContextImpl
      *  If `zstdgpu_SetupFrameInfoConstants` was NOT called, these numbers are originally
      *  set to zero in `zstdgpu_CreatePerRequestContext`, meaning they can't be used to allocate
      *  memory until Zstd frames are parsed and the number of blocks read back to CPU
-     *  either through `zstdgpu_SubmitWithInteralMemory` or `zstdgpu_GetGpuMemoryRequirement`
+     *  either through `zstdgpu_SubmitWithInternalMemory` or `zstdgpu_GetGpuMemoryRequirement`
      */
     uint32_t                zstdRawBlockCountMax;
     uint32_t                zstdRleBlockCountMax;
@@ -1763,7 +1763,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerReques
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
-ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext req, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList)
+ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext req, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList)
 {
     uint32_t proceed = 1;
     uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
@@ -1872,7 +1872,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext r
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
-ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequestContext req,
+ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerRequestContext req,
                                                               ID3D12GraphicsCommandList *cmdList)
 {
     uint32_t proceed = 1;

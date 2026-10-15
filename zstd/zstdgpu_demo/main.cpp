@@ -2200,7 +2200,7 @@ static int demoRun(void *demoCtx)
                     }
                     else
                     {
-                        zstdgpu_SubmitAllStagesWithInteralMemory(perRequestContext, cmdList);
+                        zstdgpu_SubmitAllStagesWithInternalMemory(perRequestContext, cmdList);
                     }
                 }
                 else
@@ -2232,7 +2232,7 @@ static int demoRun(void *demoCtx)
                         }
                         else
                         {
-                            zstdgpu_SubmitWithInteralMemory(perRequestContext, stageIndex, cmdList);
+                            zstdgpu_SubmitWithInternalMemory(perRequestContext, stageIndex, cmdList);
                         }
                         if (stageIndex < 2 && zstdgpu_IsReadbackRequired(perRequestContext, stageIndex))
                         {

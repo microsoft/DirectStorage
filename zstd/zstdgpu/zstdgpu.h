@@ -135,7 +135,7 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_DestroyPerRequestContext(void **outMemoryBloc
 
 /**
  *  @brief      A callback that is going to be called during execution of `zstdgpu_SubmitWithExternalMemory`
- *              or `zstdgpu_SubmitWithInteralMemory` with `stageIndex == 0` in order to let the calling
+ *              or `zstdgpu_SubmitWithInternalMemory` with `stageIndex == 0` in order to let the calling
  *              site of those two functions to load into CPU-mapped memory of UPLOAD or GPU_UPLOAD heap -- a memory block
  *              containing compressed Zstd frames and a buffer with the offset and the size of each compressed Zstd frame in
  *              the memory block with compressed Zstd frames.
@@ -162,7 +162,7 @@ typedef void zstdgpu_UploadFrames(void *dstFramesMemory, uint32_t dstFramesMemor
  *  @param[in]  inPerRequestContext     A context holding necessary state per decompression request.
  *  @param[in]  frameCount              The total number of compressed Zstd frames that are going to be decompressed.
  *  @param[in]  framesMemorySizeInBytes The total number of bytes the block with compressed Zstd frames requires (it is fine to have a buffer with non-adjacent frames)
- *  @param[in]  uploadCallback          A pointer to a callback that is going to be called during the execution of `zstdgpu_SubmitWithExternalMemory` or `zstdgpu_SubmitWithInteralMemory` with `stageIndex == 0`
+ *  @param[in]  uploadCallback          A pointer to a callback that is going to be called during the execution of `zstdgpu_SubmitWithExternalMemory` or `zstdgpu_SubmitWithInternalMemory` with `stageIndex == 0`
  *                                      in order to let the calling site of those two functions to upload the memory block with compressed Zstd frames and the offset and the size for each compressed Zstd frame in that block.
  *  @param[in]  uploadUserdata          A pointer to a userdata passed into `uploadCallback`
  *
@@ -190,11 +190,10 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outS
  *  @brief      Sets up the caller-supplied output resources for a decompression request.
  *
  *  @param[in]  inPerRequestContext     A context holding necessary state per decompression request.
- *  @param[in]  framesMemory            A pointer to a ID3D12Resource in GPU_UPLOAD or DEFAULT heap where the compressed Zstd frames are placed.
- *  @param[in]  framesMemorySizeInBytes The total number of bytes the block with compressed Zstd frames contains (it is fine to have a buffer with non-adjacent Zstd frames)
- *                                      NOTE: the size must a multiple of 4 bytes
- *  @param[in]  frames                  A pointer to a ID3D12Resource in GPU_UPLOAD or DEFAULT heap where the offset (relative to `framesMemory` start) and the size of each Zstd frame are placed in the form of `zstdgpu_OffsetAndSize` structures.
- *  @param[in]  frameCount              The total number `zstdgpu_OffsetAndSize` structures placed `frames` buffers.
+ *  @param[in]  framesMemory            A pointer to a writable, UAV-capable ID3D12Resource where the uncompressed Zstd frames are written.
+ *  @param[in]  framesMemorySizeInBytes The total number of writable bytes in `framesMemory`. It must cover all output ranges described by `frames`.
+ *  @param[in]  frames                  A pointer to an ID3D12Resource containing the offset (relative to `framesMemory`) and decompressed size of each output frame as `zstdgpu_OffsetAndSize` structures.
+ *  @param[in]  frameCount              The total number of `zstdgpu_OffsetAndSize` structures in `frames`. It must match the number of input frames.
  *  @param[in]  frameStatus             A pointer to an ID3D12Resource (DEFAULT heap, UAV-capable) sized to hold one UINT32 per input frame which receives an HRESULT of the decompression status.
  *                                      NOTE: See zstdgpu_shared_structs.h for the status code definitions.
  */
@@ -293,7 +292,7 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_Per
  *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
  *              for `stageIndex` supplied into this function.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList);
+ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList);
 
 /**
  *  @brief      Submits all required decompression commands into a command list for all stages (single-submission mode)
@@ -302,4 +301,4 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInteralMemory(zstdgpu_PerRequestCon
  *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
  *
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithInteralMemory(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12GraphicsCommandList *cmdList);
+ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12GraphicsCommandList *cmdList);
