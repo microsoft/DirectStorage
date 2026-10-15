@@ -101,18 +101,14 @@ preserved and publication is refused.
 
 The launcher finds `bin` next to its executable; users do not pass encoder paths. Relative input paths in a JSON request resolve from the request file's directory. Keep all processing settings in the JSON file; see the included README and example.
 
-## Source-only verification
+## Validation scope
 
-The packaging unit tests create fake outputs and mock subprocess calls. They do
-not configure CMake, compile native code, execute native tools, install packages,
-or run PyInstaller:
+The package-planning and assembly tests are preserved on branch `users/rohanborkar/content-factory-tests-cache`, at snapshot commit `d3fd1b4`, rather than included in this initial implementation branch. Those tests mock native builds and PyInstaller; their success is not proof of a working native build or portable executable.
+
+You can inspect the builder without starting a build:
 
 ```powershell
 python .\ContentFactory\build-package.py --help
-python -m unittest discover -s .\ContentFactory\tests -p test_build_package.py
 ```
 
-A passing mock suite verifies planning, command arguments, output safety, and
-assembly logic. It is **not** proof that an MSVC build or PyInstaller distribution
-has succeeded. An approved real build and a separate-machine smoke test are
-still required before claiming portability has been validated.
+An approved real build and a separate-machine smoke test are still required before claiming portability has been validated.

@@ -119,15 +119,13 @@ Developers use `build-package.py` to compile all three tools from existing local
 
 No dependencies are downloaded by the builder. Native configure/build and PyInstaller freezing have not been executed in the source-only validation below; an approved build and clean-machine smoke test are required before claiming portability is verified.
 
-## Validation sources
+## Validation scope
 
-`tests/test_codec_stages.py` combines the Zstd, GDeflate and GACL stage tests, with separate codec sections and unchanged native prerequisites. `tests/test_hlk_archive.py` checks the direct writer and independent reader and checks structure, stored payload bytes, deterministic rebuilding, and malformed tables. `tests/test_native_tools.py` retains separate real GDeflate/GACL classes and their original tool-environment requirements. Unit-test fixtures and codec stand-ins remain; they are not production compressed data. There is no experimental target, standalone source generator, or factory-specific GitHub Actions workflow. For pure-Python validation, clear native-tool variables, ignore `test_native_tools.py`, and deselect `GDeflateCompressTests`; these tests are not native validation. The native tests require real tool paths in `GDEFLATE_CONTENT_TOOL` and `GACL_CONTENT_TOOL`. The codec stand-ins do not produce production compressed streams.
+The Content Factory tests and encoding stand-ins are preserved on branch `users/rohanborkar/content-factory-tests-cache`; they are not included in this initial implementation branch. The saved test snapshot is commit `d3fd1b4`.
 
-The known larger-input GDeflate crash remains unresolved. Native worker tests use small inputs but have not been executed against this change; separately approved runtime validation remains necessary. Do not treat these checks as full production-corpus or GPU/runtime sign-off. The GACL archive contract and BC7 mode-split coverage also remain open.
+Before the tests were separated, Python/stand-in checks passed and a six-original comparison confirmed 134 generated payloads and the report remained byte-identical, with deterministic rebuilding and unchanged originals. These checks do not establish native or GPU/runtime correctness. The single-file native worker, native package build, real encoders, and PyInstaller distribution still require approved compilation/runtime validation and a clean-machine smoke test.
 
-## Verification scope
-
-The final pure-Python/stand-in suite passed **258 tests**, with no failures or skips; six native-class tests were deselected and the native module excluded. A separate six-original comparison confirmed **134 generated payloads and the full report** remained byte-identical, deterministic rebuilds, and unchanged originals. Tests cover JSON field/type checks, absolute/relative-path semantics, bundled tool discovery, mocked CMake/freezer commands and assembly, output safety, existing generation checks, and failure/rerun behavior. The native worker changed and remains unbuilt/unexecuted. No native builds, real encoders, or PyInstaller freezing ran; portability requires separate approved validation.
+The known larger-input GDeflate issue remains unresolved. The GACL archive contract and BC7 mode-split coverage remain open.
 
 ## Reading the code
 
