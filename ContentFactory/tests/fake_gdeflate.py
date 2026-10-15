@@ -9,6 +9,7 @@ HEADER = struct.Struct("<IHHIIQQ")
 MAGIC = 0x31464447
 
 
+# Validate the fake GDeflate header and sizes, then return the stored payload.
 def decode(path: Path) -> bytes:
     data = path.read_bytes()
     magic, version, header_size, level, reserved, original_size, compressed_size = HEADER.unpack_from(data)
@@ -20,6 +21,7 @@ def decode(path: Path) -> bytes:
     return payload
 
 
+# Emulate GDeflate version, verification, and deterministic file generation commands.
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--version", action="store_true")

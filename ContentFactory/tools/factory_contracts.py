@@ -23,6 +23,7 @@ GDEFLATE_MAGIC = 0x31464447
 GDEFLATE_VERSION = 1
 
 
+# Validate the standalone GDeflate envelope and return its level and size fields.
 def parse_gdeflate_header(data: bytes) -> dict[str, int]:
     # Check the header is complete before unpacking fields from it.
     if len(data) < GDEFLATE_HEADER.size:

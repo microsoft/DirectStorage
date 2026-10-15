@@ -22,12 +22,23 @@ if(NOT EXISTS "${GACL_ROOT}/ThirdParty/zstd/lib/zstd.h")
     message(FATAL_ERROR "Initialize the pinned GACL ThirdParty/zstd submodule")
 endif()
 
-set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+option(CONTENT_FACTORY_BUILD_ZSTD_PROGRAMS "Build bundled zstd CLI" OFF)
+set(ZSTD_BUILD_PROGRAMS ${CONTENT_FACTORY_BUILD_ZSTD_PROGRAMS} CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
-add_subdirectory("${GACL_ROOT}/ThirdParty/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd" EXCLUDE_FROM_ALL)
+set(ZSTD_PROGRAMS_LINK_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_USE_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+set(ZSTD_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_LZMA_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_LZ4_SUPPORT OFF CACHE BOOL "" FORCE)
+if(NOT TARGET libzstd_static)
+    add_subdirectory("${GACL_ROOT}/ThirdParty/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd" EXCLUDE_FROM_ALL)
+endif()
+if(CONTENT_FACTORY_BUILD_ZSTD_PROGRAMS AND NOT TARGET zstd)
+    message(FATAL_ERROR "ContentFactory requires the bundled zstd CLI target")
+endif()
 
 add_library(gacl_shuffle_stable STATIC
     "${GACL_ROOT}/Lib/shuffle/bc1.cpp"
@@ -48,14 +59,10 @@ target_compile_definitions(gacl_shuffle_stable PUBLIC
 
 add_executable(GACLContentTool main.cpp)
 target_include_directories(GACLContentTool PRIVATE
-    "${GACL_ROOT}/Api/includes"
-    "${GACL_ROOT}/Lib"
     "${GACL_ROOT}/Lib/shuffle"
     "${GACL_ROOT}/ThirdParty/zstd/lib"
 )
 target_compile_definitions(GACLContentTool PRIVATE
-    GACL_INCLUDE_BLER=0
-    GACL_INCLUDE_CLER=0
     ZSTD_STATIC_LINKING_ONLY
 )
 target_link_libraries(GACLContentTool PRIVATE gacl_shuffle_stable libzstd_static)

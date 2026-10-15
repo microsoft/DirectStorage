@@ -2,43 +2,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 
-def load_module(name: str, filename: str):
-    # Load a sibling script even if its filename contains a dash.
-    path = Path(__file__).with_name(filename)
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    # Register the module so classes defined inside it can find their module name.
-    previous = sys.modules.get(name)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    # Restore the previous registration if loading fails.
-    except Exception:
-        if previous is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = previous
-        raise
-    return module
-
-
+# Report whether an output directory is absent or contains no entries.
 def directory_is_empty(path: Path) -> bool:
     return not path.exists() or (path.is_dir() and not any(path.iterdir()))
 
 
+# Flush bytes to a sibling temporary file before replacing the destination.
 def write_bytes_atomic(path: Path, data: bytes) -> None:
     # Write beside the destination so the final rename stays on the same filesystem.
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -55,24 +32,32 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-@contextmanager
-def set_lock(root: Path, set_name: str, stage: str, label: str) -> Iterator[None]:
-    # Keep the existing stage-specific names. This is not a cross-stage mutex.
-    lock = root / "manifests" / f".{set_name}.{stage}.lock"
+# Reject linked path components and paths resolving outside the content root.
+def reject_symlink_components(root: Path, relative: str, field: str) -> Path:
+    """Reject linked components and resolved escapes before reading or writing content files."""
+    root = root.resolve()
+    path = root / Path(relative)
+    current = root
+    for part in Path(relative).parts:
+        current /= part
+        # Junctions are also redirects on Windows; is_junction is unavailable on older Python.
+        junction = getattr(current, "is_junction", lambda: False)()
+        if current.is_symlink() or junction:
+            raise ValueError(f"{field} cannot contain symbolic links or junctions: {relative}")
     try:
-        # Create the lock exclusively; an existing lock means this stage is already active.
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise RuntimeError(f"another {label} operation is active for set '{set_name}'") from error
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(str(os.getpid()))
-        # Keep the lock until the caller finishes, including when it raises an error.
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
+        path.resolve().relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"{field} escapes the Content Factory root: {relative}") from error
+    return path
 
 
+# Find a packaged encoder relative to the application, never through the caller's PATH.
+def bundled_tool(filename: str) -> Path:
+    application = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+    return application / "bin" / filename
+
+
+# Validate a regular executable path without launching the tool.
 def validate_executable(executable: Path) -> Path:
     """Check the supplied file path without executing it."""
     # Reject links and missing files here; do not run the tool during this check.
@@ -84,18 +69,17 @@ def validate_executable(executable: Path) -> Path:
     return resolved
 
 
-def _output_text(value: str | bytes | None) -> str:
-    return (value.decode("utf-8", "replace") if isinstance(value, bytes) else value or "").strip()
-
-
+# Format a bounded subprocess-output excerpt for an error message.
 def _diagnostic_output(value: str | bytes | None) -> str:
     # A failed decoder may have emitted a large binary payload. Bound the error message.
     if value is None:
         return "<empty>"
-    text = _output_text(value[:4096]) or "<empty>"
+    excerpt = value[:4096]
+    text = (excerpt.decode("utf-8", "replace") if isinstance(excerpt, bytes) else excerpt).strip() or "<empty>"
     return text + ("\n<truncated>" if len(value) > 4096 else "")
 
 
+# Run a tool with captured output and report execution errors, timeouts, or failure exits.
 def run_command(
     arguments: list[str],
     *,
@@ -134,13 +118,17 @@ def run_command(
     return result
 
 
+# Run the version command and extract its version number from the returned banner.
 def tool_version(
     executable: Path, label: str, pattern: str = r"\b(\d+\.\d+\.\d+)\b", *, timeout: int = 30,
 ) -> str:
     # Read the version once the caller is ready to execute the tool.
     result = run_command([str(executable), "--version"], operation=f"{label} --version", text=True, timeout=timeout)
     # Extract the version number without depending on the rest of the banner.
-    match = re.search(pattern, _output_text(result.stdout or result.stderr))
+    banner = result.stdout or result.stderr or ""
+    if isinstance(banner, bytes):
+        banner = banner.decode("utf-8", "replace")
+    match = re.search(pattern, banner.strip())
     if not match:
         raise RuntimeError(f"{label} --version returned no recognizable version")
     return match.group(1)

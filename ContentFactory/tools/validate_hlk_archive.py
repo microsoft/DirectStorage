@@ -8,7 +8,6 @@ Archive layout:
 
 from __future__ import annotations
 
-import argparse
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +30,7 @@ class ArchiveEntry:
     size: int
 
 
+# Validate the archive header and ordered payload ranges and return its entry table.
 def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
     file_size = path.stat().st_size
     with path.open("rb") as stream:
@@ -66,17 +66,3 @@ def parse_archive(path: Path) -> tuple[list[ArchiveEntry], int]:
             previous_end = offset + size
 
     return entries, file_size
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archive", type=Path)
-    args = parser.parse_args()
-
-    # Read-only validation does not extract payloads or write reports.
-    entries, file_size = parse_archive(args.archive)
-    print(f"Validated {len(entries)} entries in {args.archive} ({file_size} bytes)")
-    return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -18,6 +18,6 @@ if (WIN32 AND GDEFLATE_BUILD_TESTS)
 add_subdirectory("GDeflateTest")
 endif ()
 
-if (GDEFLATE_BUILD_CONTENT_TOOL)
+if (WIN32 AND GDEFLATE_BUILD_CONTENT_TOOL)
 add_subdirectory("GDeflateContentTool")
 endif ()

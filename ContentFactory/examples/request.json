@@ -1,0 +1,21 @@
+{
+  "input_directory": "../sample-input",
+  "stages": ["all"],
+  "overwrite": false,
+  "zstd": {
+    "shader_matrix": false,
+    "block_sizes_kb": [16],
+    "chunk_sizes_kb": [256]
+  },
+  "gdeflate": {
+    "levels": [9]
+  },
+  "gacl": {
+    "zstd_level": 19,
+    "target_block_size": 65536
+  },
+  "hlk": {
+    "archive_prefix": "dstoragetest",
+    "alignment": 1
+  }
+}

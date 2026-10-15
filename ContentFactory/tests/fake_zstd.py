@@ -7,6 +7,7 @@ import sys
 MAGIC = b"FZST"
 
 
+# Emulate Zstd version, framed decoding, and encoding with required framing options.
 def main() -> int:
     if "--version" in sys.argv:
         print("fake-zstd 1.0")
@@ -33,8 +34,7 @@ def main() -> int:
     window_log = next((arg.split("=", 1)[1].split("=", 1)[1] for arg in sys.argv
                        if arg.startswith("--zstd=wlog=")), None)
     # Both shader derivatives and single-frame HLK entries explicitly use level 19.
-    if ((block_size is not None and "-19" not in sys.argv)
-            or (block_size is None and "-19" not in sys.argv)
+    if ("-19" not in sys.argv
             or stream_size is None or int(stream_size) != len(data)
             or (block_size is None and window_log != "18") or (block_size is not None and int(block_size) <= 0)):
         print("missing or invalid framing options", file=sys.stderr)

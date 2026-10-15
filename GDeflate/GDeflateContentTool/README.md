@@ -1,6 +1,35 @@
 # GDeflate Content Tool
 
-`GDeflateContentTool` creates deterministic, standalone GDeflate content files for DirectStorage infrastructure testing. Every generated file is decompressed on the CPU and compared byte-for-byte with its source before it is accepted.
+`GDeflateContentTool` is the Windows native single-file compression worker for Content Factory. It reads one regular file and writes one standalone GDeflate content file. Each compression request validates the compressed bytes in memory, then reads and decompresses the written file and compares it byte-for-byte with the source.
+
+## Build
+
+```powershell
+cmake -S GDeflate -B out/gdeflate-content -A x64 `
+  -DGDEFLATE_BUILD_DEMO=OFF `
+  -DGDEFLATE_BUILD_TESTS=OFF `
+  -DGDEFLATE_BUILD_CONTENT_TOOL=ON
+cmake --build out/gdeflate-content --config Release --target GDeflateContentTool
+```
+
+The content-tool option defaults to ON, but the target is added only on Windows. Initialize `GDeflate/3rdparty/libdeflate` before configuring the build.
+
+## Native worker
+
+```powershell
+GDeflateContentTool.exe `
+  --input original.dds `
+  --output generated/original.dds.gdeflate `
+  --level 9
+```
+
+- `--input` must identify one non-empty regular file, not a directory.
+- `--output` identifies one file. Missing parent directories are created.
+- `--level` accepts unsigned decimal integers from `1` through `12`; the default is `9`. Signs, whitespace, trailing text, and overflow are rejected.
+- `--overwrite` allows replacement of an existing output file. The input itself, including a hardlink alias, cannot be the output; output directories are rejected.
+- `--version` prints the worker identity and exits.
+
+The worker does not enumerate directories, produce JSON sidecars, or expose a separate verification command. Successful compression includes both internal round-trip checks. A pre-existing `.syncing` staging path is rejected rather than truncated.
 
 ## File format
 
@@ -16,57 +45,12 @@ Each `.gdeflate` file contains a 32-byte little-endian header followed by one GD
 | uncompressed size | `uint64` | Original byte length |
 | compressed size | `uint64` | GDeflate payload length |
 
-This format deliberately does not reuse `GDeflateDemo/CompressedFile.h`, whose on-disk size field is the platform-dependent C++ type `size_t`.
+## Content Factory
 
-## Build
-
-```powershell
-cmake -S GDeflate -B out/gdeflate-content -A x64 `
-  -DGDEFLATE_BUILD_DEMO=OFF `
-  -DGDEFLATE_BUILD_TESTS=OFF `
-  -DGDEFLATE_BUILD_CONTENT_TOOL=ON
-cmake --build out/gdeflate-content --config Release --target GDeflateContentTool
-```
-
-Initialize `GDeflate/3rdparty/libdeflate` before configuring the build.
-
-## Create content
-
-Single file:
+For the public JSON-driven interface, use:
 
 ```powershell
-GDeflateContentTool.exe `
-  --input original.dds `
-  --output original.dds.gdeflate `
-  --level 9
+ContentFactory.exe --config request.json
 ```
 
-Directory tree:
-
-```powershell
-GDeflateContentTool.exe `
-  --input originals `
-  --output gdeflate `
-  --recursive `
-  --level 9
-```
-
-Use `--overwrite` for an intentional deterministic rebuild. Directory processing writes `variants.json` beside the generated hierarchy. The sidecar excludes runtime timing measurements so identical inputs and tool versions produce byte-identical metadata.
-
-The tool accepts every compression level exposed by the GDeflate library: `1` through `12`.
-
-The existing `GDeflateDemo` highlights three DirectStorage presets within that range:
-
-- `1` — fastest compression
-- `9` — default
-- `12` — highest compression
-
-## Verify content
-
-```powershell
-GDeflateContentTool.exe --verify gdeflate --recursive
-```
-
-Verification checks the header, file length, compression level, and GDeflate stream. Generation additionally compares decompressed bytes with the source bytes. Source and payload SHA-256 values are recorded in `variants.json`.
-
-Empty inputs are rejected because the GDeflate library requires a non-empty input buffer.
+Content Factory owns request processing and output orchestration. See `ContentFactory/README.md` for the request format and `ContentFactory/BUILDING.md` for packaging. The commands above are for building and invoking the native worker directly.

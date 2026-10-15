@@ -3,23 +3,25 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
 import os
 import shutil
-import struct
 import tempfile
+import content_report
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from functools import partial
 from typing import Any
 
 from factory_common import (
-    directory_is_empty, load_module, set_lock as common_set_lock,
-    run_command, tool_version as common_tool_version, validate_executable, write_bytes_atomic,
+    directory_is_empty,
+    reject_symlink_components,
+    run_command,
+    validate_executable,
+    tool_version as common_tool_version,
 )
-from factory_contracts import TRANSFORM_CONTRACT, ZSTD_COMPRESSION_LEVEL
+from factory_contracts import TRANSFORM_CONTRACT
 
 
 DDS_MAGIC = 0x20534444
@@ -55,13 +57,13 @@ DXGI_FORMATS = {
 }
 
 # Use the same transform names and IDs that the manifest validator checks.
-TRANSFORM_IDS = {name: item[0] for name, item in TRANSFORM_CONTRACT.items()}
-TRANSFORM_NAMES = {name: item[1] for name, item in TRANSFORM_CONTRACT.items()}
+TRANSFORM_IDS = {name: transform[0] for name, transform in TRANSFORM_CONTRACT.items()}
+TRANSFORM_NAMES = {name: transform[1] for name, transform in TRANSFORM_CONTRACT.items()}
 
 
-@dataclass(frozen=True)
 # Describe the first image's top mip; the payload is read separately.
-class DDSFirstMip:
+@dataclass(frozen=True)
+class DDSFirstMipInfo:
     format: str
     format_name: str
     width: int
@@ -72,16 +74,15 @@ class DDSFirstMip:
     data_size: int
 
 
-def load_driver():
-    return load_module("process_set", "process-set.py")
-
+# Read one little-endian DDS field after checking that its bytes are present.
 def read_u32(data: bytes, offset: int) -> int:
     if offset < 0 or offset + 4 > len(data):
         raise ValueError("truncated DDS header")
     return struct.unpack_from("<I", data, offset)[0]
 
 
-def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
+# Identify a supported DDS format and locate array item zero, mip zero block data.
+def parse_dds_first_mip(data: bytes) -> DDSFirstMipInfo:
     # Check the basic DDS header before reading dimensions and format fields.
     if len(data) < 128 or read_u32(data, 0) != DDS_MAGIC or read_u32(data, 4) != 124:
         raise ValueError("not a valid DDS file")
@@ -118,41 +119,50 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMip:
     size = blocks_x * blocks_y * bytes_per_block
     if offset + size > len(data):
         raise ValueError("DDS first mip exceeds file bounds")
-    return DDSFirstMip(format_name, exact_name, width, height, mip_count, array_size, offset, size)
+    return DDSFirstMipInfo(
+        format=format_name,
+        format_name=exact_name,
+        width=width,
+        height=height,
+        mip_count=mip_count,
+        array_size=array_size,
+        data_offset=offset,
+        data_size=size,
+    )
 
 
 run_tool = partial(run_command, operation="GACLContentTool", text=True)
 
 tool_version = partial(common_tool_version, label="GACLContentTool")
 
-def output_relative_path(source: str, set_name: str) -> str:
+# Preserve source subfolders when naming the conditioned GACL derivative.
+def output_relative_path(source: str) -> str:
     source_path = Path(source)
     filename = f"{source_path.name}.gacl"
-    parent = source_path.parent.as_posix()
-    return f"gacl/{set_name}/{parent + '/' if parent != '.' else ''}{filename}"
+    return (Path("generated") / "gacl" / source_path.parent / filename).as_posix()
 
 
+# Condition supported DDS first-mip payloads, verify them, and collect output records.
 def build_variants(
-    root: Path,
-    document: dict[str, Any],
+    input_directory: Path,
+    manifest_data: dict[str, Any],
     output_root: Path,
     executable: Path,
     zstd_level: int,
     target_block_size: int,
 ) -> list[dict[str, Any]]:
-    set_name = document["set_name"]
-    records: list[dict[str, Any]] = []
-    for source in document["sources"]:
+    derivative_records: list[dict[str, Any]] = []
+    for original_file in manifest_data["sources"]:
         # Only DDS inputs participate in this texture-conditioning stage.
-        if Path(source["path"]).suffix.lower() != ".dds":
+        if Path(original_file["path"]).suffix.lower() != ".dds":
             continue
-        source_path = root / "originals" / set_name / Path(source["path"])
+        source_path = reject_symlink_components(input_directory, original_file["path"], "original file")
         source_data = source_path.read_bytes()
-        info = parse_dds_first_mip(source_data)
+        mip_info = parse_dds_first_mip(source_data)
         # Pass the first mip's block bytes to the codec, not the DDS container.
-        payload = source_data[info.data_offset:info.data_offset + info.data_size]
-        relative = output_relative_path(source["path"], set_name)
-        output = output_root / Path(relative).relative_to(Path("gacl") / set_name)
+        payload = source_data[mip_info.data_offset:mip_info.data_offset + mip_info.data_size]
+        relative = output_relative_path(original_file["path"])
+        output = output_root / Path(relative).relative_to(Path("generated") / "gacl")
         output.parent.mkdir(parents=True, exist_ok=True)
         payload_path = output.with_suffix(output.suffix + ".payload")
         payload_path.write_bytes(payload)
@@ -160,54 +170,52 @@ def build_variants(
         try:
             run_tool([
                 str(executable), "--input", str(payload_path), "--output", str(output),
-                "--format", info.format, "--zstd-level", str(zstd_level),
+                "--format", mip_info.format, "--zstd-level", str(zstd_level),
                 "--target-block-size", str(target_block_size),
             ])
             run_tool([
                 str(executable), "--verify", "--input", str(output),
-                "--original", str(payload_path), "--format", info.format,
+                "--original", str(payload_path), "--format", mip_info.format,
             ])
         # The extracted payload is temporary and must not remain beside the derivative.
         finally:
             payload_path.unlink(missing_ok=True)
         data = output.read_bytes()
         # Record the transform and the exact mip selection needed to interpret this output.
-        records.append({
+        derivative_records.append({
             "path": relative,
             "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
-            "source": source["path"],
+            "source": original_file["path"],
             "format": "gacl",
             "parameters": {
-                "texture_format": info.format,
+                "texture_format": mip_info.format,
                 "zstd_level": zstd_level,
                 "target_block_size": target_block_size,
-                "transform_id": TRANSFORM_IDS[info.format],
-                "transform_name": TRANSFORM_NAMES[info.format],
+                "transform_id": TRANSFORM_IDS[mip_info.format],
+                "transform_name": TRANSFORM_NAMES[mip_info.format],
                 "transform_version": 1,
             },
             "metadata": {
-                "dds_format": info.format_name,
-                "width": info.width,
-                "height": info.height,
-                "mip_count": info.mip_count,
-                "array_size": info.array_size,
+                "dds_format": mip_info.format_name,
+                "width": mip_info.width,
+                "height": mip_info.height,
+                "mip_count": mip_info.mip_count,
+                "array_size": mip_info.array_size,
                 "array_item": 0,
                 "mip": 0,
-                "uncompressed_size": info.data_size,
+                "uncompressed_size": mip_info.data_size,
                 "compressed_size": len(data),
                 "container": "raw_zstd_stream",
             },
             "validation": "pass",
         })
-    if not records:
+    if not derivative_records:
         raise ValueError("content set contains no supported BC1/BC3/BC4/BC5/BC7 DDS sources")
-    return sorted(records, key=lambda item: item["path"])
+    return sorted(derivative_records, key=lambda derivative: derivative["path"])
 
 
-set_lock = partial(common_set_lock, stage="gacl", label="GACL")
-
-
+# Check the requested Zstd level and target compressed-block size.
 def validate_options(zstd_level: int, target_block_size: int) -> None:
     if zstd_level < 1 or zstd_level > 22:
         raise ValueError("Zstd level must be from 1 through 22")
@@ -215,109 +223,37 @@ def validate_options(zstd_level: int, target_block_size: int) -> None:
         raise ValueError("target block size must be from 1 through 1048576")
 
 
+# Generate and verify GACL files before replacing outputs and writing the report.
 def process(
-    root: Path,
-    set_name: str,
+    input_directory: Path,
     executable: Path,
     zstd_level: int,
     target_block_size: int,
     overwrite: bool,
+    *, report: dict[str, Any] | None = None,
 ) -> Path:
     # Validate settings and identify the encoder before changing any outputs.
     validate_options(zstd_level, target_block_size)
-    driver = load_driver()
-    root = root.resolve()
-    set_name = driver.validate_set_name(set_name)
+    input_directory = content_report.validate_input_directory(input_directory)
     executable = validate_executable(executable)
     version = tool_version(executable)
-    manifest = driver.manifest_path(root, set_name)
+    manifest = content_report.manifest_path(input_directory)
 
-    with set_lock(root, set_name):
-        document = driver.load_manifest(manifest)
-        driver.verify_files(root, set_name, document)
-        existing = [item for item in document["derivatives"] if item["format"] == "gacl"]
-        final_root = root / "gacl" / set_name
-        if final_root.is_symlink():
-            raise ValueError(f"GACL output root cannot be a symbolic link: {final_root}")
-        if (existing or not directory_is_empty(final_root)) and not overwrite:
-            raise FileExistsError("GACL outputs already exist; use --overwrite")
-
-        # Build replacements separately so the previous texture outputs remain available.
-        parent = root / "gacl"
-        parent.mkdir(parents=True, exist_ok=True)
-        stage = Path(tempfile.mkdtemp(prefix=f".{set_name}.gacl.stage.", dir=parent))
-        backup = Path(tempfile.mkdtemp(prefix=f".{set_name}.gacl.backup.", dir=parent))
-        backup.rmdir()
-        old_manifest = manifest.read_bytes()
-        old_tree_moved = False
-        new_tree_installed = False
-        try:
-            records = build_variants(root, document, stage, executable, zstd_level, target_block_size)
-            updated = dict(document)
-            # Replace GACL records only; leave other codec records unchanged.
-            updated["derivatives"] = sorted(
-                [item for item in document["derivatives"] if item["format"] != "gacl"] + records,
-                key=lambda item: item["path"],
-            )
-            updated["tools"] = dict(document["tools"])
-            updated["tools"]["GACLContentTool"] = {"version": version}
-            driver.validate_manifest(updated)
-            # Save the previous tree before installing the new one.
-            if final_root.exists():
-                os.replace(final_root, backup)
-                old_tree_moved = True
-            os.replace(stage, final_root)
-            new_tree_installed = True
-            try:
-                driver.write_json_atomic(manifest, updated)
-                driver.verify_files(root, set_name, updated)
-            # Try to restore the previous outputs and manifest together on failure.
-            except Exception as original_error:
-                rollback_errors: list[str] = []
-                try:
-                    if new_tree_installed and final_root.exists():
-                        shutil.rmtree(final_root)
-                    if old_tree_moved and backup.exists():
-                        os.replace(backup, final_root)
-                    write_bytes_atomic(manifest, old_manifest)
-                except Exception as rollback_error:
-                    rollback_errors.append(str(rollback_error))
-                if rollback_errors:
-                    raise RuntimeError(
-                        f"GACL commit failed ({original_error}); rollback also failed: {'; '.join(rollback_errors)}"
-                    ) from original_error
-                raise
-            shutil.rmtree(backup, ignore_errors=True)
-            return manifest
-        # Clean up temporary directories after success or failure.
-        finally:
-            shutil.rmtree(stage, ignore_errors=True)
-            if backup.exists() and not final_root.exists():
-                os.replace(backup, final_root)
-            elif backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("set_name")
-    parser.add_argument("--root", type=Path, default=Path.cwd())
-    # These options control conditioning of the selected DDS payloads.
-    parser.add_argument("--gacl-exe", type=Path, required=True)
-    parser.add_argument("--zstd-level", type=int, default=ZSTD_COMPRESSION_LEVEL)
-    parser.add_argument("--target-block-size", type=int, default=64 * 1024)
-    parser.add_argument("--overwrite", action="store_true")
-    args = parser.parse_args()
-    try:
-        output = process(
-            args.root, args.set_name, args.gacl_exe, args.zstd_level,
-            args.target_block_size, args.overwrite,
-        )
-        print(f"Updated {output}")
-        return 0
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-        parser.exit(1, f"error: {error}\n")
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    manifest_data = report if report is not None else content_report.create_manifest(input_directory)
+    output_directory = reject_symlink_components(input_directory, "generated/gacl", "gacl output directory")
+    if not directory_is_empty(output_directory) and not overwrite:
+        raise FileExistsError("GACL outputs already exist; use --overwrite")
+    output_directory.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".gacl.stage.", dir=output_directory.parent) as temporary:
+        staging = Path(temporary)
+        records = build_variants(input_directory, manifest_data, staging, executable, zstd_level, target_block_size)
+        # Complete generation before replacing old outputs; failed installation is not rolled back.
+        reject_symlink_components(input_directory, "generated/gacl", "gacl output directory")
+        if output_directory.exists():
+            shutil.rmtree(output_directory)
+        os.replace(staging, output_directory)
+    manifest_data["derivatives"].extend(records)
+    manifest_data["derivatives"].sort(key=lambda record: record["path"])
+    manifest_data["tools"]["GACLContentTool"] = {"version": version}
+    content_report.write_json_atomic(manifest, manifest_data)
+    return manifest

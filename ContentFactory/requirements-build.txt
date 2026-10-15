@@ -1,0 +1,3 @@
+# Required only on a packaging machine; the distributed folder includes its Python runtime.
+# The requested supported major-version range keeps PyInstaller's onedir layout contract explicit.
+PyInstaller>=6.16,<7
