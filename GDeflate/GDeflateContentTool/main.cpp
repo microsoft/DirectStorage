@@ -47,19 +47,19 @@ namespace
     };
 
     // Print the supported command-line forms and exit with a usage error.
-    [[noreturn]] void Usage(const char* program)
+    [[noreturn]] void Usage(const wchar_t* program)
     {
-        std::cerr
-            << "Usage:\n"
-            << "  " << program << " --input <file> --output <file> [--level 1-12] [--overwrite]\n"
-            << "  " << program << " --version\n";
+        std::wcerr
+            << L"Usage:\n"
+            << L"  " << program << L" --input <file> --output <file> [--level 1-12] [--overwrite]\n"
+            << L"  " << program << L" --version\n";
         std::exit(2);
     }
 
     // Require a decimal compression level within the supported range.
-    uint32_t ParseLevel(const std::string& value)
+    uint32_t ParseLevel(const std::wstring& value)
     {
-        if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+        if (value.empty() || value.find_first_not_of(L"0123456789") != std::wstring::npos)
         {
             throw std::runtime_error("Compression level must be a decimal integer between 1 and 12");
         }
@@ -72,45 +72,45 @@ namespace
     }
 
     // Parse single-file compression options and require both paths.
-    Options ParseOptions(int argc, char** argv)
+    Options ParseOptions(int argc, wchar_t** argv)
     {
         Options options;
         for (int i = 1; i < argc; ++i)
         {
-            const std::string argument = argv[i];
+            const std::wstring argument = argv[i];
             // Consume the next argument or report a missing option value.
-            auto requireValue = [&]() -> std::string
+            auto requireValue = [&]() -> std::wstring
             {
                 if (++i >= argc)
                 {
-                    throw std::runtime_error("Missing value for " + argument);
+                    throw std::runtime_error("Missing value for " + fs::path(argument).u8string());
                 }
                 return argv[i];
             };
 
-            if (argument == "--input")
+            if (argument == L"--input")
             {
                 options.input = requireValue();
             }
-            else if (argument == "--output")
+            else if (argument == L"--output")
             {
                 options.output = requireValue();
             }
-            else if (argument == "--level")
+            else if (argument == L"--level")
             {
                 options.level = ParseLevel(requireValue());
             }
-            else if (argument == "--overwrite")
+            else if (argument == L"--overwrite")
             {
                 options.overwrite = true;
             }
-            else if (argument == "--help" || argument == "-h")
+            else if (argument == L"--help" || argument == L"-h")
             {
                 Usage(argv[0]);
             }
             else
             {
-                throw std::runtime_error("Unknown argument: " + argument);
+                throw std::runtime_error("Unknown argument: " + fs::path(argument).u8string());
             }
         }
 
@@ -127,24 +127,24 @@ namespace
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         if (!stream)
         {
-            throw std::runtime_error("Failed to open input file: " + path.string());
+            throw std::runtime_error("Failed to open input file: " + path.u8string());
         }
         const auto end = stream.tellg();
         if (end < 0)
         {
-            throw std::runtime_error("Failed to query input size: " + path.string());
+            throw std::runtime_error("Failed to query input size: " + path.u8string());
         }
         const auto fileSize = static_cast<uint64_t>(end);
         if (fileSize > static_cast<uint64_t>(SIZE_MAX) ||
             fileSize > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()))
         {
-            throw std::runtime_error("Input file exceeds this process address space: " + path.string());
+            throw std::runtime_error("Input file exceeds this process address space: " + path.u8string());
         }
         std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
         stream.seekg(0, std::ios::beg);
         if (!bytes.empty() && !stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
         {
-            throw std::runtime_error("Failed to read input file: " + path.string());
+            throw std::runtime_error("Failed to read input file: " + path.u8string());
         }
         return bytes;
     }
@@ -158,23 +158,24 @@ namespace
     {
         if (fs::exists(path) && !overwrite)
         {
-            throw std::runtime_error("Output already exists (use --overwrite): " + path.string());
+            throw std::runtime_error("Output already exists (use --overwrite): " + path.u8string());
         }
         if (!path.parent_path().empty())
         {
             fs::create_directories(path.parent_path());
         }
-        const auto temporary = path.string() + ".syncing";
+        auto temporary = path;
+        temporary += L".syncing";
         if (fs::exists(temporary) || fs::is_symlink(temporary))
         {
-            throw std::runtime_error("Temporary output already exists: " + temporary);
+            throw std::runtime_error("Temporary output already exists: " + temporary.u8string());
         }
         try
         {
             std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
             if (!stream)
             {
-                throw std::runtime_error("Failed to create output file: " + temporary);
+                throw std::runtime_error("Failed to create output file: " + temporary.u8string());
             }
             stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
             if (!payload.empty())
@@ -183,19 +184,19 @@ namespace
             }
             if (!stream)
             {
-                throw std::runtime_error("Failed to write output file: " + temporary);
+                throw std::runtime_error("Failed to write output file: " + temporary.u8string());
             }
             stream.close();
             if (!stream)
             {
-                throw std::runtime_error("Failed to close output file: " + temporary);
+                throw std::runtime_error("Failed to close output file: " + temporary.u8string());
             }
             if (!MoveFileExW(
-                    fs::path(temporary).c_str(),
+                    temporary.c_str(),
                     path.c_str(),
                     (overwrite ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH))
             {
-                throw std::runtime_error("Failed to atomically replace output file: " + path.string());
+                throw std::runtime_error("Failed to atomically replace output file: " + path.u8string());
             }
         }
         catch (...)
@@ -212,55 +213,55 @@ namespace
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         if (!stream)
         {
-            throw std::runtime_error("Failed to open GDeflate content: " + path.string());
+            throw std::runtime_error("Failed to open GDeflate content: " + path.u8string());
         }
         const auto end = stream.tellg();
         if (end < 0)
         {
-            throw std::runtime_error("Failed to query GDeflate content size: " + path.string());
+            throw std::runtime_error("Failed to query GDeflate content size: " + path.u8string());
         }
         const auto fileSize = static_cast<uint64_t>(end);
         stream.seekg(0, std::ios::beg);
         ContentHeader header{};
         if (!stream.read(reinterpret_cast<char*>(&header), sizeof(header)))
         {
-            throw std::runtime_error("GDeflate content header is truncated: " + path.string());
+            throw std::runtime_error("GDeflate content header is truncated: " + path.u8string());
         }
         if (header.magic != kFileMagic ||
             header.version != kFileVersion ||
             header.headerSize != sizeof(ContentHeader) ||
             header.reserved != 0)
         {
-            throw std::runtime_error("Unsupported or invalid GDeflate content header: " + path.string());
+            throw std::runtime_error("Unsupported or invalid GDeflate content header: " + path.u8string());
         }
         if (header.compressionLevel < GDeflate::MinimumCompressionLevel ||
             header.compressionLevel > GDeflate::MaximumCompressionLevel)
         {
-            throw std::runtime_error("Invalid compression level in header: " + path.string());
+            throw std::runtime_error("Invalid compression level in header: " + path.u8string());
         }
         if (fileSize != header.headerSize + header.compressedSize)
         {
-            throw std::runtime_error("GDeflate content size does not match the header: " + path.string());
+            throw std::runtime_error("GDeflate content size does not match the header: " + path.u8string());
         }
         if (header.uncompressedSize > static_cast<uint64_t>(SIZE_MAX) ||
             header.compressedSize > static_cast<uint64_t>(SIZE_MAX))
         {
-            throw std::runtime_error("GDeflate content exceeds this process address space: " + path.string());
+            throw std::runtime_error("GDeflate content exceeds this process address space: " + path.u8string());
         }
         if (header.compressedSize > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()))
         {
-            throw std::runtime_error("GDeflate payload is too large for stream I/O: " + path.string());
+            throw std::runtime_error("GDeflate payload is too large for stream I/O: " + path.u8string());
         }
 
         std::vector<uint8_t> payload(static_cast<size_t>(header.compressedSize));
         if (!payload.empty() && !stream.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size())))
         {
-            throw std::runtime_error("Failed to read GDeflate payload: " + path.string());
+            throw std::runtime_error("Failed to read GDeflate payload: " + path.u8string());
         }
         std::vector<uint8_t> output(static_cast<size_t>(header.uncompressedSize));
         if (!GDeflate::Decompress(output.data(), output.size(), payload.data(), payload.size(), 1))
         {
-            throw std::runtime_error("GDeflate decompression failed: " + path.string());
+            throw std::runtime_error("GDeflate decompression failed: " + path.u8string());
         }
         return output;
     }
@@ -270,20 +271,20 @@ namespace
     {
         if (!fs::is_regular_file(source))
         {
-            throw std::runtime_error("Input must be a regular file: " + source.string());
+            throw std::runtime_error("Input must be a regular file: " + source.u8string());
         }
         if (fs::is_directory(output))
         {
-            throw std::runtime_error("Output must be a file, not a directory: " + output.string());
+            throw std::runtime_error("Output must be a file, not a directory: " + output.u8string());
         }
         if (fs::exists(output) && fs::equivalent(source, output))
         {
-            throw std::runtime_error("Output must not refer to the input file: " + output.string());
+            throw std::runtime_error("Output must not refer to the input file: " + output.u8string());
         }
         const auto input = ReadFile(source);
         if (input.empty())
         {
-            throw std::runtime_error("GDeflate does not accept empty input: " + source.string());
+            throw std::runtime_error("GDeflate does not accept empty input: " + source.u8string());
         }
         const auto bound = GDeflate::CompressBound(input.size());
         std::vector<uint8_t> compressed(bound);
@@ -298,18 +299,18 @@ namespace
             GDeflate::COMPRESS_SINGLE_THREAD);
         if (!compressionSucceeded)
         {
-            throw std::runtime_error("GDeflate compression failed: " + source.string());
+            throw std::runtime_error("GDeflate compression failed: " + source.u8string());
         }
         compressed.resize(compressedSize);
 
         std::vector<uint8_t> roundTrip(input.size());
         if (!GDeflate::Decompress(roundTrip.data(), roundTrip.size(), compressed.data(), compressed.size(), 1))
         {
-            throw std::runtime_error("GDeflate CPU validation failed: " + source.string());
+            throw std::runtime_error("GDeflate CPU validation failed: " + source.u8string());
         }
         if (roundTrip != input)
         {
-            throw std::runtime_error("CPU round-trip validation failed: " + source.string());
+            throw std::runtime_error("CPU round-trip validation failed: " + source.u8string());
         }
 
         const ContentHeader header{
@@ -323,24 +324,24 @@ namespace
         WriteFileAtomically(output, header, compressed, overwrite);
         if (DecompressContentFile(output) != input)
         {
-            throw std::runtime_error("Written GDeflate file does not round-trip: " + output.string());
+            throw std::runtime_error("Written GDeflate file does not round-trip: " + output.u8string());
         }
     }
 }
 
 // Handle version or single-file compression requests and report failures.
-int main(int argc, char** argv)
+int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        if (argc == 2 && std::string(argv[1]) == "--version")
+        if (argc == 2 && std::wstring(argv[1]) == L"--version")
         {
             std::cout << "GDeflateContentTool " << kToolVersion << '\n';
             return 0;
         }
         const auto options = ParseOptions(argc, argv);
         CompressFile(options.input, options.output, options.level, options.overwrite);
-        std::cout << "created " << options.output << '\n';
+        std::wcout << L"created " << options.output.native() << L'\n';
         return 0;
     }
     catch (const std::exception& error)

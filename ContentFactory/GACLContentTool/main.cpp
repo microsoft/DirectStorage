@@ -33,7 +33,7 @@ namespace
     // Each supported format selects its block size, shuffle grouping, and transform ID.
     struct TextureFormatInfo
     {
-        const char* name;
+        const wchar_t* name;
         size_t bytesPerBlock;
         size_t groupSize;
         HRESULT (*shuffle)(uint8_t*, const uint8_t*, size_t, size_t);
@@ -42,11 +42,11 @@ namespace
 
     // BC1/3/4/5 use their stable shuffle; BC7 currently uses Zstd without a shuffle.
     const std::array<TextureFormatInfo, 5> kCases{{
-        {"BC1", 8, 2, Shuffle_BC1, GACL_SHUFFLE_TRANSFORM_ZSTD_BC1_224},
-        {"BC3", 16, 4, Shuffle_BC3, GACL_SHUFFLE_TRANSFORM_ZSTD_BC3_116224},
-        {"BC4", 8, 4, Shuffle_BC4, GACL_SHUFFLE_TRANSFORM_ZSTD_BC4_116},
-        {"BC5", 16, 4, Shuffle_BC5, GACL_SHUFFLE_TRANSFORM_ZSTD_BC5_116116},
-        {"BC7", 16, 1, nullptr, GACL_SHUFFLE_TRANSFORM_ZSTD_ONLY},
+        {L"BC1", 8, 2, Shuffle_BC1, GACL_SHUFFLE_TRANSFORM_ZSTD_BC1_224},
+        {L"BC3", 16, 4, Shuffle_BC3, GACL_SHUFFLE_TRANSFORM_ZSTD_BC3_116224},
+        {L"BC4", 8, 4, Shuffle_BC4, GACL_SHUFFLE_TRANSFORM_ZSTD_BC4_116},
+        {L"BC5", 16, 4, Shuffle_BC5, GACL_SHUFFLE_TRANSFORM_ZSTD_BC5_116116},
+        {L"BC7", 16, 1, nullptr, GACL_SHUFFLE_TRANSFORM_ZSTD_ONLY},
     }};
 
     // Original block layouts used to rebuild the payload during CPU verification.
@@ -96,14 +96,14 @@ namespace
     {
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         if (!stream)
-            throw std::runtime_error("could not open input: " + path.string());
+            throw std::runtime_error("could not open input: " + path.u8string());
         const auto end = stream.tellg();
         if (end < 0)
-            throw std::runtime_error("could not size input: " + path.string());
+            throw std::runtime_error("could not size input: " + path.u8string());
         std::vector<uint8_t> data(static_cast<size_t>(end));
         stream.seekg(0);
         if (!data.empty() && !stream.read(reinterpret_cast<char*>(data.data()), end))
-            throw std::runtime_error("could not read input: " + path.string());
+            throw std::runtime_error("could not read input: " + path.u8string());
         return data;
     }
 
@@ -112,15 +112,17 @@ namespace
     {
         std::ofstream stream(path, std::ios::binary | std::ios::trunc);
         if (!stream)
-            throw std::runtime_error("could not open output: " + path.string());
+            throw std::runtime_error("could not open output: " + path.u8string());
         if (!data.empty())
             stream.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        // Include buffered flush failures in the encoder's own success/failure status.
+        stream.close();
         if (!stream)
-            throw std::runtime_error("could not write output: " + path.string());
+            throw std::runtime_error("could not write or close output: " + path.u8string());
     }
 
     // Look up the requested BC format and reject unsupported names.
-    const TextureFormatInfo& FindCase(std::string_view name)
+    const TextureFormatInfo& FindCase(std::wstring_view name)
     {
         for (const auto& value : kCases)
             if (name == value.name)
@@ -129,10 +131,10 @@ namespace
     }
 
     // Reject trailing text and out-of-range settings rather than accepting partial numbers.
-    int ParseInteger(std::string_view text, const char* label, int minimum, int maximum)
+    int ParseInteger(std::wstring_view text, const char* label, int minimum, int maximum)
     {
         size_t used = 0;
-        const long parsed = std::stol(std::string(text), &used, 10);
+        const long parsed = std::stol(std::wstring(text), &used, 10);
         if (used != text.size() || parsed < minimum || parsed > maximum)
             throw std::runtime_error(std::string(label) + " is out of range");
         return static_cast<int>(parsed);
@@ -323,42 +325,42 @@ namespace
     }
 
     // Return the value following a named command-line option or report it missing.
-    std::string RequireOptionValue(int argc, char** argv, const char* name)
+    std::wstring RequireOptionValue(int argc, wchar_t** argv, std::wstring_view name)
     {
         for (int index = 1; index + 1 < argc; ++index)
-            if (std::string_view(argv[index]) == name)
+            if (std::wstring_view(argv[index]) == name)
                 return argv[index + 1];
-        throw std::runtime_error(std::string("missing ") + name);
+        throw std::runtime_error("missing required command-line option");
     }
 }
 
 // Handle version, encoding, or verification requests and report failures.
-int main(int argc, char** argv)
+int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        if (argc == 2 && std::string_view(argv[1]) == "--version")
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--version")
         {
             std::cout << "GACLContentTool " << kVersion << '\n';
             return 0;
         }
         // Verification reads existing files; encoding writes only after round-trip checks.
-        const bool verify = argc > 1 && std::string_view(argv[1]) == "--verify";
-        const auto& format = FindCase(RequireOptionValue(argc, argv, "--format"));
+        const bool verify = argc > 1 && std::wstring_view(argv[1]) == L"--verify";
+        const auto& format = FindCase(RequireOptionValue(argc, argv, L"--format"));
         if (verify)
         {
-            const auto original = ReadFile(RequireOptionValue(argc, argv, "--original"));
-            const auto compressed = ReadFile(RequireOptionValue(argc, argv, "--input"));
+            const auto original = ReadFile(RequireOptionValue(argc, argv, L"--original"));
+            const auto compressed = ReadFile(RequireOptionValue(argc, argv, L"--input"));
             Verify(format, original, compressed);
             std::cout << "GACL verification passed; transform_id=" << format.transformId << '\n';
             return 0;
         }
         // The caller supplies codec settings explicitly; this native CLI has no level default.
-        const int level = ParseInteger(RequireOptionValue(argc, argv, "--zstd-level"), "zstd level", 1, 22);
+        const int level = ParseInteger(RequireOptionValue(argc, argv, L"--zstd-level"), "zstd level", 1, 22);
         const int targetBlockSize = ParseInteger(
-            RequireOptionValue(argc, argv, "--target-block-size"), "target block size", 1, 1 << 20);
-        const auto input = ReadFile(RequireOptionValue(argc, argv, "--input"));
-        const auto output = std::filesystem::path(RequireOptionValue(argc, argv, "--output"));
+            RequireOptionValue(argc, argv, L"--target-block-size"), "target block size", 1, 1 << 20);
+        const auto input = ReadFile(RequireOptionValue(argc, argv, L"--input"));
+        const auto output = std::filesystem::path(RequireOptionValue(argc, argv, L"--output"));
         const auto compressed = Compress(format, input, level, targetBlockSize);
         WriteFile(output, compressed);
         std::cout << "transform_id=" << format.transformId << " uncompressed_size=" << input.size()

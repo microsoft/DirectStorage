@@ -1,35 +1,22 @@
-# Building the portable ContentFactory package
+# Build Content Factory
 
-This build entry point assembles a **Windows x64 folder distribution**, not a
-single standalone executable. The folder contains `ContentFactory.exe`, the
-Python runtime and modules collected by PyInstaller, and the three native tools
-in `bin/`. Copy the **entire folder**, including `_internal/`, to the destination
-machine. A separately installed Python interpreter is not required by that
-packaged launcher.
+Build a Windows x64 portable folder containing the launcher, Python runtime, and all three encoders.
 
-## Build-machine prerequisites
+## Prerequisites
 
-- Windows x64 and a 64-bit Python interpreter.
-- Visual Studio 2022 or its Build Tools, with the MSVC C++ toolchain and Windows SDK.
-- CMake available by its explicit path or as the `cmake` build command.
-- A complete, existing GACL dependency checkout, supplied as `--gacl-root` or
-  through the `GACL_ROOT` environment variable. The build uses that checkout;
-  it does not fetch or download dependencies.
-- PyInstaller in the **same Python environment** used to run the build script.
-  `requirements-build.txt` restricts it to `>=6.16,<7`.
-
-The dependency-install command below is for a user-approved packaging setup.
-Neither installation nor a native build is needed for source-only Python tests.
+- Windows x64 with 64-bit Python.
+- Visual Studio 2022 or Build Tools with MSVC and the Windows SDK.
+- CMake on `PATH`, or supply its path with `--cmake`.
+- An existing, complete GACL checkout supplied through `--gacl-root` or `GACL_ROOT`. Dependencies are not downloaded.
+- PyInstaller installed in the Python environment used for packaging:
 
 ```powershell
 python -m pip install -r .\ContentFactory\requirements-build.txt
 ```
 
-## Build and package
+## Build
 
-Run from the public DirectStorage repository root after approving a native
-build. Use an output directory **outside both source checkouts**, distinct from
-the build directory, and not already present:
+From the DirectStorage repository root:
 
 ```powershell
 python .\ContentFactory\build-package.py `
@@ -39,76 +26,12 @@ python .\ContentFactory\build-package.py `
   --configuration Release
 ```
 
-`--configuration` accepts `Release`, `RelWithDebInfo`, `MinSizeRel`, or `Debug`.
-`--cmake` can supply an explicit CMake executable path. The build deliberately
-uses `Visual Studio 17 2022` and `-A x64`; unsupported platforms/toolchains are
-rejected. `--help` only prints arguments and does not configure or build anything.
+`--configuration` also accepts `RelWithDebInfo`, `MinSizeRel`, and `Debug`. Use `--help` to inspect arguments without building.
 
-The script:
+The output directory must be new, outside both checkouts, and separate from the build directory. Existing outputs are never deleted. Build artifacts can be reused; in-repository builds must stay under `ContentFactory/build/`, never inside the GACL checkout.
 
-1. Validates platform, build-tool availability, source files, required licenses,
-   and directory safety before running native commands.
-2. Configures the `ContentFactory` CMake project using the supplied GACL checkout.
-3. Builds `zstd`, `GDeflateContentTool`, and `GACLContentTool` into
-   `<build-directory>/native/bin/<configuration>/`.
-4. Runs this interpreter's `python -m PyInstaller --onedir --name ContentFactory`
-   on `ContentFactory/tools/run-content-factory.py`.
-5. Assembles native executables and license files in a temporary sibling folder,
-   then publishes the complete package by renaming it to the new output directory.
+## Distribute
 
-The native build selects the static MSVC runtime with CMP0091 and
-`MultiThreaded$<$<CONFIG:Debug>:Debug>`. The packaging configuration enables the
-zstd CLI with its static library and uses the existing GDeflate subtree with its
-DirectStorage demo and tests disabled. Building does not run any native tool.
+Copy the **entire output folder**, including `ContentFactory.exe`, `_internal/`, `bin/`, and `licenses/`. Users do not install Python or encoders separately. Usage and request settings are in `README.md` and `examples/request.json` inside the package.
 
-## Distribution layout
-
-```text
-ContentFactory-package/
-  ContentFactory.exe
-  _internal/                 # PyInstaller's bundled Python runtime and modules
-  bin/
-    zstd.exe
-    GDeflateContentTool.exe
-    GACLContentTool.exe
-  licenses/                  # Required source/dependency licenses and notices
-```
-
-The package is a tool installation, not an input-data bundle. Input payloads, user-edited
-JSON requests, reports, and generated output remain local files selected when
-the launcher is run. The included request file is an editable example, not a captured user request. The package builder never copies an input directory or a
-build directory into the distribution. The launcher must select the adjacent `bin/` tools using its bundled-tool
-resolver; packaging does not resolve native tools from `PATH`.
-
-## Output safety and rebuilds
-
-The script **never removes an existing output directory**. To rebuild, select a
-new output directory or move the old distribution yourself. Existing build
-artifacts may be reused. A build directory within the public checkout must live
-under `ContentFactory/build/`; it may not contain a source checkout or overlap
-the output directory. The GACL checkout cannot be used as a build directory.
-
-If a command fails, the build reports failure and does not publish an incomplete
-package. Only the builder's private temporary staging directory is cleaned up.
-If another process creates the destination during the build, its contents are
-preserved and publication is refused.
-
-## Run the packaged factory
-
-```powershell
-.\ContentFactory.exe --config C:\requests\content.json
-```
-
-The launcher finds `bin` next to its executable; users do not pass encoder paths. Relative input paths in a JSON request resolve from the request file's directory. Keep all processing settings in the JSON file; see the included README and example.
-
-## Validation scope
-
-The package-planning and assembly tests are preserved on branch `users/rohanborkar/content-factory-tests-cache`, at snapshot commit `d3fd1b4`, rather than included in this initial implementation branch. Those tests mock native builds and PyInstaller; their success is not proof of a working native build or portable executable.
-
-You can inspect the builder without starting a build:
-
-```powershell
-python .\ContentFactory\build-package.py --help
-```
-
-An approved real build and a separate-machine smoke test are still required before claiming portability has been validated.
+Native compilation/runtime validation and a clean-machine smoke test remain required before claiming the distribution is validated. Mocked package tests do not establish portability.
