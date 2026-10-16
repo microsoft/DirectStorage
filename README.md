@@ -1,5 +1,5 @@
 # DirectStorage on Windows Samples
-DirectStorage is a feature intended to allow games to make full use of high-speed storage (such as NVMe SSDs) that can can deliver multiple gigabytes a second of small (eg 64kb) data reads with minimal CPU overhead.  Although it is possible to saturate a drive using traditional ReadFile-based IO the CPU overhead of increases non-linearly as the size of individual reads decreases.  Additionally, most games choose to store their assets compressed on disk in order to reduce the install footprint, with these assets being decompressed on the fly as load time.  The CPU overhead of this becomes increasingly expensive as bandwidth increases.
+DirectStorage is a feature intended to allow games to make full use of high-speed storage (such as NVMe SSDs) that can can deliver multiple gigabytes a second of small (eg 64kb) data reads with minimal CPU overhead.  Although it is possible to saturate a drive using traditional ReadFile-based IO the CPU overhead increases non-linearly as the size of individual reads decreases.  Additionally, most games choose to store their assets compressed on disk in order to reduce the install footprint, with these assets being decompressed on the fly as load time.  The CPU overhead of this becomes increasingly expensive as bandwidth increases.
 
 Video game consoles such as the XBox Series X|S address these issues by offloading aspects of this to hardware - making use of the NVMe hardware queue to manage IO and hardware accelerated decompression.  As we expect to see more titles designed to take advantage of the possibilities offered by this architecture it becomes important that Windows has similar capabilities.
 
@@ -31,24 +31,21 @@ The Samples directory contains sample code that demonstrates how to use the Dire
     
     <img src="Samples/EnqueueRequestsDemo/EnqueueRequestsDemo.png" alt="EnqueueRequestsDemo screenshot" height="200">
 
+## Repository submodules
+This repository uses submodules. Pass `--recurse-submodules` to `git clone`, or initialize them after cloning:
+
+```
+git submodule update --init
+```
+
 ## GDeflate Reference Implementation
 This directory contains codec source and sample code that demonstrates how to use [GDeflate](GDeflate/README.md).
 
-The repo uses submodules, so be sure to pass `--recurse-submodules` to the `git clone` command.
-
-If you forget to do this then you can run `git submodule update --init`
-
-## ZStandard (ZSTD) Reference Implementation (IN DEVELOPMENT - NOT FOR PRODUCTION USE)
+## ZStandard (ZSTD) Reference Implementation
 This directory contains codec source and sample code that demonstrates how to use [ZStandard](zstd/README.md).
 
-<span style="color:red;font-size:20px; font-weight:bold;">
-This code is currently in development and should NOT be used in production environments or for released products.</span>
-
-Once development has been completed and the shader meets production quality standards, the sample code will be moved into the MAIN branch.
-
-The repo uses submodules, so be sure to pass `--recurse-submodules` to the `git clone` command.
-
-If you forget to do this then you can run `git submodule update --init`
+> [!WARNING]
+> The ZStandard GPU decompression implementation is under active development and should not be used in production environments or released products.
 
 ## Contributing
 
@@ -63,8 +60,8 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow 
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party's policies.
 
-# Build
-Install [Visual Studio](http://www.visualstudio.com/downloads) 2019 or higher.
+## Build
+To build all solutions, install [Visual Studio](http://www.visualstudio.com/downloads) 2022 or later.
 
 Open the following Visual Studio solutions and build
 ```
@@ -72,6 +69,7 @@ Samples\HelloDirectStorage\HelloDirectStorage.sln
 Samples\BulkLoadDemo\BulkLoadDemo.sln
 Samples\GpuDecompressionBenchmark\GpuDecompressionBenchmark.sln
 Samples\EnqueueRequestsDemo\EnqueueRequestsDemo.sln
+zstd\zstd.sln
 ```
 
 ## Related links
