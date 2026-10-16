@@ -31,6 +31,10 @@ The Samples directory contains sample code that demonstrates how to use the Dire
     
     <img src="Samples/EnqueueRequestsDemo/EnqueueRequestsDemo.png" alt="EnqueueRequestsDemo screenshot" height="200">
 
+## Content Factory
+
+`ContentFactory/` generates encoded and packaged test content from one input directory. Its portable build includes the Python runtime and Zstd, GDeflate, and GACL encoding tools, so users do not install tools separately. Run `ContentFactory.exe --config request.json` for grouped processing settings. See `ContentFactory/README.md` for requests and usage, and `ContentFactory/BUILDING.md` for the developer build/package procedure.
+
 ## GDeflate Reference Implementation
 This directory contains codec source and sample code that demonstrates how to use [GDeflate](GDeflate/README.md).
 
