@@ -4,3 +4,6 @@
 [submodule "GDeflate/3rdparty/libdeflate"]
 	path = GDeflate/3rdparty/libdeflate
 	url = https://github.com/NVIDIA/libdeflate
+[submodule "zstd/ThirdParty/googletest"]
+	path = zstd/ThirdParty/googletest
+	url = https://github.com/google/googletest
