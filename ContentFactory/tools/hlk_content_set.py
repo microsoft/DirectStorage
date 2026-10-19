@@ -156,11 +156,10 @@ def build_archives(
         creator.create_archive(entries, archive_path, alignment)
         verify_archive_payloads(archive_path, payloads, reader)
         staged_archive_paths[codec] = archive_path
-        data = archive_path.read_bytes()
         archive_records.append({
             "path": relative_paths[codec],
-            "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": archive_path.stat().st_size,
+            "sha256": content_report.sha256_file(archive_path),
             "format": "dstorage",
             "archive_group": archive_prefix,
             "payload_codec": codec,

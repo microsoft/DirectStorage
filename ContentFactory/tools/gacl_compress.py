@@ -26,6 +26,7 @@ from factory_contracts import TRANSFORM_CONTRACT
 
 DDS_MAGIC = 0x20534444
 FOURCC_DX10 = 0x30315844
+DDSCAPS2_VOLUME = 0x00200000
 # Older DDS headers use four-character codes to describe their BC format.
 FOURCC_FORMATS = {
     0x31545844: ("BC1", "DXT1", 8),
@@ -109,6 +110,8 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMipInfo:
             raise ValueError("GACL stage requires a non-empty DDS_TEXTURE2D resource")
         offset = 148
     else:
+        if read_u32(data, 112) & DDSCAPS2_VOLUME:
+            raise ValueError("GACL stage requires a 2D DDS texture; legacy volume textures are unsupported")
         try:
             format_name, exact_name, bytes_per_block = FOURCC_FORMATS[fourcc]
         except KeyError as error:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,10 @@ def run(args: argparse.Namespace) -> Path:
 
 # Parse factory options and coordinate the requested processing stages.
 def main() -> int:
+    # Redirected Windows streams may use a legacy encoding; reporting must not fail processing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     parser = create_parser()
     try:
         args = parse_request(parser)
