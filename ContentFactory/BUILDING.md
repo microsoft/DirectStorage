@@ -32,6 +32,6 @@ The output directory must be new, outside both checkouts, and separate from the 
 
 ## Distribute
 
-Copy the **entire output folder**, including `ContentFactory.exe`, `_internal/`, `bin/`, and `licenses/`. Users do not install Python or encoders separately. Usage and request settings are in `README.md` and `examples/request.json` inside the package.
+Copy the **entire output folder**, including `ContentFactory.exe`, `_internal/`, `bin/`, and `licenses/`. Users do not install Python or encoders separately. Usage is in `README.md`; the full JSON field guide is `CONFIGURATION.md`, with an editable `examples/request.json`.
 
-Native compilation/runtime validation and a clean-machine smoke test remain required before claiming the distribution is validated. Mocked package tests do not establish portability.
+The package has been built and smoke-tested locally. That does not establish clean-machine portability or unrestricted native correctness. Test on a separate machine before distribution.

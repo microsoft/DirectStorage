@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-# Common default for shader, HLK, and GACL Zstd content; explicit GACL overrides remain supported.
+# Common default for Zstd files, HLK archives, and GACL payloads; each is configurable.
 ZSTD_COMPRESSION_LEVEL = 19
 
 # These numbers are stored in archive entries; keep their meanings consistent.
@@ -46,3 +46,9 @@ def parse_gdeflate_header(data: bytes) -> dict[str, int]:
         "uncompressed_size": original_size,
         "compressed_size": compressed_size,
     }
+
+
+# Validate the public positive Zstd compression-level range shared by all generation paths.
+def validate_zstd_level(level: int) -> None:
+    if type(level) is not int or not 1 <= level <= 22:
+        raise ValueError("Zstd compression level must be an integer from 1 to 22")

@@ -45,3 +45,6 @@ foreach(tool IN ITEMS zstd GDeflateContentTool GACLContentTool)
             RUNTIME_OUTPUT_DIRECTORY_${configuration_upper} "${CMAKE_BINARY_DIR}/bin/${configuration}")
     endforeach()
 endforeach()
+
+# Expose one root-level build target for generators with nested project files.
+add_custom_target(ContentFactoryTools DEPENDS zstd GDeflateContentTool GACLContentTool)

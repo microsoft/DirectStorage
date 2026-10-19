@@ -11,13 +11,13 @@ from factory_contracts import ZSTD_COMPRESSION_LEVEL
 
 # JSON groups map directly to the internal stage settings.
 GROUPS = {
-    "zstd": {"shader_matrix": "zstd_shader_matrix", "block_sizes_kb": "block_sizes_kb", "chunk_sizes_kb": "chunk_sizes_kb"},
+    "zstd": {"level": "zstd_level", "shader_matrix": "zstd_shader_matrix", "block_sizes_kb": "block_sizes_kb", "chunk_sizes_kb": "chunk_sizes_kb"},
     "gdeflate": {"levels": "gdeflate_levels", "all_levels": "gdeflate_all_levels"},
     "gacl": {"zstd_level": "gacl_zstd_level", "target_block_size": "gacl_target_block_size"},
-    "hlk": {"archive_prefix": "hlk_archive_prefix", "alignment": "hlk_alignment"},
+    "hlk": {"archive_prefix": "hlk_archive_prefix", "alignment": "hlk_alignment", "zstd_level": "hlk_zstd_level"},
 }
 BOOL_FIELDS = {"overwrite", "zstd_shader_matrix", "gdeflate_all_levels"}
-INTEGER_FIELDS = {"gacl_zstd_level", "gacl_target_block_size", "hlk_alignment"}
+INTEGER_FIELDS = {"zstd_level", "hlk_zstd_level", "gacl_zstd_level", "gacl_target_block_size", "hlk_alignment"}
 INTEGER_LIST_FIELDS = {"block_sizes_kb", "chunk_sizes_kb", "gdeflate_levels"}
 
 
@@ -79,10 +79,10 @@ def parse_request(parser: argparse.ArgumentParser, argv: list[str] | None = None
     config = parser.parse_args(argv).config
     values = {
         "stages": ["all"], "overwrite": False,
-        "zstd_shader_matrix": False, "block_sizes_kb": None, "chunk_sizes_kb": None,
+        "zstd_level": ZSTD_COMPRESSION_LEVEL, "zstd_shader_matrix": False, "block_sizes_kb": None, "chunk_sizes_kb": None,
         "gdeflate_levels": None, "gdeflate_all_levels": False,
         "gacl_zstd_level": ZSTD_COMPRESSION_LEVEL, "gacl_target_block_size": 64 * 1024,
-        "hlk_archive_prefix": "dstoragetest", "hlk_alignment": 1,
+        "hlk_archive_prefix": "dstoragetest", "hlk_alignment": 1, "hlk_zstd_level": ZSTD_COMPRESSION_LEVEL,
         "zstd_exe": bundled_tool("zstd.exe"), "gdeflate_exe": bundled_tool("GDeflateContentTool.exe"),
         "gacl_exe": bundled_tool("GACLContentTool.exe"),
     }

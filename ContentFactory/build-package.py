@@ -146,7 +146,7 @@ def build_native(plan: BuildPlan) -> None:
                  "-G", "Visual Studio 17 2022", "-A", "x64",
                  f"-DGACL_ROOT:PATH={plan.gacl_root}"], plan.source)
     run_command([plan.cmake, "--build", str(plan.native_directory), "--config", plan.configuration,
-                 "--target", "zstd", "GDeflateContentTool", "GACLContentTool", "--parallel"], plan.source)
+                 "--target", "ContentFactoryTools", "--parallel"], plan.source)
     missing = [str(plan.native_bin / name) for name in NATIVE_TOOLS if not (plan.native_bin / name).is_file()]
     if missing:
         raise ValueError("Native build did not produce expected executables: " + ", ".join(missing))
@@ -176,7 +176,7 @@ def build_package(plan: BuildPlan) -> Path:
     licenses = {**license_sources(plan), **runtime_license_sources()}
     required_sources = [plan.source / "CMakeLists.txt", plan.source / "tools" / "run-content-factory.py",
                         *licenses.values()]
-    required_sources.extend([plan.source / "README.md", plan.source / "examples" / "request.json"])
+    required_sources.extend([plan.source / "README.md", plan.source / "CONFIGURATION.md", plan.source / "examples" / "request.json"])
     missing = [str(path) for path in required_sources if not path.is_file()]
     if missing:
         raise ValueError("Required build inputs or license files are missing: " + ", ".join(missing))
@@ -191,6 +191,7 @@ def build_package(plan: BuildPlan) -> Path:
         for name, source in licenses.items():
             shutil.copy2(source, package / "licenses" / name)
         shutil.copy2(plan.source / "README.md", package / "README.md")
+        shutil.copy2(plan.source / "CONFIGURATION.md", package / "CONFIGURATION.md")
         shutil.copytree(plan.source / "examples", package / "examples")
         # Recheck immediately before Windows rename, which refuses an already-existing destination.
         if plan.output_directory.exists() or plan.output_directory.is_symlink():

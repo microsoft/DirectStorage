@@ -20,7 +20,7 @@ from factory_common import (
 )
 
 
-from factory_contracts import ZSTD_COMPRESSION_LEVEL
+from factory_contracts import ZSTD_COMPRESSION_LEVEL, validate_zstd_level
 
 # Use the shared content policy while preserving the stage-level constant.
 COMPRESSION_LEVEL = ZSTD_COMPRESSION_LEVEL
@@ -87,11 +87,12 @@ def output_relative_path(source: str, block_kb: int, chunk_kb: int) -> str:
 
 
 # Encode one source chunk using the shared Zstd level and target block size.
-def compress_chunk(zstd_exe: Path, chunk: bytes, block_bytes: int) -> bytes:
-    # Explicit level 19 avoids depending on the CLI default or ZSTD_CLEVEL environment.
+def compress_chunk(zstd_exe: Path, chunk: bytes, block_bytes: int, compression_level: int = ZSTD_COMPRESSION_LEVEL) -> bytes:
+    # Always pass the selected level explicitly, including ultra levels above 19.
     result = run_zstd([
         str(zstd_exe),
-        f"-{COMPRESSION_LEVEL}",
+        *(["--ultra"] if compression_level > 19 else []),
+        f"-{compression_level}",
         f"--target-compressed-block-size={block_bytes}",
         f"--stream-size={len(chunk)}",
         "-q",
@@ -110,6 +111,7 @@ def build_variants(
     zstd_exe: Path,
     block_sizes_kb: tuple[int, ...],
     chunk_sizes_kb: tuple[int, ...],
+    compression_level: int = ZSTD_COMPRESSION_LEVEL,
 ) -> list[dict[str, Any]]:
     derivative_records: list[dict[str, Any]] = []
     for original_file in manifest_data["sources"]:
@@ -125,7 +127,7 @@ def build_variants(
                 relative = output_relative_path(original_file["path"], block_kb, chunk_kb)
                 output = output_root / Path(relative).relative_to(Path("generated") / "zstd")
                 # Join the frames and check that decoding returns the complete original.
-                encoded = b"".join(compress_chunk(zstd_exe, chunk, block_kb * 1024) for chunk in chunks)
+                encoded = b"".join(compress_chunk(zstd_exe, chunk, block_kb * 1024, compression_level) for chunk in chunks)
                 if run_zstd([str(zstd_exe), "-q", "-d", "-c"], data=encoded).stdout != source_data:
                     raise RuntimeError(f"Zstd round trip mismatch: {relative}")
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -138,7 +140,7 @@ def build_variants(
                     "source": original_file["path"],
                     "format": "zstd",
                     "parameters": {"block_size_kb": block_kb, "chunk_size_kb": chunk_kb,
-                                   "compression_level": COMPRESSION_LEVEL},
+                                   "compression_level": compression_level},
                     "metadata": {"frame_count": len(chunks), "uncompressed_size": len(source_data)},
                     "validation": "pass",
                 })
@@ -152,11 +154,12 @@ def process(
     block_sizes_kb: tuple[int, ...],
     chunk_sizes_kb: tuple[int, ...],
     overwrite: bool,
-    *, report: dict[str, Any] | None = None,
+    *, compression_level: int = ZSTD_COMPRESSION_LEVEL, report: dict[str, Any] | None = None,
 ) -> Path:
     input_directory = content_report.validate_input_directory(input_directory)
     zstd_exe = validate_executable(zstd_exe)
     validate_matrix(block_sizes_kb, chunk_sizes_kb)
+    validate_zstd_level(compression_level)
     # Record the actual encoder version used for this run.
     current_version = zstd_version(zstd_exe)
 
@@ -168,7 +171,7 @@ def process(
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".zstd.stage.", dir=output_directory.parent) as temporary:
         staging = Path(temporary)
-        records = build_variants(input_directory, manifest_data, staging, zstd_exe, block_sizes_kb, chunk_sizes_kb)
+        records = build_variants(input_directory, manifest_data, staging, zstd_exe, block_sizes_kb, chunk_sizes_kb, compression_level)
         # Complete generation before replacing old outputs; failed installation is not rolled back.
         reject_symlink_components(input_directory, "generated/zstd", "zstd output directory")
         if output_directory.exists():

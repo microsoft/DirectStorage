@@ -15,6 +15,7 @@ import gacl_compress
 import hlk_content_set
 from factory_common import bundled_tool, validate_executable
 from factory_request import create_parser, parse_request
+from factory_contracts import ZSTD_COMPRESSION_LEVEL, validate_zstd_level
 
 # The remaining processing stages include the matching HLK archive triplet.
 STAGE_MODULES = {
@@ -42,6 +43,7 @@ def preflight(args: argparse.Namespace, stages: list[str], has_dds: bool) -> dic
         # Reuse each stage's own validation rules instead of duplicating them here.
         module = STAGE_MODULES[stage]
         if stage == "zstd":
+            validate_zstd_level(getattr(args, "zstd_level", ZSTD_COMPRESSION_LEVEL))
             blocks, chunks = module.resolve_sizes(args.zstd_shader_matrix, args.block_sizes_kb, args.chunk_sizes_kb)
             prepared[stage] = (zstd, blocks, chunks, args.overwrite)
             required_tools["Zstd"] = zstd
@@ -55,6 +57,7 @@ def preflight(args: argparse.Namespace, stages: list[str], has_dds: bool) -> dic
             required_tools["GACL"] = gacl
         elif stage == "hlk":
             module.validate_options(args.hlk_archive_prefix, args.hlk_alignment)
+            validate_zstd_level(getattr(args, "hlk_zstd_level", ZSTD_COMPRESSION_LEVEL))
             prepared[stage] = (args.hlk_archive_prefix, zstd, gdeflate, args.hlk_alignment, args.overwrite)
             required_tools["Zstd"] = zstd
             required_tools["GDeflate"] = gdeflate
@@ -68,10 +71,11 @@ def preflight(args: argparse.Namespace, stages: list[str], has_dds: bool) -> dic
 
 
 # Run prepared stage arguments in fixed order without resolving settings again.
-def process_selected_stages(input_directory: Path, prepared: dict[str, tuple], report: dict[str, Any]) -> None:
+def process_selected_stages(input_directory: Path, prepared: dict[str, tuple], report: dict[str, Any], zstd_level: int = ZSTD_COMPRESSION_LEVEL, hlk_zstd_level: int = ZSTD_COMPRESSION_LEVEL) -> None:
     for stage in ALL_STAGES:
         if stage in prepared:
-            STAGE_MODULES[stage].process(input_directory, *prepared[stage], report=report)
+            settings = {"compression_level": zstd_level} if stage == "zstd" else {"zstd_level": hlk_zstd_level} if stage == "hlk" else {}
+            STAGE_MODULES[stage].process(input_directory, *prepared[stage], report=report, **settings)
 
 
 # Discover originals, generate and verify selected outputs, and record this invocation.
@@ -94,7 +98,7 @@ def run(args: argparse.Namespace) -> Path:
     if not prepared:
         # An invocation with no applicable stage produces no new report or outputs.
         raise ValueError("no selected stage applies to the input files")
-    process_selected_stages(input_directory, prepared, report)
+    process_selected_stages(input_directory, prepared, report, getattr(args, "zstd_level", ZSTD_COMPRESSION_LEVEL), getattr(args, "hlk_zstd_level", ZSTD_COMPRESSION_LEVEL))
     return manifest
 
 

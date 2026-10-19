@@ -15,7 +15,7 @@ from factory_common import (
 import content_report
 import create_hlk_archive
 import validate_hlk_archive
-from factory_contracts import CONTENT_TYPES, ZSTD_COMPRESSION_LEVEL, parse_gdeflate_header
+from factory_contracts import CONTENT_TYPES, ZSTD_COMPRESSION_LEVEL, parse_gdeflate_header, validate_zstd_level
 
 
 # Classify known source extensions; other files remain unknown.
@@ -45,10 +45,10 @@ def content_type(path: str) -> str:
 
 
 # Encode one bounded-window Zstd frame and compare its decoded bytes with the source.
-def compress_zstd(executable: Path, source: bytes) -> bytes:
-    # Share level 19 with other stages, but preserve the single-frame / 256 KiB window contract.
+def compress_zstd(executable: Path, source: bytes, compression_level: int = ZSTD_COMPRESSION_LEVEL) -> bytes:
+    # Select the requested level while preserving one frame and the 256 KiB window contract.
     result = run_tool([
-        str(executable), f"-{ZSTD_COMPRESSION_LEVEL}", "--zstd=wlog=18", f"--stream-size={len(source)}", "-q", "-c",
+        str(executable), *(["--ultra"] if compression_level > 19 else []), f"-{compression_level}", "--zstd=wlog=18", f"--stream-size={len(source)}", "-q", "-c",
     ], input_data=source)
     # Decode the frame immediately and compare the original bytes.
     restored = run_tool([str(executable), "-q", "-d", "-c"], input_data=result.stdout)
@@ -112,6 +112,7 @@ def prepare_payloads(
     staging_directory: Path,
     zstd_executable: Path,
     gdeflate_executable: Path,
+    zstd_level: int = ZSTD_COMPRESSION_LEVEL,
 ) -> dict[str, list[bytes]]:
     temporary_codec = staging_directory / "codec"
     temporary_codec.mkdir()
@@ -123,7 +124,7 @@ def prepare_payloads(
         original = source_path.read_bytes()
         original_payloads.append(original)
         gdeflate_payloads.append(compress_gdeflate(gdeflate_executable, source_path, temporary_codec))
-        zstd_payloads.append(compress_zstd(zstd_executable, original))
+        zstd_payloads.append(compress_zstd(zstd_executable, original, zstd_level))
     payloads_by_codec = {
         "uncompressed": original_payloads,
         "gdeflate": gdeflate_payloads,
@@ -180,9 +181,10 @@ def process(
     gdeflate_executable: Path,
     alignment: int,
     overwrite: bool,
-    *, report: dict[str, Any] | None = None,
+    *, zstd_level: int = ZSTD_COMPRESSION_LEVEL, report: dict[str, Any] | None = None,
 ) -> Path:
     validate_options(archive_prefix, alignment)
+    validate_zstd_level(zstd_level)
     input_directory = content_report.validate_input_directory(input_directory)
     zstd_version = verify_tool(zstd_executable)
     gdeflate_version = verify_tool(gdeflate_executable)
@@ -202,7 +204,7 @@ def process(
     archive_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".hlk.stage.", dir=archive_root) as temporary:
         staging = Path(temporary)
-        payloads = prepare_payloads(input_directory, sources, staging, zstd_executable, gdeflate_executable)
+        payloads = prepare_payloads(input_directory, sources, staging, zstd_executable, gdeflate_executable, zstd_level)
         staged_paths, records = build_archives(
             staging, sources, payloads, filenames, relative_paths, archive_prefix,
             alignment, create_hlk_archive, validate_hlk_archive,
@@ -211,6 +213,10 @@ def process(
         for codec, destination in output_paths.items():
             reject_symlink_components(input_directory, relative_paths[codec], "archive output")
             os.replace(staged_paths[codec], destination)
+    # Record the chosen archive Zstd level without changing the binary archive format.
+    for record in records:
+        if record["payload_codec"] == "zstd":
+            record["compression_level"] = zstd_level
     manifest_data["archives"].extend(records)
     manifest_data["archives"].sort(key=lambda record: record["path"])
     manifest_data["tools"].update({
