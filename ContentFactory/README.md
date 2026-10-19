@@ -60,8 +60,8 @@ HLK produces matching uncompressed, GDeflate-level-9, and Zstd archives at the s
 
 ## Limitations and failures
 
-- Run one command per input directory at a time; keep originals unchanged during processing.
+- Run one command per input directory at a time; keep originals unchanged during processing. Input roots and all ancestor directories must not be symbolic links or junctions.
 - Existing selected outputs require `overwrite: true`. New content is checked before replacement, but installation/report-write failure can leave incomplete outputs; fix the error and rerun with overwrite enabled.
-- GACL handles DDS array item 0 / mip 0. BC1/3/4/5 use conditioning plus Zstd; BC7 is Zstd-only. Non-DDS files are skipped; unsupported or truncated DDS inputs fail.
+- GACL handles DDS array item 0 / mip 0. BC1/3/4/5 use conditioning plus Zstd; BC7 is Zstd-only. Non-DDS files are skipped; cubemaps, volume textures, and unsupported or truncated DDS inputs fail.
 - GACL archives and BC7 mode-split strategies are not implemented. The larger-input GDeflate issue remains unresolved.
 - Local build/smoke coverage does not establish clean-machine portability, unrestricted native correctness, or GPU correctness.

@@ -18,11 +18,14 @@ from factory_common import reject_symlink_components, write_bytes_atomic
 TOOL_VERSION = "0.2.0"
 
 
-# Require an existing original-file directory without accepting a linked root.
+# Require an original-file directory with no redirected root or ancestor components.
 def validate_input_directory(input_directory: Path) -> Path:
-    if input_directory.is_symlink() or getattr(input_directory, "is_junction", lambda: False)():
-        raise ValueError(f"input directory cannot be a symbolic link or junction: {input_directory}")
-    resolved = input_directory.resolve()
+    lexical = input_directory if input_directory.is_absolute() else Path.cwd() / input_directory
+    # Inspect the unresolved chain: resolve() would hide ancestor junctions and symlinks.
+    for component in reversed((lexical, *lexical.parents)):
+        if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+            raise ValueError(f"input directory cannot contain a symbolic link or junction: {component}")
+    resolved = lexical.resolve()
     if not resolved.is_dir():
         raise FileNotFoundError(f"input directory does not exist: {resolved}")
     return resolved

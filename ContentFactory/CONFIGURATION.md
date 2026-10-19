@@ -26,7 +26,7 @@ Every field except `input_directory` is optional. Numbers must be JSON integers,
 
 | Field | Default | Meaning / constraints |
 |---|---|---|
-| `input_directory` | Required | Existing directory containing originals. Files are discovered recursively. Redirected input roots and content paths are rejected. |
+| `input_directory` | Required | Existing directory containing originals. Files are discovered recursively. Redirected input roots, their ancestor components, and content paths are rejected. |
 | `stages` | `["all"]` | `["all"]`, or unique names selected from `zstd`, `gdeflate`, `gacl`, `hlk`. Do not mix `all` with individual names. Execution order is always Zstd → GDeflate → GACL → HLK. |
 | `overwrite` | `false` | Permit replacement of existing selected outputs. Set `true` for a deliberate rebuild. |
 | `zstd.level` | `19` | Zstd compression level, 1–22. Levels 20–22 automatically enable the encoder's `--ultra` mode and can require more memory. |
@@ -95,5 +95,5 @@ For a complete editable request, copy `examples/request.json`.
 - `generated/hlk` contains `<prefix>.uncompressed`, `<prefix>.gdeflate`, and `<prefix>.zstd` with matching ordered membership.
 - `generated/manifest.json` describes **this invocation only**, including encoding settings. Unselected outputs may remain on disk without appearing in the new report.
 - Use one invocation per input directory at a time. Keep originals unchanged while it runs. New bytes are checked before replacement, but installation/report-write failure is not rolled back; fix the problem and rerun with `overwrite: true`.
-- GACL currently handles DDS array item 0 / mip 0; supported formats are BC1/3/4/5/7. Volume textures and unsupported/truncated inputs fail. BC7 uses Zstd without conditioning. GACL archives and BC7 mode-split strategies are not implemented.
+- GACL currently handles DDS array item 0 / mip 0; supported formats are BC1/3/4/5/7. Cubemaps (legacy and DX10), volume textures, and unsupported/truncated inputs fail. BC7 uses Zstd without conditioning. GACL archives and BC7 mode-split strategies are not implemented.
 - The known larger-input GDeflate issue remains unresolved. A successful small-input smoke test is not unrestricted native/runtime validation.

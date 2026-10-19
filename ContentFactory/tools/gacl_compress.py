@@ -27,6 +27,9 @@ from factory_contracts import TRANSFORM_CONTRACT
 DDS_MAGIC = 0x20534444
 FOURCC_DX10 = 0x30315844
 DDSCAPS2_VOLUME = 0x00200000
+DDSCAPS2_CUBEMAP = 0x00000200
+DDSCAPS2_CUBEMAP_FACES = 0x0000FC00
+DDS_RESOURCE_MISC_TEXTURECUBE = 0x00000004
 # Older DDS headers use four-character codes to describe their BC format.
 FOURCC_FORMATS = {
     0x31545844: ("BC1", "DXT1", 8),
@@ -92,6 +95,9 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMipInfo:
     mip_count = max(1, read_u32(data, 28))
     if width == 0 or height == 0:
         raise ValueError("DDS dimensions must be non-zero")
+    # This stage selects a 2D image, not a cubemap face; reject both cube header forms.
+    if read_u32(data, 112) & (DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_FACES):
+        raise ValueError("GACL stage requires a 2D DDS texture; cubemaps are unsupported")
     fourcc = read_u32(data, 84)
     offset = 128
     array_size = 1
@@ -99,6 +105,8 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMipInfo:
     if fourcc == FOURCC_DX10:
         if len(data) < 148:
             raise ValueError("truncated DDS DX10 header")
+        if read_u32(data, 136) & DDS_RESOURCE_MISC_TEXTURECUBE:
+            raise ValueError("GACL stage requires a 2D DDS texture; cubemaps are unsupported")
         dxgi = read_u32(data, 128)
         try:
             format_name, exact_name, bytes_per_block = DXGI_FORMATS[dxgi]

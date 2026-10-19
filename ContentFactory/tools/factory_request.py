@@ -63,7 +63,8 @@ def load_config(path: Path) -> dict:
             raise ValueError(f"{key} must be a nonempty string")
     if "input_directory" in values:
         directory = Path(values["input_directory"])
-        values["input_directory"] = directory if directory.is_absolute() else path.resolve().parent / directory
+        config_directory = path.parent if path.is_absolute() else Path.cwd() / path.parent
+        values["input_directory"] = directory if directory.is_absolute() else config_directory / directory
     return values
 
 
