@@ -56,7 +56,9 @@ input-directory/
 
 The root `generated` folder is excluded from input discovery. Selected stages run in Zstd, GDeflate, GACL, then HLK order; generated files preserve original subdirectories.
 
-HLK produces matching uncompressed, GDeflate-level-9, and Zstd archives at the selected `hlk.zstd_level`. Keep `manifest.json` with the outputs: it records paths, sizes, hashes, encoding settings, texture details, archive membership, and tool versions for the **current invocation only**. Unselected outputs may remain on disk without appearing in the new report.
+HLK produces matching uncompressed, GDeflate-level-9, and Zstd archives at the selected `hlk.zstd_level`. The shared `tools/hlk_archive.py` module writes and parses the archive format; the HLK stage reopens each archive and compares its stored payloads before publication. Keep `manifest.json` with the outputs: it records paths, sizes, hashes, encoding settings, texture details and archive membership for the **current invocation only**. Unselected outputs may remain on disk without appearing in the new report.
+
+Removed bookkeeping and redundant discovery checks, including restoration pointers, are recorded in [Maintenance notes](MAINTENANCE_NOTES.md).
 
 ## Limitations and failures
 

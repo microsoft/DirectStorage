@@ -1,8 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Condition raw BC texture blocks with a reversible shuffle, then compress with Zstd.
-// Both encoding and verification compare the restored bytes with the original payload.
+// Condition texture data, compressing it with Zstd, and verifying that the original bytes can be reconstructed. 
+
+/*
+Notes:
+- GACL supplies the forward shuffle; this file implements the reverse reconstruction used for checking.
+- BC7 currently bypasses conditioning.
+- Output contains compressed payload bytes only; interpreting them requires the accompanying format/transform information.
+
+Steps:
+
+Original texture-block bytes
+    ↓
+Shuffle related fields together
+    ↓
+Compress with Zstd
+    ↓
+Decompress with Zstd
+    ↓
+Reverse the shuffle
+    ↓
+Compare with the original bytes
+*/
 
 #include "gacl.h"
 #include "shuffle.h"
@@ -19,7 +39,8 @@
 #include <string_view>
 #include <vector>
 
-// These functions are provided by the linked GACL shuffle implementation.
+// Forward shuffle functions provided by the linked GACL shuffle implementation.
+// Implemented in GACL's bc1.cpp, bc3,cpp, bc4,cpp, bc5.cpp
 HRESULT Shuffle_BC1(uint8_t*, const uint8_t*, size_t, size_t);
 HRESULT Shuffle_BC3(uint8_t*, const uint8_t*, size_t, size_t);
 HRESULT Shuffle_BC4(uint8_t*, const uint8_t*, size_t, size_t);
@@ -51,14 +72,14 @@ namespace
 
     // Original block layouts used to rebuild the payload during CPU verification.
     // Size checks guard against padding changing these expected byte layouts.
-    struct LocalBC1Block
+    struct LocalBC1Block            // 8 bytes
     {
         uint16_t color0;
         uint16_t color1;
         uint32_t indices;
     };
 
-    struct LocalBC3Block
+    struct LocalBC3Block            // 16 bytes
     {
         uint8_t alpha0;
         uint8_t alpha1;
@@ -66,14 +87,14 @@ namespace
         LocalBC1Block color;
     };
 
-    struct LocalBC4Block
+    struct LocalBC4Block            // 8 bytes
     {
         uint8_t endpoint0;
         uint8_t endpoint1;
         uint8_t indices[6];
     };
 
-    struct LocalBC5Block
+    struct LocalBC5Block            // 16 bytes
     {
         LocalBC4Block red;
         LocalBC4Block green;
@@ -81,7 +102,9 @@ namespace
     static_assert(sizeof(LocalBC1Block) == 8 && sizeof(LocalBC3Block) == 16);
     static_assert(sizeof(LocalBC4Block) == 8 && sizeof(LocalBC5Block) == 16);
 
-    // Read one field from a shuffled stream without requiring aligned source memory.
+    // A small helper for reading a field from a shuffled byte stream.
+    // Example: Read<uint16_t>(color0)
+    //    Reads 2 bytes and advances color0 by 2
     template <typename T>
     T Read(const uint8_t*& source)
     {
@@ -91,31 +114,37 @@ namespace
         return value;
     }
 
-    // Read binary payloads exactly as stored, including any zero bytes.
+    // Reads an entire binary file into a byte vector
     std::vector<uint8_t> ReadFile(const std::filesystem::path& path)
     {
+        // Open at the end
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         if (!stream)
             throw std::runtime_error("could not open input: " + path.u8string());
+        // Length
         const auto end = stream.tellg();
         if (end < 0)
             throw std::runtime_error("could not size input: " + path.u8string());
+        // Allocate the vector
         std::vector<uint8_t> data(static_cast<size_t>(end));
+        // Seek to beginning 
         stream.seekg(0);
+        // Read and check success
         if (!data.empty() && !stream.read(reinterpret_cast<char*>(data.data()), end))
             throw std::runtime_error("could not read input: " + path.u8string());
         return data;
     }
 
-    // Publish only the compressed bytes; format and original size are supplied separately.
+    // Write only the compressed bytes; format and original size are supplied separately.
     void WriteFile(const std::filesystem::path& path, const std::vector<uint8_t>& data)
     {
+        // Open destination in binary/truncate mode
         std::ofstream stream(path, std::ios::binary | std::ios::trunc);
         if (!stream)
             throw std::runtime_error("could not open output: " + path.u8string());
         if (!data.empty())
+            // Write the bytes
             stream.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-        // Include buffered flush failures in the encoder's own success/failure status.
         stream.close();
         if (!stream)
             throw std::runtime_error("could not write or close output: " + path.u8string());
@@ -130,7 +159,7 @@ namespace
         throw std::runtime_error("format must be BC1, BC3, BC4, BC5, or BC7");
     }
 
-    // Reject trailing text and out-of-range settings rather than accepting partial numbers.
+    // Converts an option value into an integer and checks if the string was consumed, and the result range
     int ParseInteger(std::wstring_view text, const char* label, int minimum, int maximum)
     {
         size_t used = 0;
@@ -140,6 +169,10 @@ namespace
         return static_cast<int>(parsed);
     }
 
+    // =============================================================================
+    // Format-specific reverse shuffles
+    // These four methods rebuild the original block structures from separate field streams
+    
     // BC1 stores two color endpoints and indices in separate streams (2/2/4 bytes).
     void UnshuffleBC1(uint8_t* destination, const uint8_t* source, size_t count)
     {
@@ -222,14 +255,14 @@ namespace
         }
     }
 
-    // Restore the original block layout while copying any unshuffled tail unchanged.
+    // This is the dispatcher and leftover-block handler.
     void Unshuffle(
         const TextureFormatInfo& value,
         uint8_t* destination,
         const uint8_t* source,
         size_t blockCount)
     {
-        // Zstd-only payloads need no block rearrangement after decompression.
+        // For level 7, no reverse transformation is needed
         if (value.transformId == 7)
         {
             std::memcpy(destination, source, blockCount * value.bytesPerBlock);
@@ -252,16 +285,18 @@ namespace
             std::memcpy(destination + shuffledBytes, source + shuffledBytes, tailBytes);
     }
 
-    // Verify an existing compressed file against a separately supplied original payload.
-    // This path does not rewrite either file.
+    // Complete reconstruction check
     void Verify(
         const TextureFormatInfo& value,
         const std::vector<uint8_t>& original,
         const std::vector<uint8_t>& compressed)
     {
+        // Original payload shape
         if (original.empty() || original.size() % value.bytesPerBlock != 0)
             throw std::runtime_error("original payload must be non-empty and block-aligned");
         std::vector<uint8_t> shuffled(original.size());
+
+        // Sstd decompress
         const size_t size = ZSTD_decompress(
             shuffled.data(),
             shuffled.size(),
@@ -270,19 +305,23 @@ namespace
         if (ZSTD_isError(size) || size != original.size())
             throw std::runtime_error("Zstd verification failed");
         std::vector<uint8_t> restored(original.size());
+
+        // Reverse conditioning
         Unshuffle(value, restored.data(), shuffled.data(), original.size() / value.bytesPerBlock);
+
+        // Compare bytes
         if (restored != original)
             throw std::runtime_error("GACL reverse verification failed");
     }
 
-    // Shuffle and compress a BC payload, then verify that it restores the input.
+    // Shuffle and compress a BC payload, then verify that it restores the input. The main encoding operation.
     std::vector<uint8_t> Compress(
         const TextureFormatInfo& value,
         const std::vector<uint8_t>& input,
         int level,
         int targetBlockSize)
     {
-        // The input is raw block data, so partial blocks and empty payloads are invalid.
+        // The input is raw block data. Partial blocks and empty payloads are invalid.
         if (input.empty() || input.size() % value.bytesPerBlock != 0)
             throw std::runtime_error("input must contain a non-empty, block-aligned BC payload");
         // Rearrange supported formats before compression; keep BC7 bytes unchanged.
@@ -297,16 +336,18 @@ namespace
             shuffled = input;
         }
 
-        // Apply the requested compression level and target compressed-block size.
-        // Release the context before checking the final status, including on Zstd errors.
+        // Create the zstd compression context
         ZSTD_CCtx* context = ZSTD_createCCtx();
         if (!context)
             throw std::runtime_error("could not create Zstd context");
+        // Apply zstd settings
         const ZSTD_compressionParameters params = ZSTD_getCParams(level, input.size(), 0);
         size_t status = ZSTD_CCtx_setCParams(context, params);
         if (!ZSTD_isError(status))
             status = ZSTD_CCtx_setParameter(context, ZSTD_c_targetCBlockSize, targetBlockSize);
         std::vector<uint8_t> compressed(ZSTD_compressBound(shuffled.size()));
+
+        // Compress
         if (!ZSTD_isError(status))
             status = ZSTD_compress2(
                 context,
@@ -324,7 +365,7 @@ namespace
         return compressed;
     }
 
-    // Return the value following a named command-line option or report it missing.
+    // Searches the arguments for a named option and returns the following value.
     std::wstring RequireOptionValue(int argc, wchar_t** argv, std::wstring_view name)
     {
         for (int index = 1; index + 1 < argc; ++index)

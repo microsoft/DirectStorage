@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -33,7 +32,7 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
 
 
 # Reject linked path components and paths resolving outside the content root.
-def reject_symlink_components(root: Path, relative: str, field: str) -> Path:
+def checked_content_path(root: Path, relative: str, field: str) -> Path:
     """Reject linked components and resolved escapes before reading or writing content files."""
     root = root.resolve()
     path = root / Path(relative)
@@ -52,7 +51,7 @@ def reject_symlink_components(root: Path, relative: str, field: str) -> Path:
 
 
 # Find a packaged encoder relative to the application, never through the caller's PATH.
-def bundled_tool(filename: str) -> Path:
+def bundled_encoder_path(filename: str) -> Path:
     application = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
     return application / "bin" / filename
 
@@ -116,19 +115,3 @@ def run_command(
             f"stderr: {stderr}\nstdout: {stdout}"
         )
     return result
-
-
-# Run the version command and extract its version number from the returned banner.
-def tool_version(
-    executable: Path, label: str, pattern: str = r"\b(\d+\.\d+\.\d+)\b", *, timeout: int = 30,
-) -> str:
-    # Read the version once the caller is ready to execute the tool.
-    result = run_command([str(executable), "--version"], operation=f"{label} --version", text=True, timeout=timeout)
-    # Extract the version number without depending on the rest of the banner.
-    banner = result.stdout or result.stderr or ""
-    if isinstance(banner, bytes):
-        banner = banner.decode("utf-8", "replace")
-    match = re.search(pattern, banner.strip())
-    if not match:
-        raise RuntimeError(f"{label} --version returned no recognizable version")
-    return match.group(1)

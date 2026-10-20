@@ -16,10 +16,9 @@ from typing import Any
 
 from factory_common import (
     directory_is_empty,
-    reject_symlink_components,
+    checked_content_path,
     run_command,
     validate_executable,
-    tool_version as common_tool_version,
 )
 from factory_contracts import TRANSFORM_CONTRACT
 
@@ -144,8 +143,6 @@ def parse_dds_first_mip(data: bytes) -> DDSFirstMipInfo:
 
 run_tool = partial(run_command, operation="GACLContentTool", text=True)
 
-tool_version = partial(common_tool_version, label="GACLContentTool")
-
 # Preserve source subfolders when naming the conditioned GACL derivative.
 def output_relative_path(source: str) -> str:
     source_path = Path(source)
@@ -167,7 +164,7 @@ def build_variants(
         # Only DDS inputs participate in this texture-conditioning stage.
         if Path(original_file["path"]).suffix.lower() != ".dds":
             continue
-        source_path = reject_symlink_components(input_directory, original_file["path"], "original file")
+        source_path = checked_content_path(input_directory, original_file["path"], "original file")
         source_data = source_path.read_bytes()
         mip_info = parse_dds_first_mip(source_data)
         # Pass the first mip's block bytes to the codec, not the DDS container.
@@ -243,15 +240,14 @@ def process(
     overwrite: bool,
     *, report: dict[str, Any] | None = None,
 ) -> Path:
-    # Validate settings and identify the encoder before changing any outputs.
+    # Validate settings and the encoder path before changing any outputs.
     validate_options(zstd_level, target_block_size)
     input_directory = content_report.validate_input_directory(input_directory)
     executable = validate_executable(executable)
-    version = tool_version(executable)
     manifest = content_report.manifest_path(input_directory)
 
     manifest_data = report if report is not None else content_report.create_manifest(input_directory)
-    output_directory = reject_symlink_components(input_directory, "generated/gacl", "gacl output directory")
+    output_directory = checked_content_path(input_directory, "generated/gacl", "gacl output directory")
     if not directory_is_empty(output_directory) and not overwrite:
         raise FileExistsError("GACL outputs already exist; use --overwrite")
     output_directory.parent.mkdir(parents=True, exist_ok=True)
@@ -259,12 +255,11 @@ def process(
         staging = Path(temporary)
         records = build_variants(input_directory, manifest_data, staging, executable, zstd_level, target_block_size)
         # Complete generation before replacing old outputs; failed installation is not rolled back.
-        reject_symlink_components(input_directory, "generated/gacl", "gacl output directory")
+        checked_content_path(input_directory, "generated/gacl", "gacl output directory")
         if output_directory.exists():
             shutil.rmtree(output_directory)
         os.replace(staging, output_directory)
     manifest_data["derivatives"].extend(records)
     manifest_data["derivatives"].sort(key=lambda record: record["path"])
-    manifest_data["tools"]["GACLContentTool"] = {"version": version}
     content_report.write_json_atomic(manifest, manifest_data)
     return manifest

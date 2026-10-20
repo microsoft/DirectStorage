@@ -13,7 +13,7 @@ import zstd_compress
 import gdeflate_compress
 import gacl_compress
 import hlk_content_set
-from factory_common import bundled_tool, validate_executable
+from factory_common import bundled_encoder_path, validate_executable
 from factory_request import create_parser, parse_request
 from factory_contracts import ZSTD_COMPRESSION_LEVEL, validate_zstd_level
 
@@ -32,9 +32,9 @@ def preflight(args: argparse.Namespace, stages: list[str], has_dds: bool) -> dic
     """Validate selected-stage arguments without running tools or creating outputs."""
     prepared: dict[str, tuple] = {}
     required_tools: dict[str, Path] = {}
-    zstd = getattr(args, "zstd_exe", None) or bundled_tool("zstd.exe")
-    gdeflate = getattr(args, "gdeflate_exe", None) or bundled_tool("GDeflateContentTool.exe")
-    gacl = getattr(args, "gacl_exe", None) or bundled_tool("GACLContentTool.exe")
+    zstd = getattr(args, "zstd_exe", None) or bundled_encoder_path("zstd.exe")
+    gdeflate = getattr(args, "gdeflate_exe", None) or bundled_encoder_path("GDeflateContentTool.exe")
+    gacl = getattr(args, "gacl_exe", None) or bundled_encoder_path("GACLContentTool.exe")
     # Gather each selected stage's requirements before doing any processing.
     for stage in stages:
         # There is nothing for GACL to process when the set has no DDS textures.

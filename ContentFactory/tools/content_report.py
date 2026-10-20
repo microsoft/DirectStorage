@@ -3,6 +3,20 @@
 
 Originals stay in place. The generated/manifest.json file records generated
 files and archives; the generated subtree is never inventoried as input.
+
+Input directory
+    ↓
+Check the directory and its ancestors
+    ↓
+Discover original files, excluding generated/
+    ↓
+Record relative paths, sizes, and hashes
+    ↓
+Create an in-memory report
+    ↓
+Encoding stages append their results
+    ↓
+Write generated/manifest.json
 """
 
 from __future__ import annotations
@@ -10,18 +24,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
-from factory_common import reject_symlink_components, write_bytes_atomic
-
-TOOL_VERSION = "0.2.0"
-
+from factory_common import checked_content_path, write_bytes_atomic
 
 # Require an original-file directory with no redirected root or ancestor components.
 def validate_input_directory(input_directory: Path) -> Path:
     lexical = input_directory if input_directory.is_absolute() else Path.cwd() / input_directory
-    # Inspect the unresolved chain: resolve() would hide ancestor junctions and symlinks.
+    # No symbolic links or junctions allowed
     for component in reversed((lexical, *lexical.parents)):
         if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
             raise ValueError(f"input directory cannot contain a symbolic link or junction: {component}")
@@ -31,7 +42,7 @@ def validate_input_directory(input_directory: Path) -> Path:
     return resolved
 
 
-# Compute a file digest using bounded reads rather than loading the full file.
+# Compute the SHA256 of a file
 def sha256_file(path: Path) -> str:
     # Hash in small reads rather than loading the whole file into memory.
     digest = hashlib.sha256()
@@ -54,9 +65,11 @@ def inventory_sources(input_directory: Path) -> list[dict[str, Any]]:
             # Reserve this whole subtree, including temporary processing files.
             folders[:] = [name for name in folders if name.casefold() != "generated"]
             names = [name for name in names if name.casefold() != "generated"]
+        # Each entry is visited once; checked parents need not be resolved again.
         for name in folders + names:
             path = directory / name
-            reject_symlink_components(input_directory, path.relative_to(input_directory).as_posix(), "original file")
+            if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                raise ValueError(f"original file cannot contain symbolic links or junctions: {path}")
         files.extend(directory / name for name in names if (directory / name).is_file())
     files.sort(key=lambda path: path.relative_to(input_directory).as_posix())
     if not files:
@@ -64,7 +77,6 @@ def inventory_sources(input_directory: Path) -> list[dict[str, Any]]:
     records = []
     for path in files:
         relative = path.relative_to(input_directory).as_posix()
-        validate_relative_path(relative, "original path")
         records.append({"path": relative, "size": path.stat().st_size, "sha256": sha256_file(path)})
     return records
 
@@ -75,25 +87,12 @@ def create_manifest(input_directory: Path) -> dict[str, Any]:
         "sources": inventory_sources(input_directory),
         "derivatives": [],
         "archives": [],
-        "tools": {"content_report.py": {"version": TOOL_VERSION}},
     }
-
-
-# Require a canonical relative path without aliases, parent segments, or drive syntax.
-def validate_relative_path(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{field} must be a non-empty string")
-    # Original-file paths use forward slashes and stay relative to the input directory.
-    path = PurePosixPath(value)
-    if (not path.parts or path.is_absolute() or ".." in path.parts or "." in path.parts or "\\" in value
-            or ":" in value or value != path.as_posix()):
-        raise ValueError(f"{field} must be a safe normalized relative path")
-    return value
 
 
 # Locate the input-directory manifest while rejecting linked or escaping components.
 def manifest_path(input_directory: Path) -> Path:
-    return reject_symlink_components(input_directory, "generated/manifest.json", "manifest path")
+    return checked_content_path(input_directory, "generated/manifest.json", "manifest path")
 
 
 # Serialize stable UTF-8 JSON and atomically replace its destination.

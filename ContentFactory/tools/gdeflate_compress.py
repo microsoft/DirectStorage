@@ -14,10 +14,9 @@ from typing import Any
 
 from factory_common import (
     directory_is_empty,
-    reject_symlink_components,
+    checked_content_path,
     run_command,
     validate_executable,
-    tool_version as common_tool_version,
 )
 from factory_contracts import parse_gdeflate_header
 
@@ -27,8 +26,6 @@ DEFAULT_LEVEL = 9
 
 
 run_tool = partial(run_command, operation="GDeflateContentTool", text=True)
-
-tool_version = partial(common_tool_version, label="GDeflateContentTool")
 
 
 # Require an integer compression level supported by the GDeflate tool.
@@ -81,7 +78,7 @@ def build_derivatives(
 ) -> list[dict[str, Any]]:
     derivative_records: list[dict[str, Any]] = []
     for original_file in manifest_data["sources"]:
-        source_path = reject_symlink_components(input_directory, original_file["path"], "original file")
+        source_path = checked_content_path(input_directory, original_file["path"], "original file")
         if original_file["size"] == 0:
             raise ValueError(f"GDeflate source cannot be empty: {original_file['path']}")
         # Generate only the levels selected for this source.
@@ -121,12 +118,10 @@ def process(input_directory: Path, executable: Path, levels: tuple[int, ...], ov
     input_directory = content_report.validate_input_directory(input_directory)
     levels = validate_levels(levels)
     executable = validate_executable(executable)
-    # Record the encoder version so outputs can be traced back to their tool.
-    version = tool_version(executable)
     manifest = content_report.manifest_path(input_directory)
 
     manifest_data = report if report is not None else content_report.create_manifest(input_directory)
-    output_directory = reject_symlink_components(input_directory, "generated/gdeflate", "gdeflate output directory")
+    output_directory = checked_content_path(input_directory, "generated/gdeflate", "gdeflate output directory")
     if not directory_is_empty(output_directory) and not overwrite:
         raise FileExistsError("GDeflate outputs already exist; use --overwrite")
     output_directory.parent.mkdir(parents=True, exist_ok=True)
@@ -134,12 +129,11 @@ def process(input_directory: Path, executable: Path, levels: tuple[int, ...], ov
         staging = Path(temporary)
         records = build_derivatives(input_directory, manifest_data, staging, executable, levels)
         # Complete generation before replacing old outputs; failed installation is not rolled back.
-        reject_symlink_components(input_directory, "generated/gdeflate", "gdeflate output directory")
+        checked_content_path(input_directory, "generated/gdeflate", "gdeflate output directory")
         if output_directory.exists():
             shutil.rmtree(output_directory)
         os.replace(staging, output_directory)
     manifest_data["derivatives"].extend(records)
     manifest_data["derivatives"].sort(key=lambda record: record["path"])
-    manifest_data["tools"]["GDeflateContentTool"] = {"version": version}
     content_report.write_json_atomic(manifest, manifest_data)
     return manifest

@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from factory_common import bundled_tool
+from factory_common import bundled_encoder_path
 from factory_contracts import ZSTD_COMPRESSION_LEVEL
 
 # JSON groups map directly to the internal stage settings.
@@ -84,8 +84,8 @@ def parse_request(parser: argparse.ArgumentParser, argv: list[str] | None = None
         "gdeflate_levels": None, "gdeflate_all_levels": False,
         "gacl_zstd_level": ZSTD_COMPRESSION_LEVEL, "gacl_target_block_size": 64 * 1024,
         "hlk_archive_prefix": "dstoragetest", "hlk_alignment": 1, "hlk_zstd_level": ZSTD_COMPRESSION_LEVEL,
-        "zstd_exe": bundled_tool("zstd.exe"), "gdeflate_exe": bundled_tool("GDeflateContentTool.exe"),
-        "gacl_exe": bundled_tool("GACLContentTool.exe"),
+        "zstd_exe": bundled_encoder_path("zstd.exe"), "gdeflate_exe": bundled_encoder_path("GDeflateContentTool.exe"),
+        "gacl_exe": bundled_encoder_path("GACLContentTool.exe"),
     }
     values.update(load_config(config))
     if "input_directory" not in values:
