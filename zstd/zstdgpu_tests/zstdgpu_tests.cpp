@@ -482,3 +482,112 @@ TEST_F(ZstdDecompressionTests, MalformedFrameReservedBitStatusTest)
     EXPECT_EQ(frameStatus[0], kzstdgpu_FrameStatus_ReservedBitSet)
         << "Frame with the reserved bit set should report kzstdgpu_FrameStatus_ReservedBitSet.";
 }
+
+// Builds a minimal zstd frame holding one raw block with a single payload byte, but whose header
+// declares `declaredSize` bytes of content (4-byte field, or 8-byte field above 4 GiB - 1).  The
+// request-size limit check reads the declared header sizes, so frames like this exercise it without
+// gigabytes of real output.  Frames are padded to 4-byte alignment.
+static void AppendSizeDeclaringFrame(
+    std::vector<uint8_t>& data,
+    OffsetsAndSizes& offsetsAndSizes,
+    uint64_t declaredSize,
+    uint8_t payload,
+    bool setReservedBit = false)
+{
+    const uint32_t inputOffset = static_cast<uint32_t>(data.size());
+    const bool use8ByteSize = declaredSize > 0xFFFFFFFFull;
+
+    const uint8_t header[] = {0x28, 0xB5, 0x2F, 0xFD};
+    data.insert(data.end(), std::begin(header), std::end(header));
+    // Frame_Header_Descriptor: Frame_Content_Size_flag (2 = 4 bytes, 3 = 8 bytes), Single_Segment_flag clear.
+    data.push_back(static_cast<uint8_t>(((use8ByteSize ? 3u : 2u) << 6) | (setReservedBit ? 0x08u : 0u)));
+    data.push_back(0x00); // Window_Descriptor: 1 KiB window
+    for (uint32_t i = 0; i < (use8ByteSize ? 8u : 4u); ++i)
+    {
+        data.push_back(static_cast<uint8_t>(declaredSize >> (8u * i)));
+    }
+    // Block_Header: Last_Block = 1, Block_Type = Raw, Block_Size = 1.
+    const uint8_t blockHeader[] = {0x09, 0x00, 0x00};
+    data.insert(data.end(), std::begin(blockHeader), std::end(blockHeader));
+    data.push_back(payload);
+
+    const uint32_t inputSize = static_cast<uint32_t>(data.size()) - inputOffset;
+    data.resize(DWORD_ALIGN(data.size()));
+
+    const uint32_t outputOffset = offsetsAndSizes.UnCompressedFramesMemorySizeInBytes;
+    offsetsAndSizes.InputOffsets.push_back({inputOffset, inputSize});
+    offsetsAndSizes.OutputOffsets.push_back({outputOffset, 1u});
+    offsetsAndSizes.UnCompressedFramesMemorySizeInBytes = outputOffset + 256u;
+}
+
+// Verifies the request-size limit (kzstdgpu_MaxRequestUncompressedByteSize): when the declared
+// output of all accepted frames in a request exceeds it, every accepted frame reports
+// kzstdgpu_FrameStatus_RequestTooLarge; at exactly the limit, every frame reports S_OK and decodes.
+TEST_F(ZstdDecompressionTests, RequestTooLargeStatusTest)
+{
+    const uint32_t limit = kzstdgpu_MaxRequestUncompressedByteSize;
+
+    struct Case
+    {
+        const char* name;
+        std::vector<uint64_t> declaredSizes;
+        std::vector<bool> reservedBits; // empty = no frame has the reserved bit set
+        bool expectTooLarge;
+    };
+
+    // 128 frames span several waves (32- or 64-lane), so the multi-wave cases exercise the
+    // cross-wave atomic accumulation rather than a single wave sum.
+    auto multiWave = [&](uint32_t lastFrameSize) {
+        std::vector<uint64_t> sizes(128, 0x00800000u); // 127 * 8 MiB + last
+        sizes.back() = lastFrameSize;
+        return sizes;
+    };
+    const uint32_t multiWaveRemainder = limit - 127u * 0x00800000u;
+
+    std::vector<uint64_t> rejectedFirst = {0x40000000u, limit};
+    const std::vector<Case> cases = {
+        {"two frames, exactly at the limit", {0x20000000u, limit - 0x20000000u}, {}, false},
+        {"two frames, one byte over the limit", {0x20000000u, limit - 0x20000000u + 1u}, {}, true},
+        {"multi-wave, exactly at the limit", multiWave(multiWaveRemainder), {}, false},
+        {"multi-wave, one byte over the limit", multiWave(multiWaveRemainder + 1u), {}, true},
+        {"single frame declaring 4 GiB - 1", {0xFFFFFFFFull}, {}, true},
+        {"single frame declaring 8 GiB (64-bit size field)", {0x200000000ull}, {}, true},
+        {"rejected frame does not count toward the limit", rejectedFirst, {true, false}, false},
+    };
+
+    std::unique_ptr<ZstdDecompressionWork> gpuWork = std::make_unique<ZstdDecompressionWork>(
+        FindDefaultAdapter().Device.get(),
+        L"ZstdDecompressionRequestTooLargeStatusTest");
+
+    for (const Case& c : cases)
+    {
+        SCOPED_TRACE(c.name);
+
+        std::vector<uint8_t> data;
+        OffsetsAndSizes offsetsAndSizes{};
+        for (size_t i = 0; i < c.declaredSizes.size(); ++i)
+        {
+            const bool reserved = !c.reservedBits.empty() && c.reservedBits[i];
+            AppendSizeDeclaringFrame(data, offsetsAndSizes, c.declaredSizes[i], static_cast<uint8_t>(0x41 + i), reserved);
+        }
+
+        std::vector<uint32_t> frameStatus;
+        auto decompressedFrames = gpuWork->Decompress(data, offsetsAndSizes, &frameStatus);
+        ASSERT_EQ(frameStatus.size(), c.declaredSizes.size());
+
+        for (size_t i = 0; i < frameStatus.size(); ++i)
+        {
+            const bool reserved = !c.reservedBits.empty() && c.reservedBits[i];
+            const uint32_t expected = reserved ? kzstdgpu_FrameStatus_ReservedBitSet
+                                      : c.expectTooLarge ? kzstdgpu_FrameStatus_RequestTooLarge
+                                                         : kzstdgpu_FrameStatus_Success;
+            EXPECT_EQ(frameStatus[i], expected) << "frame index " << i;
+
+            if (expected == kzstdgpu_FrameStatus_Success)
+            {
+                ASSERT_EQ(decompressedFrames[i].size(), 1u);
+                EXPECT_EQ(decompressedFrames[i][0], static_cast<uint8_t>(0x41 + i)) << "frame index " << i;
+            }
+        }
+    }
+}
