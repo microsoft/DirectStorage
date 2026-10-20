@@ -625,6 +625,16 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 const uint32_t uncompSize = (uint32_t)WaveActiveSum(frameInfo.uncompSize);
                 const uint32_t frameCount = WaveActiveCountBits(true);
 
+                // Request-size limit check (see kzstdgpu_MaxRequestUncompressedByteSize). Only accepted
+                // frames produce output. Sizes are clamped per lane and per wave to (limit + 1), so the
+                // 64-bit wave sum cannot wrap and each atomic add is at most 2^30. The add that first takes
+                // the running total past the limit therefore sees an exact (unwrapped) previous total.
+                const uint64_t sizeLimitPlusOne = (uint64_t)kzstdgpu_MaxRequestUncompressedByteSize + 1u;
+                const uint64_t acceptedSize = (kzstdgpu_FrameStatus_Success == frameStatus) ? frameInfo.uncompSize : 0u;
+                const uint64_t laneClampedSize = acceptedSize < sizeLimitPlusOne ? acceptedSize : sizeLimitPlusOne;
+                const uint64_t waveClampedSize = WaveActiveSum(laneClampedSize);
+                const uint32_t acceptedByteCount = (uint32_t)(waveClampedSize < sizeLimitPlusOne ? waveClampedSize : sizeLimitPlusOne);
+
                 if (WaveIsFirstLane())
                 {
                     InterlockedAdd(srt.inoutCounters[0].Blocks_RAW, rawBlockCount);
@@ -634,12 +644,27 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                     InterlockedAdd(srt.inoutCounters[0].BlocksBytes_RLE, rleBlockByteCount);
                     InterlockedAdd(srt.inoutCounters[0].Frames, frameCount);
                     InterlockedAdd(srt.inoutCounters[0].Frames_UncompressedByteSize, uncompSize);
+
+                    uint32_t prevAcceptedByteCount = 0;
+                    InterlockedAdd(srt.inoutCounters[0].Frames_AcceptedUncompressedByteSize, acceptedByteCount, prevAcceptedByteCount);
+                    if ((uint64_t)prevAcceptedByteCount + acceptedByteCount > (uint64_t)kzstdgpu_MaxRequestUncompressedByteSize)
+                    {
+                        InterlockedOr(srt.inoutCounters[0].Frames_RequestTooLarge, 1u);
+                    }
                 }
             }
             else
             {
                 // Real (block-output) pass: record this frame's accept/reject status.
-                srt.inoutFrameStatus[threadId] = frameStatus;
+                // The count pass already fixed this frame's block layout, so an over-limit
+                // request still collects (and decodes) its blocks; only the status reports
+                // that the output is undefined.
+                uint32_t status = frameStatus;
+                if (kzstdgpu_FrameStatus_Success == status && 0 != srt.inoutCounters[0].Frames_RequestTooLarge)
+                {
+                    status = kzstdgpu_FrameStatus_RequestTooLarge;
+                }
+                srt.inoutFrameStatus[threadId] = status;
             }
         }
         else
@@ -696,6 +721,8 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
             srt.inoutCounters[0].BlocksBytes_RLE                             = 0;
             srt.inoutCounters[0].Frames                                      = 0;
             srt.inoutCounters[0].Frames_UncompressedByteSize                 = 0;
+            srt.inoutCounters[0].Frames_AcceptedUncompressedByteSize         = 0;
+            srt.inoutCounters[0].Frames_RequestTooLarge                      = 0;
         }
         return;
     }

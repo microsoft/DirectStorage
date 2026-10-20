@@ -319,6 +319,11 @@ typedef struct zstdgpu_Counters
     uint32_t BlocksBytes_RLE;
     uint32_t Frames;
     uint32_t Frames_UncompressedByteSize;
+    // Running sum of clamped accepted-frame sizes; only meaningful until it passes
+    // kzstdgpu_MaxRequestUncompressedByteSize (it may wrap afterwards).
+    uint32_t Frames_AcceptedUncompressedByteSize;
+    // Sticky flag (non-zero): the accepted frames exceed kzstdgpu_MaxRequestUncompressedByteSize.
+    uint32_t Frames_RequestTooLarge;
 } zstdgpu_Counters;
 
 static const uint32_t kzstdgpu_DispatchSlot_FseHufW                      = 0;

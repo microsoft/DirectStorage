@@ -53,3 +53,12 @@ static const uint32_t kzstdgpu_FrameStatus_ReservedBitSet        = 0xA07A0002u; 
 static const uint32_t kzstdgpu_FrameStatus_DictionaryUnsupported = 0xA07A0003u; // frame requires a dictionary (unsupported by the GPU decoder)
 static const uint32_t kzstdgpu_FrameStatus_WindowTooLarge        = 0xA07A0004u; // window size exceeds the decoder maximum
 static const uint32_t kzstdgpu_FrameStatus_MissingContentSize    = 0xA07A0005u; // frame declares no content size (the GPU decoder needs it to size output)
+static const uint32_t kzstdgpu_FrameStatus_RequestTooLarge       = 0xA07A0006u; // request output exceeds kzstdgpu_MaxRequestUncompressedByteSize (see below)
+
+// Largest total decompressed size of one request: the sum of Frame_Content_Size over
+// all accepted frames. Block output offsets are prefix-summed with 30-bit lookback
+// values, so larger requests cannot be decoded correctly. When a request exceeds this
+// limit, every frame that would otherwise be accepted reports
+// kzstdgpu_FrameStatus_RequestTooLarge and its output is undefined; split such
+// requests into smaller batches.
+static const uint32_t kzstdgpu_MaxRequestUncompressedByteSize    = 0x3FFFFFFFu;

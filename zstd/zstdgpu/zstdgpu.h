@@ -197,6 +197,9 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupInputsAsFramesInGpuMemory(uint32_t *outS
  *  @param[in]  frameCount              The total number `zstdgpu_OffsetAndSize` structures placed `frames` buffers.
  *  @param[in]  frameStatus             A pointer to an ID3D12Resource (DEFAULT heap, UAV-capable) sized to hold one UINT32 per input frame which receives an HRESULT of the decompression status.
  *                                      NOTE: See zstdgpu_shared_structs.h for the status code definitions.
+ *                                      NOTE: The accepted frames of one request must decompress to at most
+ *                                            `kzstdgpu_MaxRequestUncompressedByteSize` bytes in total; otherwise
+ *                                            they report `kzstdgpu_FrameStatus_RequestTooLarge`.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *framesMemory, uint32_t framesMemorySizeInBytes, struct ID3D12Resource *frames, uint32_t frameCount, struct ID3D12Resource *frameStatus);
 
