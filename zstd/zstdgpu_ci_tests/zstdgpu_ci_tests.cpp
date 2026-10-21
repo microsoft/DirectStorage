@@ -1,0 +1,938 @@
+/**
+ * Copyright (c) Microsoft. All rights reserved.
+ * This code is licensed under the MIT License (MIT).
+ * THIS CODE IS PROVIDED *AS IS* WITHOUT WARRANTY OF
+ * ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING ANY
+ * IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
+ * PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
+ */
+
+// Test definitions and demo runner for the Zstd GPU CI tests.
+//
+// Two parameterized suites are instantiated from the .zst corpus discovered
+// under the content path:
+//
+//   ZstdGpuCorrectnessTests — These scenarios are executed over the corpus in batches (where appropriate) 
+//     - ExternalMemory     : --chk-gpu --ext-mem
+//     - ExternalMemorySeq  : --chk-gpu --ext-mem --seq-cnt
+//     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --seq-cnt  (skipped on ARM)
+//
+//   ZstdGpuDemoTests — per-file scenarios (one .zst file per parameter):
+//
+//   Correctness — GBV (ASSERT; skipped on ARM; run only on files whose largest
+//   decompressed frame is under --gbv-max-mb, optionally further reduced by an
+//   even stride via --gbv-sample-count):
+//     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
+//     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
+//
+//   ZstdGpuPerfTests — report-only perf (batches at a time)
+//     - Latency    : small fixed-size (12-frame) batches; the demo's total [PERF]
+//                    line reports the P50 latency across the corpus windows.
+//     - Throughput : a harness-owned, fixed ladder of window sizes
+//                    (64,128,192,256,384,512,768,1024). The harness invokes the
+//                    demo once per rung over the whole corpus; each rung's total
+//                    [PERF] line reports the median bandwidth across the corpus
+//                    windows at that batch size (a bandwidth-vs-window curve).
+//
+//   The demo computes and prints per-batch and pooled-total latency + bandwidth on
+//   [PERF] stdout lines; the harness only orchestrates and echoes those lines (no
+//   CSV parsing / no aggregation). An external log-analysis script consumes the
+//   [PERF] lines run-over-run.
+
+#include "zstdgpu_ci_tests.h"
+#include "zstd_frame_size.h"
+#include <gtest/gtest.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <thread>
+#include <unordered_set>
+#include <utility>
+#include <Windows.h>
+
+// Internal types + forward declarations
+//
+// These are used only inside this translation unit; keeping them out of the
+// header limits the wrapper's public surface to the two things main.cpp
+// actually needs (TestConfig, DiscoverZstFiles).
+
+namespace
+{
+    // Captures the outcome of a single demo process invocation.
+    struct DemoResult
+    {
+        int exitCode = -1;        // Process exit code (0 = success)
+        std::string stdOut;       // Captured stdout + stderr
+        std::string launchError;  // Error message if the process failed to launch
+        std::string commandLine;  // The exact command line that was executed
+        bool timedOut = false;    // True if the process was killed due to timeout
+    };
+
+    DemoResult RunDemo(
+        const std::string& demoPath,
+        const std::vector<std::string>& args,
+        int timeoutSeconds);
+
+    std::vector<std::string> BuildCorrectnessArgs(
+        const std::string& zstFile,
+        const std::vector<std::string>& scenarioFlags);
+}
+
+// Defined below; used by RunBatchedCorrectnessTest to keep fuzz content out of
+// concatenated batches (corrupt-by-design fuzz inputs would poison a batch).
+static bool IsFuzzContent(const std::string& zstFile);
+
+// Helpers
+
+// Returns the list of .zst files to parameterize over.
+// GTest evaluates this lazily when the test suite is instantiated (after main
+// has parsed CLI args, validated inputs, and cached the discovered file list
+// in TestConfig). We just return the cached list here — the actual filesystem
+// walk happened once, up front, in main().
+static std::vector<std::string> GetTestFiles()
+{
+    return g_testConfig.discoveredFiles;
+}
+
+// Converts a full file path to a valid GTest parameter name.
+// GTest names must be alphanumeric + underscore, no leading digits, AND UNIQUE
+// across the full INSTANTIATE_TEST_SUITE_P set. Using just the filename stem
+// collides when the same leaf name appears across different subdirectories
+// (e.g. firefly_albedo.DDS.zst exists under BC1/, BC1mip0/, block4K_*, etc.),
+// causing a fatal gtest assertion at startup. Use the path relative to
+// --content-path so different folders produce different names.
+static std::string SanitizeRelName(const std::string& fullPath)
+{
+    std::filesystem::path full(fullPath);
+    std::filesystem::path rel;
+    if (!g_testConfig.contentPath.empty())
+    {
+        std::error_code ec;
+        rel = std::filesystem::relative(full, g_testConfig.contentPath, ec);
+        if (ec || rel.empty() || rel.string().rfind("..", 0) == 0)
+        {
+            rel = full.filename();  // fallback: out-of-tree, just use leaf
+        }
+    }
+    else
+    {
+        rel = full.filename();
+    }
+
+    // Drop the trailing .zst extension for readability; everything else stays.
+    std::string name = rel.string();
+    const std::string ext = ".zst";
+    if (name.size() >= ext.size() &&
+        name.compare(name.size() - ext.size(), ext.size(), ext) == 0)
+    {
+        name.resize(name.size() - ext.size());
+    }
+
+    std::string result;
+    result.reserve(name.size());
+    for (char c : name)
+    {
+        result += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    }
+    if (!result.empty() && std::isdigit(static_cast<unsigned char>(result[0])))
+    {
+        result = "_" + result;
+    }
+    return result.empty() ? "Unknown" : result;
+}
+
+// GTest name functor for the per-file suite (ZstdGpuDemoTests): the GBV and
+// perf scenarios run one .zst file per parameter.
+static std::string SanitizeTestName(const testing::TestParamInfo<std::string>& info)
+{
+    return SanitizeRelName(info.param);
+}
+
+// GTest name functor for the batched-correctness suite. The suite takes a single
+// parameter — the full discovered corpus — so there is exactly one instance per
+// scenario; name it "Corpus". The batching itself is done at run time inside
+// RunBatchedCorrectnessTest (which walks the corpus), not here.
+static std::string CorrectnessCorpusName(const testing::TestParamInfo<std::vector<std::string>>& info)
+{
+    (void)info;
+    return "Corpus";
+}
+
+// Appends per-test output to the consolidated log file (--log-file).
+static void WriteToLogFile(const std::string& zstFile, const DemoResult& result)
+{
+    if (g_testConfig.logFile.empty())
+        return;
+
+    std::ofstream log(g_testConfig.logFile, std::ios::app);
+    if (!log)
+    {
+        std::cerr << "Warning: could not open --log-file '"
+                  << g_testConfig.logFile << "' for append.\n";
+        return;
+    }
+    auto* testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
+    log << "=== " << testInfo->test_suite_name() << "." << testInfo->name() << " ===\n";
+    log << "File: " << zstFile << "\n";
+    log << "Exit code: " << result.exitCode << "\n";
+    log << result.stdOut << "\n";
+}
+
+// Test runners
+
+// Returns true if the .zst file lives under a directory named "fuzz". Fuzzing
+// content is a mix of clean and corrupt inputs that exercise varying code
+// paths, so its timing isn't meaningful performance data — perf tests skip it.
+// This is a pure path check, independent of the manifest.
+static bool IsFuzzContent(const std::string& zstFile)
+{
+    for (const auto& part : std::filesystem::path(zstFile))
+    {
+        if (part == "fuzz")
+            return true;
+    }
+    return false;
+}
+
+// Returns the set of files the Gbv/GbvSeq scenarios run on. Files are first
+// filtered to those whose largest single frame's decompressed (content) size is below --gbv-max-mb, then
+// (when g_testConfig.gbvSampleCount > 0) reduced to an even, endpoint-inclusive
+// stride of that many files across the sorted list. A count <= 0, or a corpus
+// no larger than the count, selects every file under the size cap; a count of 1
+// selects the first file. Computed once.
+static const std::unordered_set<std::string>& GbvSampledFiles()
+{
+    static const std::unordered_set<std::string> selected = []
+    {
+        std::unordered_set<std::string> s;
+        std::vector<std::string> smallFiles;
+        {
+            const auto& files = g_testConfig.discoveredFiles; // sorted full paths
+            std::copy_if(
+                files.begin(),
+                files.end(),
+                std::back_inserter(smallFiles),
+                [](const std::string& filename)
+                {
+                    // Gate GBV by the single largest frame's *decompressed* size.
+                    // GBV massively slows GPU execution and the TDR risk tracks
+                    // the work of the largest per-frame dispatch (how much one
+                    // frame decodes and writes), not the whole-file total. The
+                    // size is read from frame headers alone (no decompression).
+                    // Files whose decompressed size can't be determined are
+                    // excluded (fail-safe).
+                    std::string err;
+                    const uint64_t largestFrame =
+                        zstdframe::GetLargestFrameDecompressedSizeFromFile(filename, &err);
+                    if (largestFrame == 0)
+                        return false;
+                    const uint64_t limitBytes =
+                        static_cast<uint64_t>(g_testConfig.gbvMaxMB) * 1024ULL * 1024ULL;
+                    return largestFrame < limitBytes;
+                });
+        }
+        const size_t n = smallFiles.size();
+        if (n == 0)
+            return s;
+        const int target = g_testConfig.gbvSampleCount;
+        if (target <= 0 || n <= static_cast<size_t>(target))
+        {
+            // count <= 0, or corpus no larger than the count: select every file.
+            s.insert(smallFiles.begin(), smallFiles.end());
+            return s;
+        }
+        if (target == 1)
+        {
+            s.insert(smallFiles.front());
+            return s;
+        }
+        const size_t t = static_cast<size_t>(target);
+        // Endpoint-inclusive stride: indices 0 .. n-1 taken in t steps so the
+        // sample spans the whole sorted list (first through last).
+        for (size_t i = 0; i < t; ++i)
+        {
+            const size_t idx = (i * (n - 1)) / (t - 1);
+            s.insert(smallFiles[idx]);
+        }
+        return s;
+    }();
+    return selected;
+}
+
+// True if this file is one of the stride-selected files the GBV scenarios run on.
+static bool IsSelectedForGbv(const std::string& zstFile)
+{
+    const auto& sel = GbvSampledFiles();
+    return sel.find(zstFile) != sel.end();
+}
+
+// Returns a GTEST_SKIP message when --max-frame-mb is set (> 0) and the file's
+// largest on-disk zstd frame exceeds it; empty otherwise. A disabled limit
+// (<= 0) or an unreadable frame size does not skip.
+static std::string FrameSizeSkipReason(const std::string& zstFile)
+{
+    if (g_testConfig.maxFrameMB <= 0)
+        return {};
+
+    std::string err;
+    uint64_t largest = zstdframe::GetLargestFrameCompressedSizeFromFile(zstFile, &err);
+    if (largest == 0)
+        return {};
+
+    const uint64_t limitBytes = static_cast<uint64_t>(g_testConfig.maxFrameMB) * 1024ULL * 1024ULL;
+    if (largest <= limitBytes)
+        return {};
+
+    std::ostringstream msg;
+    msg << "Skipped: largest on-disk zstd frame (" << largest
+        << " bytes) exceeds --max-frame-mb (" << g_testConfig.maxFrameMB
+        << " MB = " << limitBytes << " bytes).\nFile: " << zstFile;
+    return msg.str();
+}
+
+// If the adversarial manifest lists this file, verify that the demo rejected it
+// with the expected exit code. Returns true iff the outcome is a correct
+// rejection, or false if the file isn't in the manifest (in which case the
+// caller applies the legacy "expect 0" check). Sets handledByManifest when a
+// manifest entry matched, and adds a gtest failure on mismatch.
+static bool CheckAdversarialOrLegacy(const std::string& zstFile, const DemoResult& result, bool& handledByManifest)
+{
+    handledByManifest = false;
+    const AdversarialEntry* entry = g_testConfig.adversarialManifest.Match(zstFile, g_testConfig.contentPath);
+    if (!entry)
+        return false;
+
+    handledByManifest = true;
+
+    if (result.exitCode != entry->expectedExitCode)
+    {
+        ADD_FAILURE()
+            << "Adversarial file expected to be rejected with exit code "
+            << entry->expectedExitCode << " but demo returned " << result.exitCode << ".\n"
+            << "File: " << zstFile << "\n"
+            << "Reason: " << entry->reason << "\n"
+            << "Command: " << result.commandLine
+            << "  (stdout already printed above as [DEMO OUT])";
+        return false;
+    }
+
+    return true;
+}
+
+// Returns the current GTest scenario (test method) name. For parameterized
+// tests current_test_info()->name() is "<Scenario>/<param>", so we take the
+// portion before the first '/'. Returns empty outside a test.
+static std::string CurrentScenarioName()
+{
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    if (!info || !info->name())
+        return {};
+    std::string name = info->name();
+    const size_t slash = name.find('/');
+    return slash == std::string::npos ? name : name.substr(0, slash);
+}
+
+// If the manifest marks the current scenario as skipped for this machine's
+// --gpu-name, returns the message to pass to GTEST_SKIP; otherwise returns
+// empty. GTEST_SKIP must stay in the caller (the Run*Test helpers) so control
+// returns from the test after the skip is recorded.
+static std::string ScenarioSkipReason(const std::string& zstFile)
+{
+    const ScenarioSkip* s = g_testConfig.adversarialManifest.MatchScenarioSkip(
+        CurrentScenarioName(), g_testConfig.gpuName, zstFile, g_testConfig.contentPath);
+    if (!s)
+        return {};
+    std::string msg = "Scenario '" + CurrentScenarioName() + "' skipped on GPU '" +
+                      g_testConfig.gpuName + "': " + s->reason;
+    if (!s->trackingBug.empty())
+        msg += " (tracking: " + s->trackingBug + ")";
+    return msg;
+}
+
+// Run a correctness scenario. Spawns zstdgpu_demo.exe with the given .zst file and scenario flags, then asserts exit code == 0.
+// main() has already validated the demo path exists, so we don't re-check here.
+// stdout is printed via the unconditional [DEMO OUT] block below and does NOT
+// appear a second time in the ASSERT_EQ failure message — that would duplicate
+// the same text in the log.
+static void RunCorrectnessTest(const std::string& zstFile, const std::vector<std::string>& scenarioFlags)
+{
+    // If the manifest marks this scenario as skipped for this GPU, skip before
+    // spawning the demo.
+    if (std::string skip = ScenarioSkipReason(zstFile); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
+
+    auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
+    if (std::string skip = FrameSizeSkipReason(zstFile); !skip.empty())
+    {
+        GTEST_SKIP() << skip;
+        return;
+    }
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+
+    // Write to log file before assertions so logs are captured even if an ASSERT aborts early.
+    WriteToLogFile(zstFile, result);
+
+    // Log the output regardless of pass/fail. This IS the demo stdout capture —
+    // the assertion messages below intentionally do NOT reprint result.stdOut.
+    std::cout << "[DEMO CMD] " << result.commandLine << "\n";
+    if (!result.stdOut.empty())
+    {
+        std::cout << "[DEMO OUT] " << result.stdOut << "\n";
+    }
+
+    ASSERT_FALSE(result.timedOut)
+        << "Demo process timed out after " << g_testConfig.timeoutSeconds << " seconds.\n"
+        << "Command: " << result.commandLine;
+
+    ASSERT_TRUE(result.launchError.empty())
+        << "Failed to launch demo: " << result.launchError << "\n"
+        << "Command: " << result.commandLine;
+
+    bool handledByManifest = false;
+    if (CheckAdversarialOrLegacy(zstFile, result, handledByManifest))
+    {
+        // Adversarial file rejected as expected — success. Nothing more to check.
+        return;
+    }
+    if (handledByManifest)
+    {
+        // Manifest entry matched but the outcome didn't match. CheckAdversarialOrLegacy
+        // already added the failure diagnostic. Stop here rather than fall through
+        // to the legacy check (which would produce a redundant "exit != 0" failure).
+        return;
+    }
+
+    // Legacy path: file not in manifest, expect success.
+    ASSERT_EQ(result.exitCode, 0)
+        << "Demo process returned non-zero exit code: " << result.exitCode << "\n"
+        << "Command: " << result.commandLine
+        << "  (stdout already printed above as [DEMO OUT])";
+}
+
+// Writes out a list of .zst files into a temp file for use as a batched .zst input to zstdgpu_demo.exe
+static bool WriteBatchListFile(const std::string& batchName,
+                               const std::vector<std::string>& files,
+                               std::string& outPath)
+{
+    std::error_code ec;
+    std::filesystem::path dir = g_testConfig.logDir.empty()
+        ? (std::filesystem::temp_directory_path() / "zstdgpu_batch_lists")
+        : (std::filesystem::path(g_testConfig.logDir) / "batch_lists");
+    std::filesystem::create_directories(dir, ec);
+
+    std::filesystem::path path = dir / (CurrentScenarioName() + "_" + batchName + ".txt");
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+
+    if (!out) return false;
+
+    for (const auto& f : files)
+    {
+        out << f << "\n";
+    }
+
+    out.flush();
+
+    if (!out) return false;
+
+    outPath = path.string();
+    return true;
+}
+
+// Runs each file individually with the scenario flags using non-fatal checks
+// (ADD_FAILURE) so every file is exercised and each culprit reported. Returns
+// the count that failed. Used to isolate failures after a batch run fails.
+static size_t RunCorrectnessFilesIndividually(const std::vector<std::string>& files,
+                                              const std::vector<std::string>& scenarioFlags)
+{
+    size_t failures = 0;
+    for (const auto& zstFile : files)
+    {
+        auto args = BuildCorrectnessArgs(zstFile, scenarioFlags);
+        auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+        WriteToLogFile(zstFile, result);
+
+        std::cout << "[ISO CMD] " << result.commandLine << "\n";
+
+        if (!result.stdOut.empty())
+        {
+            std::cout << "[DEMO OUT] " << result.stdOut << "\n";
+        }
+
+        const bool ok = !result.timedOut && result.launchError.empty() && result.exitCode == 0;
+        if (!ok)
+        {
+            ++failures;
+            ADD_FAILURE()
+                << "Isolated file failed: " << zstFile << "\n"
+                << "  exit=" << result.exitCode
+                << (result.timedOut ? " (TIMED OUT)" : "")
+                << (result.launchError.empty() ? std::string() : ("  launchError=" + result.launchError)) << "\n"
+                << "  Command: " << result.commandLine
+                << "  (stdout already printed above as [DEMO OUT])";
+        }
+    }
+    return failures;
+}
+
+// Runs zstdgpu_demo.exe over a .zst batch
+static void RunDemoOnBatch(const std::string& batchName,
+                           const std::vector<std::string>& files,
+                           const std::vector<std::string>& scenarioFlags)
+{
+    if (files.empty()) return;
+
+
+    // Stage the list file and run the whole batch in a single demo invocation.
+    std::string listPath;
+    if (!WriteBatchListFile(batchName, files, listPath))
+    {
+        // Could not stage the list — fall back to individual runs so coverage
+        // isn't lost, and flag the staging failure.
+        ADD_FAILURE() << "Could not write batch list file for " << batchName
+                      << "; running the " << files.size() << " file(s) individually instead.";
+        RunCorrectnessFilesIndividually(files, scenarioFlags);
+        return;
+    }
+
+    auto args = BuildCorrectnessArgs("@" + listPath, scenarioFlags);
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+    WriteToLogFile("[batch " + batchName + "] " + listPath, result);
+
+    std::cout << "[BATCH CMD] " << result.commandLine << "\n";
+    std::cout << "[BATCH] scenario " << CurrentScenarioName() << ", " << files.size() << " file(s), list: " << listPath << "\n";
+
+    if (!result.stdOut.empty())
+    {
+        std::cout << "[DEMO OUT] " << result.stdOut << "\n";
+    }
+
+    if (!result.timedOut && result.launchError.empty() && result.exitCode == 0)
+    {
+        // Whole batch decoded and validated against the reference — all files OK.
+        return;
+    }
+
+    // Batch failed: re-run every file individually to pinpoint the culprit(s).
+    std::cout << "[BATCH] FAILED (exit " << result.exitCode
+              << (result.timedOut ? ", TIMED OUT" : "")
+              << (result.launchError.empty() ? "" : ", launch error")
+              << "); re-running " << files.size() << " file(s) individually to isolate...\n";
+
+    const size_t failed = RunCorrectnessFilesIndividually(files, scenarioFlags);
+
+    if (failed == 0)
+    {
+        ADD_FAILURE()
+            << "Batch '" << batchName << "' failed for scenario " << CurrentScenarioName()
+            << " (exit " << result.exitCode << (result.timedOut ? ", TIMED OUT" : "")
+            << ") but all " << files.size() << " file(s) passed individually. This points at a "
+            << "batch-level issue (concatenated size / GPU memory / list loading), not a per-file "
+            << "decode error. Consider lowering --correctness-batch-mb.\n"
+            << "Batch command: " << result.commandLine;
+    }
+    else
+    {
+        ADD_FAILURE()
+            << failed << " of " << files.size() << " file(s) in batch '" << batchName
+            << "' failed individual re-run for scenario " << CurrentScenarioName()
+            << " (batch exit " << result.exitCode << "). See the per-file failures above.\n"
+            << "Batch command: " << result.commandLine;
+    }
+}
+
+// Run a correctness test over a batch of files. Spawns zstdgpu_demo.exe with the batch of .zst files and scenario flags 
+// NOTE: Batching is opportunistic.  Some files are known to need to run standalone (currently).
+static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
+                                      const std::vector<std::string>& scenarioFlags)
+{
+    // Determine batch bounds (reasonable limits to ensure we don't blow out VRAM with current scratch memory implementation)
+    const uint64_t budgetBytes = g_testConfig.correctnessBatchMB > 0 ? static_cast<uint64_t>(g_testConfig.correctnessBatchMB) * 1024u * 1024u : UINT64_MAX;
+    const size_t countCap = g_testConfig.correctnessBatchCount > 0 ? static_cast<size_t>(g_testConfig.correctnessBatchCount) : SIZE_MAX;
+
+    std::vector<std::string> batch;
+    uint64_t batchBytes = 0;
+    size_t batchIdx = 0;
+
+    auto runBatch = [&]()
+    {
+        if (batch.empty()) return;
+
+        std::string batchName = "Batch_" + std::to_string(batchIdx);
+        
+        RunDemoOnBatch(batchName, batch, scenarioFlags);
+        ++batchIdx;
+        batch.clear();
+        batchBytes = 0;
+    };
+
+    for (const auto& f : allFiles)
+    {
+        // Mirror per-file behavior: drop files this scenario would skip (manifest
+        // scenario-skip for this GPU, or --max-frame-mb) instead of batching them.
+        if (!ScenarioSkipReason(f).empty() || !FrameSizeSkipReason(f).empty())
+        {
+            std::cout << "[BATCH] skipping (scenario/size) " << f << "\n";
+            continue;
+        }
+
+        // Fuzz + adversarial content is run individually at present due to unavailability of per-file status in zstdgpu_demo.exe
+        const bool individual = IsFuzzContent(f) || g_testConfig.adversarialManifest.Match(f, g_testConfig.contentPath);
+        if (individual)
+        {
+            runBatch();
+            RunCorrectnessTest(f, scenarioFlags);
+            continue;
+        }
+
+        // If we got here, the file is a well formed compressed file and can be bundled with other files (within batch limits)
+        std::error_code ec;
+        uint64_t sz = std::filesystem::file_size(f, ec);
+        if (ec) sz = 0;  // unreadable size: don't let it distort the budget math
+
+        // Process the batch if it is at the batch limits and move on to the next one
+        if (!batch.empty() && (batch.size() >= countCap || batchBytes + sz > budgetBytes))
+        {
+            runBatch();
+        }
+
+        batch.push_back(f);
+        batchBytes += sz;
+    }
+
+    // Finish running the final batch
+    runBatch();
+}
+
+// Batched perf test
+// Run the entire configured corpus of latency or throughput files
+// Latency is fixed batch sizes, throughput is a ladder of batch sizes.
+// Each run emits a perf line that is read and processed by analysis scripts
+static void RunPerfTest(int frameBatchCount, const char* scenario)
+{
+    const std::vector<std::string> files = g_testConfig.perfManifest.SelectFiles(
+        scenario, g_testConfig.discoveredFiles, g_testConfig.contentPath);
+    ASSERT_FALSE(files.empty())
+        << "Perf manifest selected no files for the '" << scenario << "' scenario. "
+        << "Ensure a perf manifest is loaded (--perf-manifest or "
+        << "<content-path>/perf_manifest.json) and its '" << scenario
+        << "' globs match content under '" << g_testConfig.contentPath << "'.";
+
+    std::string listPath;
+    ASSERT_TRUE(WriteBatchListFile(std::string("perf_") + scenario, files, listPath))
+        << "Failed to write perf batch list file.";
+
+    std::cout << "[PERF-CFG] scenario=" << scenario
+              << " files=" << files.size()
+              << " frame-batch-count=" << frameBatchCount
+              << " run-cnt=" << g_testConfig.perfRunCount << "\n";
+
+    const std::vector<std::string> args = {
+        "--zst", "@" + listPath,
+        "--frame-batch-count", std::to_string(frameBatchCount),
+        "--run-cnt", std::to_string(g_testConfig.perfRunCount),
+        "--prf-lvl", "0",
+        "--seq-cnt",
+    };
+
+    auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
+    WriteToLogFile(std::string("[perf ") + scenario + "]", result);
+
+    std::cout << "[PERF-CFG] " << result.commandLine << "\n";
+    if (!result.stdOut.empty())
+        std::cout << result.stdOut << "\n";
+
+    EXPECT_FALSE(result.timedOut)
+        << "Demo timed out after " << g_testConfig.timeoutSeconds << "s.\nCommand: " << result.commandLine;
+    EXPECT_TRUE(result.launchError.empty())
+        << "Failed to launch demo: " << result.launchError << "\nCommand: " << result.commandLine;
+    EXPECT_EQ(result.exitCode, 0)
+        << "Demo returned non-zero exit code: " << result.exitCode << "\nCommand: " << result.commandLine;
+
+    if (result.stdOut.find("[PERF]") == std::string::npos)
+        ADD_FAILURE() << "Demo did not emit a [PERF] metrics line on stdout.\nCommand: " << result.commandLine;
+}
+// Test fixture and test cases
+
+// Per-file fixture (spec: ZstdGpuDemoTests).
+// Whole corpus is parameterized over individual .zst files
+class ZstdGpuDemoTests : public ::testing::TestWithParam<std::string>
+{
+};
+
+// Batched fixture (spec: ZstdGpuCorrectnessTests).
+// Whole corpus is passed as a vector for batched execution
+class ZstdGpuCorrectnessTests : public ::testing::TestWithParam<std::vector<std::string>>
+{
+};
+
+// Perf fixture (spec: ZstdGpuPerfTests).
+// Each perf scenario tiles a fixed-size frame batch across the perf-manifest's
+// selected corpus, so the cases are plain (non-parameterized) tests.
+class ZstdGpuPerfTests : public ::testing::Test
+{
+};
+
+// --- Correctness tests — "for all data" matrix (batched) ---
+
+TEST_P(ZstdGpuCorrectnessTests, ExternalMemory)
+{
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem"});
+}
+
+TEST_P(ZstdGpuCorrectnessTests, ExternalMemorySeq)
+{
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
+}
+
+TEST_P(ZstdGpuCorrectnessTests, D3D12DebugLayerSeq)
+{
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
+#else
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
+#endif
+}
+
+// --- Correctness tests — GBV ---
+
+TEST_P(ZstdGpuDemoTests, Gbv)
+{
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "GBV tests are skipped on ARM platforms.";
+#else
+    if (!IsSelectedForGbv(GetParam()))
+    {
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
+                     << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
+                     << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
+        return;
+    }
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv"});
+#endif
+}
+
+TEST_P(ZstdGpuDemoTests, GbvSeq)
+{
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    GTEST_SKIP() << "GBV tests are skipped on ARM platforms.";
+#else
+    if (!IsSelectedForGbv(GetParam()))
+    {
+        GTEST_SKIP() << "GBV skipped: file is not in the GBV sample (largest decompressed frame >= "
+                     << "--gbv-max-mb=" << g_testConfig.gbvMaxMB << "MB, or outside the "
+                     << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
+        return;
+    }
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv", "--seq-cnt"});
+#endif
+}
+
+// --- Batched perf tests (report-only) ---
+
+// Latency: tiles the perf-manifest's latency corpus into small fixed-size
+// (12-frame) batches, one batch per GPU dispatch, over a fixed number of sweeps. The
+// demo's total [PERF] line reports the P50 latency across all the corpus windows.
+TEST_F(ZstdGpuPerfTests, Latency)
+{
+    RunPerfTest(g_testConfig.perfLatencyFrameCount, "latency");
+}
+
+// Throughput: sweeps a harness-owned ladder of window sizes. The harness owns
+// the ladder and invokes the demo once per rung (batch size), each tiling the
+// whole perf-manifest throughput corpus over a fixed number of sweeps. Each rung's
+// total [PERF] line reports the median bandwidth across the corpus windows at that
+// batch size, yielding a bandwidth-vs-window curve that downstream tooling reads per rung.
+TEST_F(ZstdGpuPerfTests, Throughput)
+{
+    const std::vector<int>& ladder = g_testConfig.perfThroughputFrameCounts;
+    ASSERT_FALSE(ladder.empty())
+        << "Throughput ladder is empty (perfThroughputFrameCounts is a fixed CI constant).";
+
+    std::cout << "[THROUGHPUT] rungs=" << ladder.size() << " frame-batch-counts=";
+    for (size_t i = 0; i < ladder.size(); ++i)
+        std::cout << (i ? "," : "") << ladder[i];
+    std::cout << " run-cnt=" << g_testConfig.perfRunCount << "\n";
+
+    for (int rung : ladder)
+        RunPerfTest(rung, "throughput");
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ContentTests,
+    ZstdGpuDemoTests,
+    ::testing::ValuesIn(GetTestFiles()),
+    SanitizeTestName);
+
+INSTANTIATE_TEST_SUITE_P(
+    ContentTests,
+    ZstdGpuCorrectnessTests,
+    ::testing::Values(GetTestFiles()),
+    CorrectnessCorpusName);
+
+// Demo runner implementation
+//
+// Spawns zstdgpu_demo.exe as a child process via CreateProcess with anonymous
+// pipes. A background thread drains stdout to avoid pipe-buffer deadlocks. If
+// the child exceeds the configured timeout, it is terminated and CancelIoEx
+// releases the reader thread so the wrapper does not itself hang.
+//
+// All GPU / D3D12 dependencies live in the demo process; the test binary
+// itself has no GPU dependency.
+
+namespace
+{
+
+// Builds a command line string with proper quoting for arguments containing spaces.
+static std::string BuildCommandLine(const std::string& exe, const std::vector<std::string>& args)
+{
+    std::ostringstream cmd;
+    cmd << "\"" << exe << "\"";
+    for (const auto& arg : args)
+    {
+        cmd << " ";
+        if (arg.find(' ') != std::string::npos)
+            cmd << "\"" << arg << "\"";
+        else
+            cmd << arg;
+    }
+    return cmd.str();
+}
+
+DemoResult RunDemo(
+    const std::string& demoPath,
+    const std::vector<std::string>& args,
+    int timeoutSeconds)
+{
+    DemoResult result;
+    result.commandLine = BuildCommandLine(demoPath, args);
+
+    // Create an anonymous pipe for capturing the child process's stdout/stderr.
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hReadPipe = nullptr;
+    HANDLE hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
+    {
+        result.launchError = "Failed to create pipe for demo process.";
+        return result;
+    }
+
+    // Prevent the read end from being inherited by the child process.
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    // Redirect child's stdout and stderr to the write end of the pipe.
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+
+    PROCESS_INFORMATION pi{};
+
+    std::vector<char> cmdBuf(result.commandLine.begin(), result.commandLine.end());
+    cmdBuf.push_back('\0');
+
+    if (!CreateProcessA(
+            nullptr,
+            cmdBuf.data(),
+            nullptr,
+            nullptr,
+            TRUE, // inherit handles
+            0,
+            nullptr,
+            nullptr,
+            &si,
+            &pi))
+    {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        result.launchError = "Failed to launch demo process. Error: " + std::to_string(GetLastError());
+        return result;
+    }
+
+    // Close the write end in the parent so ReadFile on the read end returns
+    // EOF when the child exits.
+    CloseHandle(hWritePipe);
+
+    // Read the child's output on a background thread to prevent pipe buffer
+    // deadlocks (the pipe has a finite buffer; if it fills, the child blocks).
+    std::string capturedOutput;
+    std::thread readerThread([&capturedOutput, hReadPipe]() {
+        std::array<char, 4096> buf;
+        DWORD bytesRead = 0;
+        while (ReadFile(hReadPipe, buf.data(), static_cast<DWORD>(buf.size()), &bytesRead, nullptr) && bytesRead > 0)
+        {
+            capturedOutput.append(buf.data(), bytesRead);
+        }
+    });
+
+    // Wait for the child process, enforcing the timeout.
+    DWORD waitMs = (timeoutSeconds > 0) ? static_cast<DWORD>(timeoutSeconds) * 1000 : INFINITE;
+    DWORD waitResult = WaitForSingleObject(pi.hProcess, waitMs);
+
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        result.timedOut = true;
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+
+        // Cancel any pending ReadFile on hReadPipe so the reader thread exits
+        // and readerThread.join() below returns. Without this, TerminateProcess
+        // on a wedged child can leave the child's inherited write-end of the
+        // pipe orphaned in kernel state briefly, and the reader thread's
+        // blocking ReadFile never returns — hanging the entire test runner
+        // indefinitely. CancelIoEx targets outstanding I/O on the handle from
+        // any thread. Safe to call even if no I/O is pending (returns FALSE
+        // with ERROR_NOT_FOUND, harmless).
+        CancelIoEx(hReadPipe, nullptr);
+    }
+
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    result.exitCode = static_cast<int>(exitCode);
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // Wait for the reader thread to finish draining the pipe, then clean up.
+    readerThread.join();
+    CloseHandle(hReadPipe);
+
+    result.stdOut = std::move(capturedOutput);
+    return result;
+}
+
+// Builds argument list for correctness tests: decompress once (--run-cnt 1)
+// with GPU and CPU validation enabled, plus scenario-specific flags.
+std::vector<std::string> BuildCorrectnessArgs(
+    const std::string& zstFile,
+    const std::vector<std::string>& scenarioFlags)
+{
+    std::vector<std::string> args;
+    args.push_back("--zst");
+    args.push_back(zstFile);
+    args.push_back("--run-cnt");
+    args.push_back("1");
+    if (g_testConfig.idxMax >= 0)
+    {
+        args.push_back("--idx-max");
+        args.push_back(std::to_string(g_testConfig.idxMax));
+    }
+    for (const auto& flag : scenarioFlags)
+    {
+        args.push_back(flag);
+    }
+    return args;
+}
+
+} // namespace
