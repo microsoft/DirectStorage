@@ -17,7 +17,7 @@ exec_program(${NUGET_EXE}
 
 include_directories(${CMAKE_BINARY_DIR}/packages/Microsoft.Direct3D.DirectStorage/native/include)
 target_link_directories(GDeflateTest PRIVATE ${CMAKE_BINARY_DIR}/packages/Microsoft.Direct3D.DirectStorage/native/lib/$ENV{VSCMD_ARG_TGT_ARCH})
-target_link_libraries(GDeflateTest PRIVATE dstorage.lib)
+target_link_libraries(GDeflateTest PRIVATE dstorage.lib windowsapp.lib)
 
 target_link_libraries(GDeflateTest PRIVATE GDeflate)
 
