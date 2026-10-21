@@ -40,9 +40,9 @@ float3 ScaleBuffer(float2 uv)
 }
 
 [RootSignature(Present_RootSig)]
-float4 main( float4 position : SV_Position, float2 uv : TexCoord0 ) : SV_Target0
+float3 main( float4 position : SV_Position, float2 uv : TexCoord0 ) : SV_Target0
 {
     float3 MainColor = ApplyDisplayProfile(ScaleBuffer(uv), DISPLAY_PLANE_FORMAT);
     float4 OverlayColor = OverlayBuffer[(int2)position.xy];
-    return float4(OverlayColor.rgb + MainColor.rgb * (1.0 - OverlayColor.a), 1);
+    return OverlayColor.rgb + MainColor.rgb * (1.0 - OverlayColor.a);
 }
