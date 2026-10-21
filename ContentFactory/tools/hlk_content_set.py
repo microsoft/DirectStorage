@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from factory_common import (
-    checked_content_path, run_command, validate_executable,
+    checked_content_path, run_command,
 )
-import content_report
 import hlk_archive
-from factory_contracts import CONTENT_TYPES, ZSTD_COMPRESSION_LEVEL, parse_gdeflate_header, validate_zstd_level
+from content_report import sha256_file
+from factory_contracts import CONTENT_TYPES, ZSTD_COMPRESSION_LEVEL, parse_gdeflate_header
 
 
 # Classify known source extensions; other files remain unknown.
@@ -109,7 +109,8 @@ def prepare_payloads(
     gdeflate_payloads: list[bytes] = []
     zstd_payloads: list[bytes] = []
     for source in sources:
-        source_path = checked_content_path(input_directory, source["path"], "original file")
+        # Discovery owns path validation; originals must stay unchanged during processing.
+        source_path = input_directory / source["path"]
         original = source_path.read_bytes()
         original_payloads.append(original)
         gdeflate_payloads.append(compress_gdeflate(gdeflate_executable, source_path, temporary_codec))
@@ -147,7 +148,7 @@ def build_archives(
         archive_records.append({
             "path": relative_paths[codec],
             "size": archive_path.stat().st_size,
-            "sha256": content_report.sha256_file(archive_path),
+            "sha256": sha256_file(archive_path),
             "format": "dstorage",
             "archive_group": archive_prefix,
             "payload_codec": codec,
@@ -160,25 +161,18 @@ def build_archives(
     return staged_archive_paths, archive_records
 
 
-# Generate and check the complete triplet before replacing archives and writing the report.
+# Generate and check the complete triplet before replacing archives and returning records.
 def process(
     input_directory: Path,
+    sources: list[dict[str, Any]],
     archive_prefix: str,
     zstd_executable: Path,
     gdeflate_executable: Path,
     alignment: int,
     overwrite: bool,
-    *, zstd_level: int = ZSTD_COMPRESSION_LEVEL, report: dict[str, Any] | None = None,
-) -> Path:
-    validate_options(archive_prefix, alignment)
-    validate_zstd_level(zstd_level)
-    input_directory = content_report.validate_input_directory(input_directory)
-    zstd_executable = validate_executable(zstd_executable)
-    gdeflate_executable = validate_executable(gdeflate_executable)
-    manifest_path = content_report.manifest_path(input_directory)
-
-    manifest_data = report if report is not None else content_report.create_manifest(input_directory)
-    sources = manifest_data["sources"]
+    *, zstd_level: int = ZSTD_COMPRESSION_LEVEL,
+) -> list[dict[str, Any]]:
+    """Install verified archives using preflight-validated inputs; return report records."""
     filenames = {codec: f"{archive_prefix}.{codec}" for codec in ("uncompressed", "gdeflate", "zstd")}
     archive_root = checked_content_path(input_directory, "generated/hlk", "archive directory")
     relative_paths = {codec: f"generated/hlk/{name}" for codec, name in filenames.items()}
@@ -202,7 +196,4 @@ def process(
     for record in records:
         if record["payload_codec"] == "zstd":
             record["compression_level"] = zstd_level
-    manifest_data["archives"].extend(records)
-    manifest_data["archives"].sort(key=lambda record: record["path"])
-    content_report.write_json_atomic(manifest_path, manifest_data)
-    return manifest_path
+    return records

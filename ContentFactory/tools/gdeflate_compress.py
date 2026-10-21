@@ -7,7 +7,6 @@ import hashlib
 import os
 import shutil
 import tempfile
-import content_report
 from pathlib import Path
 from functools import partial
 from typing import Any
@@ -16,7 +15,6 @@ from factory_common import (
     directory_is_empty,
     checked_content_path,
     run_command,
-    validate_executable,
 )
 from factory_contracts import parse_gdeflate_header
 
@@ -71,14 +69,15 @@ def output_relative_path(source: str, level: int) -> str:
 # Encode each selected level, verify its output, and collect file and header metadata.
 def build_derivatives(
     input_directory: Path,
-    manifest_data: dict[str, Any],
+    sources: list[dict[str, Any]],
     output_root: Path,
     executable: Path,
     levels: tuple[int, ...],
 ) -> list[dict[str, Any]]:
     derivative_records: list[dict[str, Any]] = []
-    for original_file in manifest_data["sources"]:
-        source_path = checked_content_path(input_directory, original_file["path"], "original file")
+    for original_file in sources:
+        # Discovery owns path validation; originals must stay unchanged during processing.
+        source_path = input_directory / original_file["path"]
         if original_file["size"] == 0:
             raise ValueError(f"GDeflate source cannot be empty: {original_file['path']}")
         # Generate only the levels selected for this source.
@@ -110,30 +109,22 @@ def build_derivatives(
                 },
                 "validation": "pass",
             })
-    return sorted(derivative_records, key=lambda derivative: derivative["path"])
+    return derivative_records
 
 
-# Generate and verify GDeflate files before replacing outputs and writing the report.
-def process(input_directory: Path, executable: Path, levels: tuple[int, ...], overwrite: bool, *, report: dict[str, Any] | None = None) -> Path:
-    input_directory = content_report.validate_input_directory(input_directory)
-    levels = validate_levels(levels)
-    executable = validate_executable(executable)
-    manifest = content_report.manifest_path(input_directory)
-
-    manifest_data = report if report is not None else content_report.create_manifest(input_directory)
+# Generate and verify GDeflate files before replacing outputs and returning records.
+def process(input_directory: Path, sources: list[dict[str, Any]], executable: Path, levels: tuple[int, ...], overwrite: bool) -> list[dict[str, Any]]:
+    """Install verified outputs using preflight-validated inputs; return report records."""
     output_directory = checked_content_path(input_directory, "generated/gdeflate", "gdeflate output directory")
     if not directory_is_empty(output_directory) and not overwrite:
         raise FileExistsError("GDeflate outputs already exist; use --overwrite")
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".gdeflate.stage.", dir=output_directory.parent) as temporary:
         staging = Path(temporary)
-        records = build_derivatives(input_directory, manifest_data, staging, executable, levels)
+        records = build_derivatives(input_directory, sources, staging, executable, levels)
         # Complete generation before replacing old outputs; failed installation is not rolled back.
         checked_content_path(input_directory, "generated/gdeflate", "gdeflate output directory")
         if output_directory.exists():
             shutil.rmtree(output_directory)
         os.replace(staging, output_directory)
-    manifest_data["derivatives"].extend(records)
-    manifest_data["derivatives"].sort(key=lambda record: record["path"])
-    content_report.write_json_atomic(manifest, manifest_data)
-    return manifest
+    return records

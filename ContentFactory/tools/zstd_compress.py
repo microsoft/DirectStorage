@@ -17,7 +17,7 @@ Write to a staging directory
     ↓
 Install the completed output directory
     ↓
-Update the report
+Return generated-file records to the launcher
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ import hashlib
 import os
 import shutil
 import tempfile
-import content_report
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +33,10 @@ from factory_common import (
     directory_is_empty,
     checked_content_path,
     run_command,
-    validate_executable,
 )
 
 
-from factory_contracts import ZSTD_COMPRESSION_LEVEL, validate_zstd_level
+from factory_contracts import ZSTD_COMPRESSION_LEVEL
 
 # Use the shared content policy while preserving the stage-level constant.
 COMPRESSION_LEVEL = ZSTD_COMPRESSION_LEVEL
@@ -129,7 +127,7 @@ def compress_chunk(zstd_exe: Path, chunk: bytes, block_bytes: int, compression_l
 # streaming implementation.
 def build_variants(
     input_directory: Path,
-    manifest_data: dict[str, Any],
+    sources: list[dict[str, Any]],
     output_root: Path,
     zstd_exe: Path,
     block_sizes_kb: tuple[int, ...],
@@ -139,8 +137,9 @@ def build_variants(
     derivative_records: list[dict[str, Any]] = []
 
     # Read each original. Each file is read completely into memory. Empty originals are rejected.
-    for original_file in manifest_data["sources"]:
-        source_path = checked_content_path(input_directory, original_file["path"], "original file")
+    for original_file in sources:
+        # Discovery owns path validation; originals must stay unchanged during processing.
+        source_path = input_directory / original_file["path"]
         source_data = source_path.read_bytes()
         if not source_data:
             raise ValueError(f"Zstd source cannot be empty: {original_file['path']}")
@@ -172,26 +171,21 @@ def build_variants(
                     "metadata": {"frame_count": len(chunks), "uncompressed_size": len(source_data)},
                     "validation": "pass",
                 })
-    return sorted(derivative_records, key=lambda derivative: derivative["path"])
+    return derivative_records
 
 
 # This coordinates the stage.
 def process(
     input_directory: Path,
+    sources: list[dict[str, Any]],
     zstd_exe: Path,
     block_sizes_kb: tuple[int, ...],
     chunk_sizes_kb: tuple[int, ...],
     overwrite: bool,
-    *, compression_level: int = ZSTD_COMPRESSION_LEVEL, report: dict[str, Any] | None = None,
-) -> Path:
-
-    # Resolve input directory, zstd.exe, block/chunk sizes, compression level, output directory
-    input_directory = content_report.validate_input_directory(input_directory)
-    zstd_exe = validate_executable(zstd_exe)
-    validate_matrix(block_sizes_kb, chunk_sizes_kb)
-    validate_zstd_level(compression_level)
-    manifest = content_report.manifest_path(input_directory)
-    manifest_data = report if report is not None else content_report.create_manifest(input_directory)
+    *, compression_level: int = ZSTD_COMPRESSION_LEVEL,
+) -> list[dict[str, Any]]:
+    """Install verified outputs using preflight-validated inputs; return report records."""
+    # The launcher owns input, executable, and setting validation.
     output_directory = checked_content_path(input_directory, "generated/zstd", "zstd output directory")
     if not directory_is_empty(output_directory) and not overwrite:
         raise FileExistsError("Zstd outputs already exist; use --overwrite")
@@ -200,13 +194,10 @@ def process(
     # Generate into staging
     with tempfile.TemporaryDirectory(prefix=".zstd.stage.", dir=output_directory.parent) as temporary:
         staging = Path(temporary)
-        records = build_variants(input_directory, manifest_data, staging, zstd_exe, block_sizes_kb, chunk_sizes_kb, compression_level)
+        records = build_variants(input_directory, sources, staging, zstd_exe, block_sizes_kb, chunk_sizes_kb, compression_level)
         # Install the complete stage output
         checked_content_path(input_directory, "generated/zstd", "zstd output directory")
         if output_directory.exists():
             shutil.rmtree(output_directory)
         os.replace(staging, output_directory)
-    manifest_data["derivatives"].extend(records)
-    manifest_data["derivatives"].sort(key=lambda record: record["path"])
-    content_report.write_json_atomic(manifest, manifest_data)
-    return manifest
+    return records

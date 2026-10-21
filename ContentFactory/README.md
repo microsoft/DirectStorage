@@ -54,7 +54,7 @@ input-directory/
     `-- manifest.json
 ```
 
-The root `generated` folder is excluded from input discovery. Selected stages run in Zstd, GDeflate, GACL, then HLK order; generated files preserve original subdirectories.
+The root `generated` folder is excluded from input discovery. Selected stages run in Zstd, GDeflate, GACL, then HLK order; generated files preserve original subdirectories. The launcher inventories originals once, validates the selected stages and required tools, then writes a checkpoint after each successful stage. Internal stages receive resolved inputs and return records; they do not load or write reports.
 
 HLK produces matching uncompressed, GDeflate-level-9, and Zstd archives at the selected `hlk.zstd_level`. The shared `tools/hlk_archive.py` module writes and parses the archive format; the HLK stage reopens each archive and compares its stored payloads before publication. Keep `manifest.json` with the outputs: it records paths, sizes, hashes, encoding settings, texture details and archive membership for the **current invocation only**. Unselected outputs may remain on disk without appearing in the new report.
 
@@ -62,7 +62,7 @@ Removed bookkeeping and redundant discovery checks, including restoration pointe
 
 ## Limitations and failures
 
-- Run one command per input directory at a time; keep originals unchanged during processing. Input roots and all ancestor directories must not be symbolic links or junctions.
+- Run one command per input directory at a time; keep original files and the directory structure unchanged throughout processing. Discovery rejects linked roots, ancestors, and original entries; stages trust that inventory when opening originals. Output-path guards remain in place.
 - Existing selected outputs require `overwrite: true`. New content is checked before replacement, but installation/report-write failure can leave incomplete outputs; fix the error and rerun with overwrite enabled.
 - GACL handles DDS array item 0 / mip 0. BC1/3/4/5 use conditioning plus Zstd; BC7 is Zstd-only. Non-DDS files are skipped; cubemaps, volume textures, and unsupported or truncated DDS inputs fail.
 - GACL archives and BC7 mode-split strategies are not implemented. The larger-input GDeflate issue remains unresolved.

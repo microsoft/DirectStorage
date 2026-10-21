@@ -7,7 +7,6 @@ import hashlib
 import os
 import shutil
 import tempfile
-import content_report
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,6 @@ from factory_common import (
     directory_is_empty,
     checked_content_path,
     run_command,
-    validate_executable,
 )
 from factory_contracts import TRANSFORM_CONTRACT
 
@@ -153,18 +151,19 @@ def output_relative_path(source: str) -> str:
 # Condition supported DDS first-mip payloads, verify them, and collect output records.
 def build_variants(
     input_directory: Path,
-    manifest_data: dict[str, Any],
+    sources: list[dict[str, Any]],
     output_root: Path,
     executable: Path,
     zstd_level: int,
     target_block_size: int,
 ) -> list[dict[str, Any]]:
     derivative_records: list[dict[str, Any]] = []
-    for original_file in manifest_data["sources"]:
+    for original_file in sources:
         # Only DDS inputs participate in this texture-conditioning stage.
         if Path(original_file["path"]).suffix.lower() != ".dds":
             continue
-        source_path = checked_content_path(input_directory, original_file["path"], "original file")
+        # Discovery owns path validation; originals must stay unchanged during processing.
+        source_path = input_directory / original_file["path"]
         source_data = source_path.read_bytes()
         mip_info = parse_dds_first_mip(source_data)
         # Pass the first mip's block bytes to the codec, not the DDS container.
@@ -220,7 +219,7 @@ def build_variants(
         })
     if not derivative_records:
         raise ValueError("content set contains no supported BC1/BC3/BC4/BC5/BC7 DDS sources")
-    return sorted(derivative_records, key=lambda derivative: derivative["path"])
+    return derivative_records
 
 
 # Check the requested Zstd level and target compressed-block size.
@@ -231,35 +230,26 @@ def validate_options(zstd_level: int, target_block_size: int) -> None:
         raise ValueError("target block size must be from 1 through 1048576")
 
 
-# Generate and verify GACL files before replacing outputs and writing the report.
+# Generate and verify GACL files before replacing outputs and returning records.
 def process(
     input_directory: Path,
+    sources: list[dict[str, Any]],
     executable: Path,
     zstd_level: int,
     target_block_size: int,
     overwrite: bool,
-    *, report: dict[str, Any] | None = None,
-) -> Path:
-    # Validate settings and the encoder path before changing any outputs.
-    validate_options(zstd_level, target_block_size)
-    input_directory = content_report.validate_input_directory(input_directory)
-    executable = validate_executable(executable)
-    manifest = content_report.manifest_path(input_directory)
-
-    manifest_data = report if report is not None else content_report.create_manifest(input_directory)
+) -> list[dict[str, Any]]:
+    """Install verified outputs using preflight-validated inputs; return report records."""
     output_directory = checked_content_path(input_directory, "generated/gacl", "gacl output directory")
     if not directory_is_empty(output_directory) and not overwrite:
         raise FileExistsError("GACL outputs already exist; use --overwrite")
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".gacl.stage.", dir=output_directory.parent) as temporary:
         staging = Path(temporary)
-        records = build_variants(input_directory, manifest_data, staging, executable, zstd_level, target_block_size)
+        records = build_variants(input_directory, sources, staging, executable, zstd_level, target_block_size)
         # Complete generation before replacing old outputs; failed installation is not rolled back.
         checked_content_path(input_directory, "generated/gacl", "gacl output directory")
         if output_directory.exists():
             shutil.rmtree(output_directory)
         os.replace(staging, output_directory)
-    manifest_data["derivatives"].extend(records)
-    manifest_data["derivatives"].sort(key=lambda record: record["path"])
-    content_report.write_json_atomic(manifest, manifest_data)
-    return manifest
+    return records
