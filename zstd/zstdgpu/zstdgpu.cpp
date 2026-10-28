@@ -3256,6 +3256,13 @@ ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuR
 #endif
 }
 
+// Returns 1 when the library was built with ZSTDGPU_ENABLE_TIMESTAMPS=1. With 0, zstdgpu_RetrieveTimestamps always
+// returns zero and callers must not report its results as measurements.
+ZSTDGPU_API uint32_t zstdgpu_AreTimestampsEnabled(void)
+{
+    return ZSTDGPU_ENABLE_TIMESTAMPS ? 1u : 0u;
+}
+
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
 {
 #if ZSTDGPU_ENABLE_TIMESTAMPS
