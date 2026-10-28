@@ -1372,6 +1372,7 @@ static const wchar_t *zstdgpu_Demo_FrameStatusName(uint32_t status)
     case kzstdgpu_FrameStatus_DictionaryUnsupported: return L"DictionaryUnsupported";
     case kzstdgpu_FrameStatus_WindowTooLarge:        return L"WindowTooLarge";
     case kzstdgpu_FrameStatus_MissingContentSize:    return L"MissingContentSize";
+    case kzstdgpu_FrameStatus_RequestTooLarge:       return L"RequestTooLarge";
     default:                                         return L"Unknown";
     }
 }
