@@ -15,7 +15,16 @@
 
 #pragma once
 
+#include <stddef.h> /* offsetof */
+
 #include "zstdgpu_structs.h"
+
+// Set to 0 to skip creating every per-request read-back buffer except Counters so integrations that do not need
+// these can save the cost of creating and mapping them. Counters always keeps its read-back buffer,
+// because stages 1 and 2 are sized from it. With 0, zstdgpu_RetrieveGpuResults returns 0 and zeroes its output.
+#ifndef ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
+#define ZSTDGPU_ENABLE_GPU_RESULTS_READBACK 1
+#endif
 
 #ifdef _MSC_VER
     // NOTE(pamartis): Make sure 4505 is not leaked into a file including this header. 4505 is fine because some non-inlined function may be unused
@@ -429,9 +438,19 @@ static void zstdgpu_ResourceInfo_Stage_2_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo 
 
 #undef  ZSTDGPU_BUFFER
 
+// Byte size of one read-back buffer; zero when it is skipped (only Counters is kept when read-backs are disabled).
+#if ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
+#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name) ((info)->name##_ByteSizeInternal)
+#else
+#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name)                                                            \
+    (offsetof(zstdgpu_ResourceInfo, name##_gpu2CpuByteOffset) ==                                         \
+     offsetof(zstdgpu_ResourceInfo, Counters_gpu2CpuByteOffset) ? (info)->name##_ByteSizeInternal : 0u)
+#endif
+
+// A skipped read-back buffer takes no memory.
 #define ZSTDGPU_BUFFER(type, name)                                             \
     outInfo->name##_gpu2CpuByteOffset = byteOffset;                            \
-    byteOffset = ZSTDGPU_ALIGN_DEFAULT(byteOffset + outInfo->name##_ByteSizeInternal);
+    byteOffset = ZSTDGPU_ALIGN_DEFAULT(byteOffset + ZSTDGPU_GPU2CPU_BYTE_SIZE(outInfo, name));
 
 static void zstdgpu_ResourceInfo_Stage_0_InitOffsetGpu2Cpu(zstdgpu_ResourceInfo *outInfo)
 {
@@ -696,8 +715,9 @@ static void zstdgpu_ResourceDataGpu_Init_CpuToGpu(zstdgpu_ResourceDataGpu *outRe
 
 #undef  ZSTDGPU_BUFFER
 
+// A skipped read-back buffer is neither created nor mapped, and its CPU pointer stays NULL.
 #define ZSTDGPU_BUFFER(type, name)                                                          \
-    if (NULL == outResData->gpu2Cpu.name && 0 != info->name##_ByteSizeInternal)             \
+    if (NULL == outResData->gpu2Cpu.name && 0 != ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name))     \
     {                                                                                       \
         ZSTDGPU_CREATE_BUFFER(name, gpu2Cpu, COPY_DEST, READBACK);                          \
         outResData->gpu2Cpu.name##Cpu = (const type *)d3d12aid_Resource_MapRead(outResData->gpu2Cpu.name);  \

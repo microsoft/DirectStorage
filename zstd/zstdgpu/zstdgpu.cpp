@@ -12,10 +12,13 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
+#ifndef ZSTDGPU_ENABLE_TIMESTAMPS
 #define ZSTDGPU_ENABLE_TIMESTAMPS 1
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "zstdgpu.h"
 #include "zstdgpu_shaders.h"
@@ -1070,7 +1073,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->uncompressedFramesRefs             = NULL;
         context->frameStatus                        = NULL;
 
+#if ZSTDGPU_ENABLE_TIMESTAMPS
         d3d12aid_Timestamps_Create(&context->timestamps, context->device, kzstdgpu_KernelScope_Count * 2, 1);
+#endif
 
         context->zstdFrameCount                     = 0;
         context->zstdCompressedFramesByteCount      = 0;
@@ -1098,7 +1103,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPerRequestContext(void **outMemoryBlock, uin
 
     if (proceed)
     {
+#if ZSTDGPU_ENABLE_TIMESTAMPS
         d3d12aid_Timestamps_Release(&inPerRequestContext->timestamps);
+#endif
 
         const uint32_t stageCount = ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount);
         for (uint32_t stage = 0; stage < stageCount; ++stage)
@@ -3183,6 +3190,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
 {
+#if ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
     // NOTE(pamartis): these are required to make sure D3D12 validation doesn't complain about state mismatch when
     // Read-only resource from the last stage (== 2) get a NON_PS_RESOURCE state as a result of promotion from COMMON state
     // (which happens in case if the stage prior to it (==1) is submitted in a separate CommandList/ExecuteCommandList)
@@ -3227,16 +3235,35 @@ ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D1
         ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_1()
         ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
     #undef  ZSTDGPU_BUFFER
+#else
+    // Read-back buffers are not created, so there is nothing to copy. Stage 2 already reads back Counters.
+    ZSTDGPU_UNUSED(req);
+    ZSTDGPU_UNUSED(cmdList);
+#endif
 }
 
-ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req)
+// Returns 1 when the read-back GPU results are available. Returns 0 and zeroes `outGpuResources` when the library
+// was built with ZSTDGPU_ENABLE_GPU_RESULTS_READBACK=0, so callers must not dereference any of its pointers.
+ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req)
 {
+#if ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
     zstdgpu_ResourceDataCpu_InitFromResourceDataGpu(outGpuResources, &req->resData);
+    return 1;
+#else
+    ZSTDGPU_UNUSED(req);
+    memset(outGpuResources, 0, sizeof(*outGpuResources));
+    return 0;
+#endif
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList)
 {
+#if ZSTDGPU_ENABLE_TIMESTAMPS
     d3d12aid_Timestamps_AdvanceFrame(&req->timestamps, cmdList);
+#else
+    ZSTDGPU_UNUSED(req);
+    ZSTDGPU_UNUSED(cmdList);
+#endif
 }
 
 ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex)

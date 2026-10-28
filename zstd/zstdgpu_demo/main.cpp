@@ -1111,7 +1111,7 @@ static void zstdgpu_DefaultUploadCallback(void *zstdCompressedFramesBytes, uint3
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
-ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
+ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
 
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
 ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
@@ -2310,14 +2310,18 @@ static int demoRun(void *demoCtx)
                 if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation)
                 {
                     zstdgpu_ResourceDataCpu gpuData;
-                    zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
+                    const uint32_t gpuDataAvailable = zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
+                    if (0 == gpuDataAvailable && 0 == b)
+                    {
+                        debugPrint(L"[WARN] GPU intermediate results are unavailable (zstdgpu built with ZSTDGPU_ENABLE_GPU_RESULTS_READBACK=0). Skipping per-stage checks; only decompressed frames are validated.\n");
+                    }
 
                     // Deep per-stage checks compare GPU intermediates against the
                     // whole-buffer reference store (zstdCpu / ReferenceStore), which
                     // is keyed by global block indices. They are only valid when a
                     // single batch decodes the entire input; per-batch decodes are
                     // validated by the final decompressed-frame comparison below.
-                    if (isWholeBufferRun)
+                    if (isWholeBufferRun && gpuDataAvailable)
                     {
                         if (chkGpu)
                         {
@@ -2353,7 +2357,7 @@ static int demoRun(void *demoCtx)
                         {
                             debugPrint(L"[FAIL] %u/%u frames failed validation (sweep %u, batch %u, global frames [%u..%u]).\n", failedFrameCount, fbInfo.frameCount, sweep, b, bLo, bHi);
 
-                            if (isWholeBufferRun)
+                            if (isWholeBufferRun && gpuDataAvailable)
                             {
                                 const char *ref = (char*)zstdReferenceUncompressedData;
                                 const char *tst = (char*)zstdUnCompressedFramesMemory.bufMem[0];
