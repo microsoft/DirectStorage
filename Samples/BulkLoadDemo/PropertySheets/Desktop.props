@@ -15,7 +15,7 @@
     </ClCompile>
     <FxCompile>
       <PreprocessorDefinitions>_GAMING_DESKTOP=1</PreprocessorDefinitions>
-      <ShaderModel>6.1</ShaderModel>
+      <ShaderModel>6.2</ShaderModel>
     </FxCompile>
   </ItemDefinitionGroup>
   <ItemGroup />

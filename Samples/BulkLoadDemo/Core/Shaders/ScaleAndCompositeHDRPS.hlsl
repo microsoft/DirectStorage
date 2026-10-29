@@ -42,14 +42,14 @@ float3 ScaleBuffer(float2 uv)
 }
 
 [RootSignature(Present_RootSig)]
-float4 main( float4 position : SV_Position, float2 uv : TexCoord0 ) : SV_Target0
+float3 main( float4 position : SV_Position, float2 uv : TexCoord0 ) : SV_Target0
 {
-    float3 MainColor = ApplyREC2084Curve(ScaleBuffer(uv) / 10000.0);
+    float3 MainColor = ApplyREC2084Curve( saturate(ScaleBuffer(uv) / 10000.0) );
 
     float4 OverlayColor = OverlayBuffer[(int2)position.xy];
     OverlayColor.rgb = RemoveSRGBCurve(OverlayColor.rgb);
     OverlayColor.rgb = REC709toREC2020(OverlayColor.rgb / (OverlayColor.a == 0.0 ? 1.0 : OverlayColor.a));
     OverlayColor.rgb = ApplyREC2084Curve(OverlayColor.rgb * PaperWhiteRatio);
 
-    return float4(lerp(MainColor, OverlayColor.rgb, OverlayColor.a), 1);
+    return lerp(MainColor, OverlayColor.rgb, OverlayColor.a);
 }
