@@ -64,15 +64,22 @@ if (WIN32)
 # The follow warnings have been disabled to be able to compile this library without making modifications
 # to the original source.
 #  C4244 'return': conversion from 'uint64_t' to 'unsigned int', possible loss of data - compiler_msc.h 68
-#  C4127 conditional expression is constant - common_defs.h 290 
-#  C4267 'function': conversion from 'size_t' to 'uint32_t', possible loss of data - common_defs.h  291 
-#  C4100 'c': unreferenced formal parameter - deflate_compress.c    2428    
-#  C4245 '=': conversion from 'int' to 'unsigned int', signed/unsigned mismatch  - deflate_decompress.c 752 
-#  C4456 declaration of 'len' hides previous local declaration - deflate_compress.c 1118    
-#  C4018 '>=': signed/unsigned mismatch - decompress_template.h 297 
-#  C4146 unary minus operator applied to unsigned type, result still unsigned - bt_matchfinder.h    219 
-#  C4310 cast truncates constant value - bt_matchfinder.h   219 
-add_compile_options(/wd4244 /wd4127 /wd4267 /wd4100 /wd4245 /wd4456 /wd4018 /wd4146 /wd4310)
+#  C4127 conditional expression is constant - common_defs.h 290
+#  C4267 'function': conversion from 'size_t' to 'uint32_t', possible loss of data - common_defs.h  291
+#  C4100 'c': unreferenced formal parameter - deflate_compress.c    2428
+#  C4245 '=': conversion from 'int' to 'unsigned int', signed/unsigned mismatch  - deflate_decompress.c 752
+#  C4456 declaration of 'len' hides previous local declaration - deflate_compress.c 1118
+#  C4018 '>=': signed/unsigned mismatch - decompress_template.h 297
+#  C4146 unary minus operator applied to unsigned type, result still unsigned - bt_matchfinder.h    219
+#  C4310 cast truncates constant value - bt_matchfinder.h   219
+  if (MSVC)
+    # MSVC is TRUE for clang-cl too (CMAKE_<LANG>_COMPILER_FRONTEND_VARIANT=MSVC),
+    # so this covers both cl.exe and clang-cl.exe, which both accept /wd* flags.
+    add_compile_options(/wd4244 /wd4127 /wd4267 /wd4100 /wd4245 /wd4456 /wd4018 /wd4146 /wd4310)
+  else()
+    # Non-MSVC-frontend compilers (e.g. clang/clang++ with the GNU frontend) use -Wno-* flags.
+    add_compile_options(-Wno-conversion -Wno-unused-parameter -Wno-shadow)
+  endif (MSVC)
 endif (WIN32)
 
 include_directories(${LIBDEFLATE_DIR})

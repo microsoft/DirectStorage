@@ -1111,8 +1111,9 @@ static void zstdgpu_DefaultUploadCallback(void *zstdCompressedFramesBytes, uint3
 }
 
 ZSTDGPU_API void zstdgpu_ReadbackGpuResults(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
-ZSTDGPU_API void zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
+ZSTDGPU_API uint32_t zstdgpu_RetrieveGpuResults(zstdgpu_ResourceDataCpu *outGpuResources, zstdgpu_PerRequestContext req);
 
+ZSTDGPU_API uint32_t zstdgpu_AreTimestampsEnabled(void);
 ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList *cmdList);
 ZSTDGPU_API uint64_t zstdgpu_RetrieveTimestamps(const wchar_t **outTimestampScopeNames, uint64_t *outTimestampScopeClocks, uint32_t *inoutTimestampScopeCnt, zstdgpu_PerRequestContext req, uint32_t stageIndex);
 
@@ -1372,6 +1373,7 @@ static const wchar_t *zstdgpu_Demo_FrameStatusName(uint32_t status)
     case kzstdgpu_FrameStatus_DictionaryUnsupported: return L"DictionaryUnsupported";
     case kzstdgpu_FrameStatus_WindowTooLarge:        return L"WindowTooLarge";
     case kzstdgpu_FrameStatus_MissingContentSize:    return L"MissingContentSize";
+    case kzstdgpu_FrameStatus_RequestTooLarge:       return L"RequestTooLarge";
     default:                                         return L"Unknown";
     }
 }
@@ -1997,6 +1999,12 @@ static int demoRun(void *demoCtx)
     uint32_t       measuredSweeps    = 0;
     uint32_t       warmupSweeps      = 0;
     uint32_t       dispatchIdx       = 0;
+    // GPU latency/bandwidth come from zstdgpu timestamps; without them they are reported as n/a, not as zero.
+    const bool     timestampsEnabled = 0 != zstdgpu_AreTimestampsEnabled();
+    if (!timestampsEnabled)
+    {
+        debugPrint(L"[WARN] GPU timestamps are unavailable (zstdgpu built with ZSTDGPU_ENABLE_TIMESTAMPS=0). Latency and bandwidth are reported as n/a.\n");
+    }
 
     for (uint32_t sweep = 0; measuredSweeps < repCount; ++sweep)
     {
@@ -2310,14 +2318,18 @@ static int demoRun(void *demoCtx)
                 if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation)
                 {
                     zstdgpu_ResourceDataCpu gpuData;
-                    zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
+                    const uint32_t gpuDataAvailable = zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
+                    if (0 == gpuDataAvailable && 0 == b)
+                    {
+                        debugPrint(L"[WARN] GPU intermediate results are unavailable (zstdgpu built with ZSTDGPU_ENABLE_GPU_RESULTS_READBACK=0). Skipping per-stage checks; only decompressed frames are validated.\n");
+                    }
 
                     // Deep per-stage checks compare GPU intermediates against the
                     // whole-buffer reference store (zstdCpu / ReferenceStore), which
                     // is keyed by global block indices. They are only valid when a
                     // single batch decodes the entire input; per-batch decodes are
                     // validated by the final decompressed-frame comparison below.
-                    if (isWholeBufferRun)
+                    if (isWholeBufferRun && gpuDataAvailable)
                     {
                         if (chkGpu)
                         {
@@ -2353,7 +2365,7 @@ static int demoRun(void *demoCtx)
                         {
                             debugPrint(L"[FAIL] %u/%u frames failed validation (sweep %u, batch %u, global frames [%u..%u]).\n", failedFrameCount, fbInfo.frameCount, sweep, b, bLo, bHi);
 
-                            if (isWholeBufferRun)
+                            if (isWholeBufferRun && gpuDataAvailable)
                             {
                                 const char *ref = (char*)zstdReferenceUncompressedData;
                                 const char *tst = (char*)zstdUnCompressedFramesMemory.bufMem[0];
@@ -2513,6 +2525,16 @@ static int demoRun(void *demoCtx)
                             }                                                           \
                         }                                                               \
                     }
+                // zstdgpu stage timings come from library timestamps; mark them n/a when those are compiled out.
+                #define WRITE_CSV_STAGE(file, scopeClks, subScopeCount, subScopeClks)   \
+                    if (timestampsEnabled)                                              \
+                    {                                                                   \
+                        WRITE_CSV_DATA(file, scopeClks, subScopeCount, subScopeClks)    \
+                    }                                                                   \
+                    else if ((file) != NULL && prfLevel > 0)                            \
+                    {                                                                   \
+                        fwprintf_s((file), L"n/a,");                                    \
+                    }
 
                 // Write the CSV header once, alongside the first dispatch (CSV only).
                 if (NULL != csvFile && 0 == dispatchIdx)
@@ -2550,7 +2572,7 @@ static int demoRun(void *demoCtx)
                 timestampScopeCount = _countof(timestampScopeClocks);
                 clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
                 clksAll = clks;
-                WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                 if (Readback0_Stamp != ~0u)
                 {
                     clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback0_Stamp);
@@ -2561,7 +2583,7 @@ static int demoRun(void *demoCtx)
                 timestampScopeCount = _countof(timestampScopeClocks);
                 clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
                 clksAll += clks;
-                WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                 if (Readback1_Stamp != ~0u)
                 {
                     clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback1_Stamp);
@@ -2572,7 +2594,8 @@ static int demoRun(void *demoCtx)
                 timestampScopeCount = _countof(timestampScopeClocks);
                 clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
                 clksAll += clks;
-                WRITE_CSV_DATA(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
+                #undef WRITE_CSV_STAGE
                 #undef WRITE_CSV_DATA
                 #undef WRITE_CSV_HEADER
 
@@ -2580,7 +2603,12 @@ static int demoRun(void *demoCtx)
                 const double batchBw = (ns != 0) ? ((double)zstdUnCompressedFramesMemorySizeInBytes / ns) : 0.0;
                 const double batchUs = (freqGpuClocks != 0) ? (double)(clksAll * 1000000) / (double)freqGpuClocks : 0.0;
                 if (NULL != csvFile)
-                    fwprintf_s(csvFile, L"%lf\n", batchBw);
+                {
+                    if (timestampsEnabled)
+                        fwprintf_s(csvFile, L"%lf\n", batchBw);
+                    else
+                        fwprintf_s(csvFile, L"n/a\n");
+                }
 
                 // Record this batch's latency/bandwidth for the aggregate stdout
                 // metrics. Warmup sweeps (a wall-clock window when --warmup is set)
@@ -2639,8 +2667,16 @@ static int demoRun(void *demoCtx)
         {
             const double batchP50Us = MedianOfDoubles((NULL != perBatchUs) ? &perBatchUs[(size_t)b * measuredCap] : NULL, measuredSweeps);
             const double batchMedBw = MedianOfDoubles((NULL != perBatchBw) ? &perBatchBw[(size_t)b * measuredCap] : NULL, measuredSweeps);
-            debugPrint(L"[PERF] batch=%u frames=%u decomp_bytes=%u p50_latency_us=%.3f bandwidth_gbps=%.4f runs=%u\n",
-                       b, perBatchFrames[b], perBatchBytes[b], batchP50Us, batchMedBw, measuredSweeps);
+            if (timestampsEnabled)
+            {
+                debugPrint(L"[PERF] batch=%u frames=%u decomp_bytes=%u p50_latency_us=%.3f bandwidth_gbps=%.4f runs=%u\n",
+                           b, perBatchFrames[b], perBatchBytes[b], batchP50Us, batchMedBw, measuredSweeps);
+            }
+            else
+            {
+                debugPrint(L"[PERF] batch=%u frames=%u decomp_bytes=%u p50_latency_us=n/a bandwidth_gbps=n/a runs=%u\n",
+                           b, perBatchFrames[b], perBatchBytes[b], measuredSweeps);
+            }
             totalDecompBytes += perBatchBytes[b];
         }
 
@@ -2669,8 +2705,16 @@ static int demoRun(void *demoCtx)
         const uint32_t pooledBatches = poolFullOnly ? fullBatches : numBatches;
         const double   totalP50Us    = MedianOfDoubles(poolUs, (NULL != poolUs) ? poolCnt : 0);
         const double   totalMedBw    = MedianOfDoubles(poolBw, (NULL != poolBw) ? poolCnt : 0);
-        debugPrint(L"[PERF] total batches=%u pooled_batches=%u frames=%u decomp_bytes=%llu p50_latency_us=%.3f bandwidth_gbps=%.4f runs=%u warmup=%u\n",
-                   numBatches, pooledBatches, workingFrames, (unsigned long long)totalDecompBytes, totalP50Us, totalMedBw, measuredSweeps, warmupSweeps);
+        if (timestampsEnabled)
+        {
+            debugPrint(L"[PERF] total batches=%u pooled_batches=%u frames=%u decomp_bytes=%llu p50_latency_us=%.3f bandwidth_gbps=%.4f runs=%u warmup=%u\n",
+                       numBatches, pooledBatches, workingFrames, (unsigned long long)totalDecompBytes, totalP50Us, totalMedBw, measuredSweeps, warmupSweeps);
+        }
+        else
+        {
+            debugPrint(L"[PERF] total batches=%u pooled_batches=%u frames=%u decomp_bytes=%llu p50_latency_us=n/a bandwidth_gbps=n/a runs=%u warmup=%u\n",
+                       numBatches, pooledBatches, workingFrames, (unsigned long long)totalDecompBytes, measuredSweeps, warmupSweeps);
+        }
 
         free(poolUs);
         free(poolBw);

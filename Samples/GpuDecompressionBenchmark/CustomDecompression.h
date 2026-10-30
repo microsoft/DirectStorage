@@ -22,6 +22,7 @@ using winrt::com_ptr;
 class Codec
 {
     com_ptr<IDStorageCompressionCodec> m_gdeflateCodec;
+    com_ptr<IDStorageCompressionCodec> m_zstdCodec;
 
 #if USE_ZLIB
     com_ptr<IDStorageCompressionCodec> m_zlibCodec;
@@ -41,17 +42,17 @@ public:
             CODEC_THREADS,
             IID_PPV_ARGS(m_gdeflateCodec.put())));
 
+        check_hresult(DStorageCreateCompressionCodec(
+            DSTORAGE_COMPRESSION_FORMAT_ZSTD,
+            CODEC_THREADS,
+            IID_PPV_ARGS(m_zstdCodec.put())));
+
 #if USE_ZLIB
         m_zlibCodec = winrt::make<ZLibCodec>();
 #endif
     }
 
-    size_t Decompress(
-        IDStorageCompressionCodec* codec,
-        void const* src,
-        uint64_t srcSize,
-        void* dest,
-        uint64_t dstSize)
+    size_t Decompress(IDStorageCompressionCodec* codec, void const* src, uint64_t srcSize, void* dest, uint64_t dstSize)
     {
         size_t uncompressedDataSize;
         check_hresult(codec->DecompressBuffer(src, srcSize, dest, dstSize, &uncompressedDataSize));
@@ -76,6 +77,9 @@ public:
             case DSTORAGE_COMPRESSION_FORMAT_GDEFLATE:
                 codec = m_gdeflateCodec.get();
                 break;
+            case DSTORAGE_COMPRESSION_FORMAT_ZSTD:
+                codec = m_zstdCodec.get();
+                break;
 #if USE_ZLIB
             case DSTORAGE_CUSTOM_COMPRESSION_0:
                 codec = m_zlibCodec.get();
@@ -84,7 +88,8 @@ public:
             default:
                 std::terminate();
             }
-            size_t actualDecompressedSize = Decompress(codec, request.SrcBuffer, request.SrcSize, dest, request.DstSize);
+            size_t actualDecompressedSize =
+                Decompress(codec, request.SrcBuffer, request.SrcSize, dest, request.DstSize);
 
             if (dest != request.DstBuffer)
             {

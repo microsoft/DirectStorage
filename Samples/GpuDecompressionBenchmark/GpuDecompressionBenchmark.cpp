@@ -9,16 +9,17 @@
 
 #define NOMINMAX
 
+#include "Compression.h"
 #include "CustomDecompression.h"
+#include "Metadata.h"
+#include "Validation.h"
 
-#include <dstorage.h>
-#include <dxgi1_4.h>
-#include <winrt/base.h>
+#include "DStorageTestContext.h"
+
 #include <winrt/windows.applicationmodel.datatransfer.h>
 
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -27,236 +28,16 @@ using winrt::com_ptr;
 
 void SetClipboardText(std::wstring const& str);
 
-struct handle_closer
-{
-    void operator()(HANDLE h) noexcept
-    {
-        assert(h != INVALID_HANDLE_VALUE);
-        if (h)
-        {
-            CloseHandle(h);
-        }
-    }
-};
-using ScopedHandle = std::unique_ptr<void, handle_closer>;
-
 void ShowHelpText()
 {
-    std::cout << "Compresses a file, saves it to disk, and then loads & decompresses using DirectStorage." << std::endl
+    std::cout << "Compresses a file or set of files, saves it to disk, and then loads & decompresses using DirectStorage." << std::endl
               << std::endl;
-    std::cout << "USAGE: GpuDecompressionBenchmark <path> [chunk size in MiB]" << std::endl << std::endl;
-    std::cout << "       Default chunk size is 16." << std::endl;
-}
-
-struct ChunkMetadata
-{
-    uint32_t Offset;
-    uint32_t CompressedSize;
-    uint32_t UncompressedSize;
-};
-
-struct Metadata
-{
-    uint32_t UncompressedSize;
-    uint32_t CompressedSize;
-    uint32_t LargestCompressedChunkSize;
-    std::vector<ChunkMetadata> Chunks;
-};
-
-Metadata GenerateUncompressedMetadata(wchar_t const* filename, uint32_t chunkSizeBytes)
-{
-    ScopedHandle inHandle(
-        CreateFile(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    winrt::check_bool(inHandle.get());
-
-    DWORD size = GetFileSize(inHandle.get(), nullptr);
-
-    Metadata metadata;
-    metadata.UncompressedSize = size;
-    metadata.CompressedSize = size;
-    metadata.LargestCompressedChunkSize = chunkSizeBytes;
-
-    uint32_t offset = 0;
-
-    while (offset < size)
-    {
-        uint32_t chunkSize = std::min<uint32_t>(size - offset, chunkSizeBytes);
-
-        metadata.Chunks.push_back({offset, chunkSize, chunkSize});
-        offset += chunkSize;
-    }
-
-    return metadata;
-}
-
-com_ptr<IDStorageCompressionCodec> GetCodec(DSTORAGE_COMPRESSION_FORMAT format)
-{
-    com_ptr<IDStorageCompressionCodec> codec;
-    switch (format)
-    {
-    case DSTORAGE_COMPRESSION_FORMAT_GDEFLATE:
-        check_hresult(DStorageCreateCompressionCodec(format, 0, IID_PPV_ARGS(codec.put())));
-        break;
-
-#if USE_ZLIB
-    case DSTORAGE_CUSTOM_COMPRESSION_0:
-        codec = winrt::make<ZLibCodec>();
-        break;
-#endif
-
-    default:
-        std::terminate();
-    }
-
-    return codec;
-}
-
-Metadata Compress(
-    DSTORAGE_COMPRESSION_FORMAT format,
-    const wchar_t* originalFilename,
-    const wchar_t* compressedFilename,
-    uint32_t chunkSizeBytes)
-{
-    ScopedHandle inHandle(CreateFile(
-        originalFilename,
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr));
-    winrt::check_bool(inHandle.get());
-
-    DWORD size = GetFileSize(inHandle.get(), nullptr);
-
-    ScopedHandle inMapping(CreateFileMapping(inHandle.get(), nullptr, PAGE_READONLY, 0, 0, nullptr));
-    winrt::check_bool(inMapping.get());
-
-    uint8_t* srcData = reinterpret_cast<uint8_t*>(MapViewOfFile(inMapping.get(), FILE_MAP_READ, 0, 0, size));
-    winrt::check_bool(srcData);
-
-    ScopedHandle outHandle(CreateFile(
-        compressedFilename,
-        GENERIC_WRITE,
-        FILE_SHARE_WRITE,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr));
-    winrt::check_bool(outHandle.get());
-
-    uint32_t numChunks = (size + chunkSizeBytes - 1) / chunkSizeBytes;
-
-    std::wcout << "Compressing " << originalFilename << " to " << compressedFilename << " in " << numChunks << "x"
-               << chunkSizeBytes / 1024 / 1024 << " MiB chunks" << std::endl;
-
-    using Chunk = std::vector<uint8_t>;
-
-    std::vector<Chunk> chunks;
-    std::vector<uint32_t> chunkOffsets;
-
-    chunks.resize(numChunks);
-    for (uint32_t i = 0; i < numChunks; ++i)
-    {
-        uint32_t thisChunkOffset = i * chunkSizeBytes;
-        chunkOffsets.push_back(thisChunkOffset);
-    }
-
-    std::atomic<size_t> nextChunk = 0;
-
-    std::vector<std::thread> threads;
-    threads.reserve(std::thread::hardware_concurrency());
-
-    for (unsigned int i = 0; i < std::thread::hardware_concurrency(); ++i)
-    {
-        threads.emplace_back(
-            [&]()
-            {
-                // Each thread needs its own instance of the codec
-                com_ptr<IDStorageCompressionCodec> codec = GetCodec(format);
-
-                while (true)
-                {
-                    size_t chunkIndex = nextChunk.fetch_add(1);
-                    if (chunkIndex >= numChunks)
-                        return;
-
-                    size_t thisChunkOffset = chunkIndex * chunkSizeBytes;
-                    size_t thisChunkSize = std::min<size_t>(size - thisChunkOffset, chunkSizeBytes);
-
-                    Chunk chunk(codec->CompressBufferBound(thisChunkSize));
-
-                    uint8_t* uncompressedStart = srcData + thisChunkOffset;
-
-                    size_t compressedSize = 0;
-                    check_hresult(codec->CompressBuffer(
-                        uncompressedStart,
-                        thisChunkSize,
-                        DSTORAGE_COMPRESSION_BEST_RATIO,
-                        chunk.data(),
-                        chunk.size(),
-                        &compressedSize));
-                    chunk.resize(compressedSize);
-
-                    chunks[chunkIndex] = std::move(chunk);
-                }
-            });
-    }
-
-    size_t lastNextChunk = std::numeric_limits<size_t>::max();
-
-    do
-    {
-        Sleep(250);
-        if (nextChunk != lastNextChunk)
-        {
-            lastNextChunk = nextChunk;
-            std::cout << "   " << std::min<size_t>(numChunks, lastNextChunk + 1) << " / " << numChunks << "   \r";
-            std::cout.flush();
-        }
-    } while (lastNextChunk < numChunks);
-
-    for (auto& thread : threads)
-    {
-        thread.join();
-    }
-
-    uint32_t totalCompressedSize = 0;
-    uint32_t offset = 0;
-
-    Metadata metadata;
-    metadata.UncompressedSize = size;
-    metadata.LargestCompressedChunkSize = 0;
-
-    for (uint32_t i = 0; i < numChunks; ++i)
-    {
-        winrt::check_bool(
-            WriteFile(outHandle.get(), chunks[i].data(), static_cast<DWORD>(chunks[i].size()), nullptr, nullptr));
-
-        uint32_t thisChunkOffset = i * chunkSizeBytes;
-        uint32_t thisChunkSize = std::min<uint32_t>(size - thisChunkOffset, chunkSizeBytes);
-
-        ChunkMetadata chunkMetadata{};
-        chunkMetadata.Offset = offset;
-        chunkMetadata.CompressedSize = static_cast<uint32_t>(chunks[i].size());
-        chunkMetadata.UncompressedSize = thisChunkSize;
-        metadata.Chunks.push_back(chunkMetadata);
-
-        totalCompressedSize += chunkMetadata.CompressedSize;
-        offset += chunkMetadata.CompressedSize;
-
-        metadata.LargestCompressedChunkSize =
-            std::max(metadata.LargestCompressedChunkSize, chunkMetadata.CompressedSize);
-    }
-
-    outHandle.reset();
-
-    metadata.CompressedSize = totalCompressedSize;
-
-    std::cout << "Total: " << size << " --> " << totalCompressedSize << " bytes (" << totalCompressedSize * 100.0 / size
-              << "%)     " << std::endl;
-
-    return metadata;
+    std::cout << "USAGE: GpuDecompressionBenchmark <path> [-chunksize:chunk size in KiB] [-sustained:seconds] [-validate]" << std::endl << std::endl;
+    std::cout << "       <path>: If a directory is specifed then the contents of that directory will be enumerated and collected into a" << std::endl;
+    std::cout << "               single chunked archive for benchmarking. " << std::endl;
+    std::cout << "       [-chunksize:chunk size in KiB]: Default chunk size is 256KiB." << std::endl;
+    std::cout << "       [-sustained:seconds]: Measure sustained throughput for N seconds with the DirectStorage queue kept continuously fed" << std::endl;
+    std::cout << "       [-validate]: Compare decompressed output against the uncompressed input on the first run" << std::endl;
 }
 
 static uint64_t GetProcessCycleTime()
@@ -292,131 +73,49 @@ TestResult RunTest(
         std::abort();
     }
 
-    // The staging buffer size must be set before any queues are created.
-    std::cout << "  " << stagingSizeMiB << " MiB staging buffer: ";
-    uint32_t stagingBufferSizeBytes = stagingSizeMiB * 1024 * 1024;
-    check_hresult(factory->SetStagingBufferSize(stagingBufferSizeBytes));
+    DStorageTestContext ctx(factory, stagingSizeMiB, metadata.UncompressedSize);
 
-    if (metadata.LargestCompressedChunkSize > stagingBufferSizeBytes)
+    std::cout << "  " << stagingSizeMiB << " MiB staging buffer: ";
+    if (metadata.LargestCompressedChunkSize > ctx.StagingBufferSizeBytes)
     {
         std::cout << " SKIPPED! " << std::endl;
         return {0, 0};
     }
 
-    com_ptr<ID3D12Device> device;
-    check_hresult(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&device)));
-
-    // Create a DirectStorage queue which will be used to load data into a
-    // buffer on the GPU.
-    DSTORAGE_QUEUE_DESC queueDesc{};
-    queueDesc.Capacity = DSTORAGE_MAX_QUEUE_CAPACITY;
-    queueDesc.Priority = DSTORAGE_PRIORITY_NORMAL;
-    queueDesc.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-    queueDesc.Device = device.get();
-
-    com_ptr<IDStorageQueue> queue;
-    check_hresult(factory->CreateQueue(&queueDesc, IID_PPV_ARGS(queue.put())));
-
-    // Create the ID3D12Resource buffer which will be populated with the file's contents
-    D3D12_HEAP_PROPERTIES bufferHeapProps = {};
-    bufferHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC bufferDesc = {};
-    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufferDesc.Width = metadata.UncompressedSize;
-    bufferDesc.Height = 1;
-    bufferDesc.DepthOrArraySize = 1;
-    bufferDesc.MipLevels = 1;
-    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
-    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    bufferDesc.SampleDesc.Count = 1;
-
-    com_ptr<ID3D12Resource> bufferResource;
-    check_hresult(device->CreateCommittedResource(
-        &bufferHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_COMMON,
-        nullptr,
-        IID_PPV_ARGS(bufferResource.put())));
-
-    // Configure a fence to be signaled when the request is completed
-    com_ptr<ID3D12Fence> fence;
-    check_hresult(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())));
-
-    ScopedHandle fenceEvent(CreateEvent(nullptr, FALSE, FALSE, nullptr));
     uint64_t fenceValue = 1;
-
     double meanBandwidth = 0;
     uint64_t meanCycleTime = 0;
 
     for (int i = 0; i < numRuns; ++i)
     {
-        check_hresult(fence->SetEventOnCompletion(fenceValue, fenceEvent.get()));
+        check_hresult(ctx.Fence->SetEventOnCompletion(fenceValue, ctx.FenceEvent.get()));
 
-        // Enqueue requests to load each compressed chunk.
-        uint32_t destOffset = 0;
-        for (auto const& chunk : metadata.Chunks)
+        if (metadata.Chunks.size() >= (DSTORAGE_MAX_QUEUE_CAPACITY / 2))
         {
-            DSTORAGE_REQUEST request = {};
-            request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-            request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
-            request.Options.CompressionFormat = compressionFormat;
-            request.Source.File.Source = file.get();
-            request.Source.File.Offset = chunk.Offset;
-            request.Source.File.Size = chunk.CompressedSize;
-            request.UncompressedSize = chunk.UncompressedSize;
-            request.Destination.Buffer.Resource = bufferResource.get();
-            request.Destination.Buffer.Offset = destOffset;
-            request.Destination.Buffer.Size = chunk.UncompressedSize;
-            queue->EnqueueRequest(&request);
-            destOffset += request.UncompressedSize;
+            std::cout << "The number of requests exceeds half the queue capacity. This would result in auto-submit. ("
+                      << DSTORAGE_MAX_QUEUE_CAPACITY / 2 << ")." << std::endl;
         }
 
+        // Enqueue requests to load each compressed chunk.
+        EnqueueChunks(ctx.Queue.get(), file.get(), compressionFormat, ctx.BufferResource.get(), metadata);
+
         // Signal the fence when done
-        queue->EnqueueSignal(fence.get(), fenceValue);
+        ctx.Queue->EnqueueSignal(ctx.Fence.get(), fenceValue);
 
         auto startTime = std::chrono::high_resolution_clock::now();
         auto startCycleTime = GetProcessCycleTime();
 
         // Tell DirectStorage to start executing all queued items.
-        queue->Submit();
+        ctx.Queue->Submit();
 
         // Wait for the submitted work to complete
-        WaitForSingleObject(fenceEvent.get(), INFINITE);
+        WaitForSingleObject(ctx.FenceEvent.get(), INFINITE);
 
         auto endCycleTime = GetProcessCycleTime();
         auto endTime = std::chrono::high_resolution_clock::now();
 
-        if (fence->GetCompletedValue() == (uint64_t)-1)
-        {
-            // Device removed!  Give DirectStorage a chance to detect the error.
-            Sleep(5);
-        }
+        ctx.TerminateIfError();
 
-        // If an error was detected the first failure record
-        // can be retrieved to get more details.
-        DSTORAGE_ERROR_RECORD errorRecord{};
-        queue->RetrieveErrorRecord(&errorRecord);
-        if (FAILED(errorRecord.FirstFailure.HResult))
-        {
-            //
-            // errorRecord.FailureCount - The number of failed requests in the queue since the last
-            //                            RetrieveErrorRecord call.
-            // errorRecord.FirstFailure - Detailed record about the first failed command in the enqueue order.
-            //
-            std::cout << "The DirectStorage request failed! HRESULT=0x" << std::hex << errorRecord.FirstFailure.HResult
-                      << std::endl;
-
-            if (errorRecord.FirstFailure.CommandType == DSTORAGE_COMMAND_TYPE_REQUEST)
-            {
-                auto& r = errorRecord.FirstFailure.Request.Request;
-
-                std::cout << std::dec << "   " << r.Source.File.Offset << "   " << r.Source.File.Size << std::endl;
-            }
-            std::terminate();
-        }
-        else
         {
             auto duration = endTime - startTime;
 
@@ -430,6 +129,7 @@ TestResult RunTest(
 
             std::cout << ".";
         }
+
         ++fenceValue;
     }
 
@@ -442,6 +142,110 @@ TestResult RunTest(
     return {meanBandwidth, meanCycleTime};
 }
 
+TestResult RunSustainedThroughputTest(
+    IDStorageFactory* factory,
+    uint32_t stagingSizeMiB,
+    wchar_t const* sourceFilename,
+    DSTORAGE_COMPRESSION_FORMAT compressionFormat,
+    Metadata const& metadata,
+    uint32_t durationSeconds)
+{
+    com_ptr<IDStorageFile> file;
+
+    HRESULT hr = factory->OpenFile(sourceFilename, IID_PPV_ARGS(file.put()));
+    if (FAILED(hr))
+    {
+        std::wcout << L"The file '" << sourceFilename << L"' could not be opened. HRESULT=0x" << std::hex << hr
+                   << std::endl;
+        std::abort();
+    }
+
+    std::cout << "  " << stagingSizeMiB << " MiB staging buffer: ";
+    DStorageTestContext ctx(factory, stagingSizeMiB, metadata.UncompressedSize);
+    if (metadata.LargestCompressedChunkSize > ctx.StagingBufferSizeBytes)
+    {
+        std::cout << " SKIPPED! " << std::endl;
+        return {0, 0};
+    }
+
+    // Running total of requests currently enqueued across all in-flight passes.
+    // Incremented in enqueuePass, decremented after each fence signals to
+    // reflect only the requests still live in the queue.
+    uint32_t totalEnqueuedRequests = 0;
+
+    // Helper: enqueue all chunks for one pass and signal the given fence value.
+    // Does NOT call Submit().
+    auto enqueuePass = [&](uint64_t signalValue)
+    {
+        totalEnqueuedRequests += static_cast<uint32_t>(metadata.Chunks.size());
+        if (totalEnqueuedRequests >= (DSTORAGE_MAX_QUEUE_CAPACITY / 2))
+        {
+            std::cout << "The number of requests exceeds half the queue capacity. This would result in auto-submit. (" << DSTORAGE_MAX_QUEUE_CAPACITY / 2 << ")." << std::endl;
+        }
+
+        EnqueueChunks(ctx.Queue.get(), file.get(), compressionFormat, ctx.BufferResource.get(), metadata);
+        ctx.Queue->EnqueueSignal(ctx.Fence.get(), signalValue);
+    };
+
+    using dseconds = std::chrono::duration<double>;
+    const dseconds targetDuration(durationSeconds);
+
+    int numBatches = 1;
+    uint64_t fenceValue = 1;
+
+    // Enqueue the first batch, start the clock, then submit. The loop below
+    // will immediately pre-submit batch 2 before waiting on batch 1, keeping
+    // the pipeline continuously fed from the very first submit onwards.
+    enqueuePass(fenceValue);
+    auto measureStart = std::chrono::high_resolution_clock::now();
+    auto measureStartCycles = GetProcessCycleTime();
+    ctx.Queue->Submit();
+
+    while (true)
+    {
+        // Pre-submit the next batch before waiting on the current one,
+        // keeping the decompressor continuously fed.
+        uint64_t nextFenceValue = fenceValue + 1;
+        enqueuePass(nextFenceValue);
+        ctx.Queue->Submit();
+
+        check_hresult(ctx.Fence->SetEventOnCompletion(fenceValue, ctx.FenceEvent.get()));
+        WaitForSingleObject(ctx.FenceEvent.get(), INFINITE);
+
+        ctx.TerminateIfError();
+
+        // The completed pass's requests have been retired from the queue.
+        totalEnqueuedRequests -= static_cast<uint32_t>(metadata.Chunks.size());
+
+        ++numBatches;
+        fenceValue = nextFenceValue;
+
+        double elapsedSeconds = std::chrono::duration_cast<dseconds>(std::chrono::high_resolution_clock::now() - measureStart).count();
+
+        if (elapsedSeconds >= static_cast<double>(durationSeconds))
+            break;
+    }
+
+    // Wait for the final pre-submitted batch to complete
+    check_hresult(ctx.Fence->SetEventOnCompletion(fenceValue, ctx.FenceEvent.get()));
+    WaitForSingleObject(ctx.FenceEvent.get(), INFINITE);
+
+    ctx.TerminateIfError();
+
+    auto measureEnd = std::chrono::high_resolution_clock::now();
+    uint64_t measureEndCycles = GetProcessCycleTime();
+
+    double totalElapsedSeconds = std::chrono::duration_cast<dseconds>(measureEnd - measureStart).count();
+    double totalUncompressedBytes = static_cast<double>(metadata.UncompressedSize) * numBatches;
+    double bandwidth = (totalUncompressedBytes / totalElapsedSeconds) / 1e9;
+    uint64_t meanCycles = (measureEndCycles - measureStartCycles) / numBatches;
+
+    std::cout << "  " << bandwidth << " GB/s"
+              << " mean cycle time: " << std::dec << meanCycles << " (" << numBatches << " batches)" << std::endl;
+
+    return {bandwidth, meanCycles};
+}
+
 int wmain(int argc, wchar_t* argv[])
 {
     enum class TestCase
@@ -451,16 +255,21 @@ int wmain(int argc, wchar_t* argv[])
         CpuZLib,
 #endif
         CpuGDeflate,
-        GpuGDeflate
+        GpuGDeflate,
+        CpuZstd,
+        GpuZstd
     };
 
-    TestCase testCases[] =
-    { TestCase::Uncompressed,
+    TestCase testCases[] = {
+        TestCase::Uncompressed,
 #if USE_ZLIB
-      TestCase::CpuZLib,
+        TestCase::CpuZLib,
 #endif
-      TestCase::CpuGDeflate,
-      TestCase::GpuGDeflate };
+        TestCase::CpuGDeflate,
+        TestCase::GpuGDeflate,
+        TestCase::CpuZstd,
+        TestCase::GpuZstd
+        };
 
     if (argc < 2)
     {
@@ -469,32 +278,102 @@ int wmain(int argc, wchar_t* argv[])
     }
 
     const wchar_t* originalFilename = argv[1];
-    std::wstring gdeflateFilename = std::wstring(originalFilename) + L".gdeflate";
 
+    std::wstring uncompressedFilename = std::wstring(originalFilename) + L".uncompressed";
+    std::wstring gdeflateFilename = std::wstring(originalFilename) + L".gdeflate";
+    std::wstring zstdFilename = std::wstring(originalFilename) + L".zstd";
 #if USE_ZLIB
     std::wstring zlibFilename = std::wstring(originalFilename) + L".zlib";
 #endif
 
-    uint32_t chunkSizeMiB = 16;
-    if (argc > 2)
+    std::filesystem::path inputPath = argv[1];
+    std::vector<std::filesystem::path> inputFiles;
+    if (std::filesystem::is_directory(inputPath))
     {
-        chunkSizeMiB = _wtoi(argv[2]);
-        if (chunkSizeMiB == 0)
+        std::wcout << "Directory of files has been specified, archives will be built using all the files found in this directory." << std::endl;
+        std::error_code ec;
+        std::filesystem::directory_iterator dirIter(inputPath, ec);
+        if (ec)
+        {
+            std::cerr << "Error reading directory: " << ec.message() << std::endl;
+            return -1;
+        }
+
+        for (const auto& entry : dirIter)
+        {
+            if (std::filesystem::is_regular_file(entry.status()))
+            {
+                inputFiles.push_back(entry.path());
+            }
+        }
+    }
+    else
+    {
+        std::wcout << "Single file has been specified, archive will be built using this file." << std::endl;
+        inputFiles.push_back(inputPath);
+    }
+
+    uint32_t chunkSizeKiB = 256; // 256 KiB
+    bool bValidate = false;
+    uint32_t sustainedDurationSeconds = 0;
+
+    for (int i = 2; i < argc; ++i)
+    {
+        constexpr wchar_t kChunkSizePrefix[] = L"-chunksize:";
+        constexpr size_t kChunkSizePrefixLen = std::size(kChunkSizePrefix) - 1;
+
+        constexpr wchar_t kSustainedPrefix[] = L"-sustained:";
+        constexpr size_t kSustainedPrefixLen = std::size(kSustainedPrefix) - 1;
+
+        if (_wcsnicmp(argv[i], kChunkSizePrefix, kChunkSizePrefixLen) == 0)
+        {
+            chunkSizeKiB = _wtoi(argv[i] + kChunkSizePrefixLen);
+            if (chunkSizeKiB == 0)
+            {
+                ShowHelpText();
+                std::wcout << L"Invalid chunk size: " << (argv[i] + kChunkSizePrefixLen) << std::endl;
+                return -1;
+            }
+        }
+        else if (_wcsicmp(argv[i], L"-validate") == 0)
+        {
+            bValidate = true;
+        }
+        else if (_wcsnicmp(argv[i], kSustainedPrefix, kSustainedPrefixLen) == 0)
+        {
+            sustainedDurationSeconds = _wtoi(argv[i] + kSustainedPrefixLen);
+            if (sustainedDurationSeconds == 0)
+            {
+                ShowHelpText();
+                std::wcout << L"Invalid sustained duration: " << (argv[i] + kSustainedPrefixLen) << std::endl;
+                return -1;
+            }
+        }
+        else
         {
             ShowHelpText();
-            std::wcout << std::endl << L"Invalid chunk size: " << argv[2] << std::endl;
+            std::wcout << L"Unknown argument: " << argv[i] << std::endl;
             return -1;
         }
     }
-    uint32_t chunkSizeBytes = chunkSizeMiB * 1024 * 1024;
 
-    Metadata uncompressedMetadata = GenerateUncompressedMetadata(originalFilename, chunkSizeBytes);
-    Metadata gdeflateMetadata =
-        Compress(DSTORAGE_COMPRESSION_FORMAT_GDEFLATE, originalFilename, gdeflateFilename.c_str(), chunkSizeBytes);
+    if (bValidate)
+    {
+        std::wcout << "Validation is enabled. The decompressed output will be compared against the original uncompressed file." << std::endl;
+    }
 
+    if (sustainedDurationSeconds > 0)
+    {
+        std::wcout << "Sustained mode enabled. Throughput will be measured for " << sustainedDurationSeconds << " second(s) with the queue kept continuously fed." << std::endl;
+    }
+
+    uint32_t chunkSizeBytes = chunkSizeKiB * 1024;
+
+    Metadata uncompressedMetadata = CompressToArchive(DSTORAGE_COMPRESSION_FORMAT_NONE, inputFiles, uncompressedFilename.c_str(), chunkSizeBytes, bValidate);
+    Metadata gdeflateMetadata = CompressToArchive(DSTORAGE_COMPRESSION_FORMAT_GDEFLATE, inputFiles, gdeflateFilename.c_str(), chunkSizeBytes, bValidate);
+    Metadata zstdMetadata = CompressToArchive(DSTORAGE_COMPRESSION_FORMAT_ZSTD, inputFiles, zstdFilename.c_str(), chunkSizeBytes, bValidate);
 #if USE_ZLIB
-    Metadata zlibMetadata =
-        Compress(DSTORAGE_CUSTOM_COMPRESSION_0, originalFilename, zlibFilename.c_str(), chunkSizeBytes);
+    Metadata zlibMetadata = CompressToArchive(DSTORAGE_CUSTOM_COMPRESSION_0, inputFiles, zlibFilename.c_str(), chunkSizeBytes, bValidate);
 #endif
 
     constexpr uint32_t MAX_STAGING_BUFFER_SIZE = 1024;
@@ -522,7 +401,7 @@ int wmain(int argc, wchar_t* argv[])
             compressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
             numRuns = 10;
             metadata = &uncompressedMetadata;
-            filename = originalFilename;
+            filename = uncompressedFilename.c_str();
             std::cout << "Uncompressed:" << std::endl;
             break;
 
@@ -559,6 +438,25 @@ int wmain(int argc, wchar_t* argv[])
             std::cout << "GPU GDEFLATE:" << std::endl;
             break;
 
+        case TestCase::CpuZstd:
+            compressionFormat = DSTORAGE_COMPRESSION_FORMAT_ZSTD;
+            numRuns = 5;
+
+            config.DisableGpuDecompression = true;
+
+            metadata = &zstdMetadata;
+            filename = zstdFilename.c_str();
+            std::cout << "CPU ZSTD:" << std::endl;
+            break;
+
+        case TestCase::GpuZstd:
+            compressionFormat = DSTORAGE_COMPRESSION_FORMAT_ZSTD;
+            numRuns = 10;
+            metadata = &zstdMetadata;
+            filename = zstdFilename.c_str();
+            std::cout << "GPU ZSTD:" << std::endl;
+            break;
+
         default:
             std::terminate();
         }
@@ -572,12 +470,48 @@ int wmain(int argc, wchar_t* argv[])
 
         CustomDecompression customDecompression(factory.get(), std::thread::hardware_concurrency());
 
+        // Validation pass - runs once before benchmarking
+        if (bValidate)
+        {
+            uint32_t validationStagingMiB = 1;
+            while ((validationStagingMiB * 1024) < chunkSizeKiB)
+                validationStagingMiB *= 2;
+
+            std::cout << "  Validating decompressed output ... ";
+            bool passed = ValidateDecompression(
+                factory.get(),
+                validationStagingMiB,
+                filename,
+                uncompressedFilename.c_str(),
+                compressionFormat,
+                *metadata);
+
+            if (passed)
+            {
+                std::cout << " PASSED." << std::endl;
+            }
+            else
+            {
+                std::cerr << " FAILED! Decompressed output does not match original." << std::endl;
+                std::terminate();
+            }
+        }
+
         for (uint32_t stagingSizeMiB = 1; stagingSizeMiB <= MAX_STAGING_BUFFER_SIZE; stagingSizeMiB *= 2)
         {
-            if (stagingSizeMiB < chunkSizeMiB)
+            if ((stagingSizeMiB *1024) < chunkSizeKiB)
                 continue;
 
-            TestResult data = RunTest(factory.get(), stagingSizeMiB, filename, compressionFormat, *metadata, numRuns);
+            TestResult data = {};
+
+            if (sustainedDurationSeconds > 0)
+            {
+                data = RunSustainedThroughputTest(factory.get(), stagingSizeMiB, filename, compressionFormat, *metadata, sustainedDurationSeconds);
+            }
+            else
+            {
+                data = RunTest(factory.get(), stagingSizeMiB, filename, compressionFormat, *metadata, numRuns);
+            }
 
             results.push_back({testCase, stagingSizeMiB, data});
         }
@@ -589,7 +523,7 @@ int wmain(int argc, wchar_t* argv[])
     std::wstringstream cycles;
 
     std::wstring header =
-        L"\"Staging Buffer Size MiB\"\t\"Uncompressed\"\t\"ZLib\"\t\"CPU GDEFLATE\"\t\"GPU GDEFLATE\"";
+        L"\"Staging Buffer Size MiB\"\t\"Uncompressed\"\t\"ZLib\"\t\"CPU GDEFLATE\"\t\"GPU GDEFLATE\"\t\"CPU ZSTD\"\t\"GPU ZSTD\"";
     bandwidth << header << std::endl;
     cycles << header << std::endl;
 
@@ -656,6 +590,7 @@ int wmain(int argc, wchar_t* argv[])
     combined << "ZLib" << "\tn/a\tn/a" << std::endl;
 #endif
     ratioLine("GDEFLATE", gdeflateMetadata);
+    ratioLine("ZSTD", zstdMetadata);
 
     combined << std::endl;
 
