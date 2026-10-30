@@ -622,7 +622,7 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
         // NOTE(pamartis): When GPU output data is potentially broken, compute it on CPU (to debug) using same inputs as on GPU
         {
             zstdgpu_DecompressSequences_SRT srt;
-            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0);
+            zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ 0, /* fseArenaStreamCount */ 0);
             srt.inCompressedData                = cpuRes.CompressedData;
             srt.inoutDecompressedSequenceLLen   = cpuRes.DecompressedSequenceLLen;
             srt.inoutDecompressedSequenceMLen   = cpuRes.DecompressedSequenceMLen;
@@ -651,9 +651,14 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
                 cpuRes.BlockSizePrefix[dstBlockIndex] = cpuRes.BlocksRLERefs[i].size;;
             }
 
+            // Sequence tables are rebuilt from the FSE seeds into the CPU-side arena, because GPU `FseElems` does not
+            // hold them for batches that decoded with the FSE arena.
+            srt.inoutFseArena = cpuRes.FseArena;
+            srt.fseArenaStreamCount = zstdgpu_FseArena_StreamCount(cpuRes.Counters->Blocks_CMP, kzstdgpu_FseArena_MinStreamCapacity);
+            memset(cpuRes.FseArena, 0, zstdgpu_FseArena_HeaderDwCount(srt.fseArenaStreamCount) * sizeof(uint32_t));
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams; ++i)
             {
-                zstdgpu_ShaderEntry_DecompressSequences_MultiStream(srt, /* groupId */ i, /* threadId */ 0, /* streamsPerGroup */ 1);
+                zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(srt, /* groupId */ i, /* threadId */ 0, /* tgSize */ 1, /* streamsPerGroup */ 1, /* cacheDwordsPerStream */ 64);
             }
             // Compute prefix sum of block sizes
             const uint32_t allBlockCount = cpuRes.Counters->Blocks_CMP
@@ -826,7 +831,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
                                      + zstdRleBlockCount
                                      + zstdCmpBlockCount;
 
-    zstdgpu_ResourceInfo_Stage_1_Init(&zstdInfo, zstdRawBlockCount, zstdRleBlockCount, zstdCmpBlockCount);
+    zstdgpu_ResourceInfo_Stage_1_Init(&zstdInfo, zstdRawBlockCount, zstdRleBlockCount, zstdCmpBlockCount, /* fseArenaStreamCapacity */ kzstdgpu_FseArena_MinStreamCapacity);
     zstdgpu_ResourceDataCpu_InitFromHeap(&zstdCpu, &zstdInfo);
 
     // NOTE(pamartis):On CPU, lookback regions for PerFrameBlockCount{RAW,RLE,CMP,All} and
@@ -949,28 +954,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
             zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
         }
 
-        tableStartIndex += zstdCmpBlockCount;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseLLen), /* tableType */1);
-        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartLLen(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_LLen);
-        for (uint32_t i = 0; i < CNTRS(FseLLen); ++i)
-        {
-            zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
-        }
-
-        tableStartIndex += zstdCmpBlockCount + 1 /* + 1 accounts for default table */;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseOffs), /* tableType */2);
-        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartOffs(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_Offs);
-        for (uint32_t i = 0; i < CNTRS(FseOffs); ++i)
-        {
-            zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
-        }
-        tableStartIndex += zstdCmpBlockCount + 1 /* + 1 accounts for default table */;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(FseMLen), /* tableType */3);
-        zstdgpu_Srt_FillInline(srt, /* tableStartIndex */ tableStartIndex, /* tableDataStart */zstdgpu_ComputeFseDataStartMLen(0, zstdCmpBlockCount), /* tableDataCount */ kzstdgpu_FseElemMaxCount_MLen);
-        for (uint32_t i = 0; i < CNTRS(FseMLen); ++i)
-        {
-            zstdgpu_ShaderEntry_InitFseTable(srt, i, 0);
-        }
+        // The sequence tables are built into the FSE arena by [Decompress Sequences].
         VALIDATE(FseTables, &zstdCpu);
     }
 
@@ -1019,7 +1003,9 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_DecompressSequences_SRT srt;
-        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams));
+        zstdgpu_Srt_Fill(srt, zstdCpu, /* tgOffset */0, /* workItemCount */CNTRS(Seq_Streams), zstdInfo.FseArena_StreamCount);
+        // Marks every FSE arena slot as free.
+        memset(zstdCpu.FseArena, 0, zstdgpu_FseArena_HeaderDwCount(zstdInfo.FseArena_StreamCount) * sizeof(uint32_t));
         for (uint32_t i = 0; i < CNTRS(Seq_Streams); ++i)
         {
             zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(srt, /* groupId */ i, /* threadId */ 0, /* tgSize */ 1, /* streamsPerGroup */ 1, /* cacheDwordsPerStream */ 64);

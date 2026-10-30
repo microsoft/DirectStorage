@@ -262,6 +262,7 @@ ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(DecompressSequences, Indirect)
     ZSTDGPU_SRT_USE_BIND_GROUP(SequenceOutputs)
+    ZSTDGPU_SRT_USE_BIND_GROUP(FseProbsRead)
 
     ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_Counters              , Counters                      )
     ZSTDGPU_SRT_BUF_RO_BYTE(CompressedData)
@@ -273,9 +274,11 @@ ZSTDGPU_SRT_BEGIN(DecompressSequences, Indirect)
     ZSTDGPU_SRT_BUF_RO_STRUCT(zstdgpu_FseInfo               , FseInfos                      )
     ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , PerSeqStreamSeqStart          )
     ZSTDGPU_SRT_BUF_RO_STRUCT(uint32_t                      , FseElems                      )
+    ZSTDGPU_SRT_BUF_RW_STRUCT(uint32_t                      , FseArena                      )
 
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , tgOffset                      )
     ZSTDGPU_SRT_CONST_INDIRECT(uint32_t                     , workItemCount                 )
+    ZSTDGPU_SRT_CONST(uint32_t                              , fseArenaStreamCount           )
 ZSTDGPU_SRT_END()
 
 ZSTDGPU_SRT_BEGIN(FinaliseSequenceOffsets, Indirect)
@@ -397,6 +400,10 @@ ZSTDGPU_SRT_PASS_END()
 
 ZSTDGPU_SRT_PASS_BEGIN(Memset, BlockCountAllLookback, Direct)
     ZSTDGPU_SRT_BIND(Dest, PerFrameBlockCountAllLookback)
+ZSTDGPU_SRT_PASS_END()
+
+ZSTDGPU_SRT_PASS_BEGIN(Memset, FseArenaHeader, Direct)
+    ZSTDGPU_SRT_BIND(Dest, FseArena)
 ZSTDGPU_SRT_PASS_END()
 
 ZSTDGPU_SRT_PASS_BEGIN(Memset, RawBlockSizePrefixLookback, Indirect)

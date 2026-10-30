@@ -125,7 +125,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , LitGroupEndPerHuffmanTableLookback) \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset1Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset2Lookback)  \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)
+    ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)  \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )
 
 #define ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()     \
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()      \
@@ -178,6 +179,9 @@ typedef struct zstdgpu_ResourceInfo
     uint64_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
     uint64_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
     uint64_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+
+    // The number of sequence streams the FSE arena holds tables for (0 when the arena is unused).
+    uint32_t FseArena_StreamCount;
 
     // declare byte offsets
     #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpuOnlyByteOffset;
@@ -302,7 +306,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
 
-static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
+static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount, uint32_t fseArenaStreamCapacity)
 {
     const uint32_t BlocksRAWRefs_Count = rawBlockCount;
     const uint32_t BlocksRLERefs_Count = rleBlockCount;
@@ -334,9 +338,18 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t NonRLE_FseTableCount = cmpBlockCount * 4 + 3; // 4 FSE tables per compressed block (Huff, LLen, Offs, MLen) + 3 default tables for (LLen, Offs, MLen);
     const uint32_t FseTable_Count = kzstdgpu_FseRleTableCount + NonRLE_FseTableCount;
     const uint32_t FseProbs_Count = NonRLE_FseTableCount * kzstdgpu_MaxCount_FseProbs;
-    const uint32_t FseTableElem_Count = kzstdgpu_FseRleTableCount + cmpBlockCount * (kzstdgpu_FseElemMaxCount_HufW + SeqFseElemMaxCount) + SeqFseElemMaxCount;
+    // With the FSE arena (non-zero capacity), [Decompress Sequences] builds the sequence tables itself,
+    // so only the RLE and Huffman weight tables (which lead the layout) are persisted.
+    const bool usesFseArena = 0 != fseArenaStreamCapacity;
+    const uint32_t FseTableElem_Count = usesFseArena
+                                      ? kzstdgpu_FseRleTableCount + cmpBlockCount * kzstdgpu_FseElemMaxCount_HufW
+                                      : kzstdgpu_FseRleTableCount + cmpBlockCount * (kzstdgpu_FseElemMaxCount_HufW + SeqFseElemMaxCount) + SeqFseElemMaxCount;
 
     const uint32_t FseElems_Count = FseTableElem_Count;
+    outInfo->FseArena_StreamCount = usesFseArena ? zstdgpu_FseArena_StreamCount(cmpBlockCount, fseArenaStreamCapacity) : 0u;
+    // At least one element keeps the buffer bindable when the arena is unused or empty.
+    const uint32_t FseArena_Count = zstdgpu_MaxU32(1u, zstdgpu_FseArena_HeaderDwCount(outInfo->FseArena_StreamCount)
+                                                     + outInfo->FseArena_StreamCount * kzstdgpu_FseArena_StreamDwCount);
 
     const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_MaxCount_HuffmanWeights;
     const uint32_t DecompressedHuffmanWeightCount_Count = cmpBlockCount;
@@ -494,9 +507,9 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpu2Cpu(outInfo);
 }
 
-static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
+static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount, uint32_t fseArenaStreamCapacity)
 {
-    zstdgpu_ResourceInfo_Stage_1_InitSize(outInfo, rawBlockCount, rleBlockCount, cmpBlockCount);
+    zstdgpu_ResourceInfo_Stage_1_InitSize(outInfo, rawBlockCount, rleBlockCount, cmpBlockCount, fseArenaStreamCapacity);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetGpuOnly(outInfo);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetCpu2Gpu(outInfo);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetGpu2Cpu(outInfo);
