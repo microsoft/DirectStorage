@@ -2023,21 +2023,29 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
             ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
         #undef ZSTDGPU_BUFFER
 
-        if (dfltP < dflt)
+        // Release a heap when it is too small or when it is not a single heap shared by all stages (a per-stage submit
+        // creates a heap per stage). A heap that is kept gets its stages laid out again below.
+        if (dfltP < dflt ||
+            req->resData.gpuOnly_Heap[0] != req->resData.gpuOnly_Heap[1] ||
+            req->resData.gpuOnly_Heap[0] != req->resData.gpuOnly_Heap[2])
         {
             D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[0]);
             D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[1]);
             D3D12AID_SAFE_RELEASE(req->resData.gpuOnly_Heap[2]);
         }
 
-        if (upldP < upld)
+        if (upldP < upld ||
+            req->resData.cpu2Gpu_Heap[0] != req->resData.cpu2Gpu_Heap[1] ||
+            req->resData.cpu2Gpu_Heap[0] != req->resData.cpu2Gpu_Heap[2])
         {
             D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[0]);
             D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[1]);
             D3D12AID_SAFE_RELEASE(req->resData.cpu2Gpu_Heap[2]);
         }
 
-        if (rdbkP < rdbk)
+        if (rdbkP < rdbk ||
+            req->resData.gpu2Cpu_Heap[0] != req->resData.gpu2Cpu_Heap[1] ||
+            req->resData.gpu2Cpu_Heap[0] != req->resData.gpu2Cpu_Heap[2])
         {
             D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu_Heap[0]);
             D3D12AID_SAFE_RELEASE(req->resData.gpu2Cpu_Heap[1]);
@@ -2065,6 +2073,18 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
             heap->AddRef();
             heap->AddRef();
         }
+        else if (NULL != req->resData.gpuOnly_Heap[0])
+        {
+            // The heap is reused, but the size of each stage may have changed: lay the stages out again. The last stage
+            // keeps the unused end of the heap, so that the byte counts still add up to the heap size.
+            ID3D12Heap *heap = req->resData.gpuOnly_Heap[0];
+            uint64_t offs = 0;
+            INIT_HEAP(gpuOnly, 0, heap);
+            INIT_HEAP(gpuOnly, 1, heap);
+            INIT_HEAP(gpuOnly, 2, heap);
+            ZSTDGPU_ASSERT(offs == dflt && dflt <= dfltP);
+            req->resData.gpuOnly_ByteCount[2] += dfltP - dflt;
+        }
         // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
         //                 but this must be done at some point
         zstdgpu_ResourceDataGpu_Init_GpuOnly(&req->resData, &req->resInfo, device, 0);
@@ -2082,6 +2102,16 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
             heap->AddRef();
             heap->AddRef();
         }
+        else if (NULL != req->resData.cpu2Gpu_Heap[0])
+        {
+            ID3D12Heap *heap = req->resData.cpu2Gpu_Heap[0];
+            uint64_t offs = 0;
+            INIT_HEAP(cpu2Gpu, 0, heap);
+            INIT_HEAP(cpu2Gpu, 1, heap);
+            INIT_HEAP(cpu2Gpu, 2, heap);
+            ZSTDGPU_ASSERT(offs == upld && upld <= upldP);
+            req->resData.cpu2Gpu_ByteCount[2] += upldP - upld;
+        }
         // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
         //                 but this must be done at some point
         zstdgpu_ResourceDataGpu_Init_CpuToGpu(&req->resData, &req->resInfo, device, 0);
@@ -2098,6 +2128,16 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
             ZSTDGPU_ASSERT(offs == rdbk);
             heap->AddRef();
             heap->AddRef();
+        }
+        else if (NULL != req->resData.gpu2Cpu_Heap[0])
+        {
+            ID3D12Heap *heap = req->resData.gpu2Cpu_Heap[0];
+            uint64_t offs = 0;
+            INIT_HEAP(gpu2Cpu, 0, heap);
+            INIT_HEAP(gpu2Cpu, 1, heap);
+            INIT_HEAP(gpu2Cpu, 2, heap);
+            ZSTDGPU_ASSERT(offs == rdbk && rdbk <= rdbkP);
+            req->resData.gpu2Cpu_ByteCount[2] += rdbkP - rdbk;
         }
         // TODO(pamartis): currently we always re-create buffers because we don't track whether their position changed,
         //                 but this must be done at some point
