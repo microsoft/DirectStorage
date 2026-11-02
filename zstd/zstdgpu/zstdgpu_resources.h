@@ -773,12 +773,72 @@ static void zstdgpu_ResourceDataGpu_Init(zstdgpu_ResourceDataGpu *outResData, co
     zstdgpu_ResourceDataGpu_Init_GpuToCpu(outResData, info, device, stageIndex);
 }
 
-static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+static uint64_t zstdgpu_ResourceDataGpu_GetBufferByteSize(ID3D12Resource *buffer)
 {
-    ZSTDGPU_ASSERT(stageIndex < kzstdgpu_ResourceAllocation_StageCount);
-    if (stageIndex >= kzstdgpu_ResourceAllocation_StageCount)
-        return;
+    return NULL != buffer ? buffer->GetDesc().Width : 0;
+}
 
+// Returns 1 if every buffer of a given stage that the current layout needs already exists and is large enough.
+// Buffers stay at the heap offsets of the layout they were created with, so a stage reuses either all of them or none.
+static uint32_t zstdgpu_ResourceDataGpu_CanReuseBuffers(const zstdgpu_ResourceDataGpu *resData, const zstdgpu_ResourceInfo *info, uint32_t stageIndex)
+{
+    #define ZSTDGPU_BUFFER(type, name)                                                                      \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->gpuOnly.name) < info->name##_ByteSizeInternal) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    #define ZSTDGPU_BUFFER(type, name)                                                                      \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->cpu2Gpu.name) < info->name##_ByteSizeInternal) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    #define ZSTDGPU_BUFFER(type, name)                                                                          \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->gpu2Cpu.name) < ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name)) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    return 1;
+}
+
+// Releases the buffers of a given stage and keeps its heaps.
+static void zstdgpu_ResourceDataGpu_TermBuffers(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+{
     // release the resources
     #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->gpuOnly.name);
         if (stageIndex == 0)
@@ -825,6 +885,15 @@ static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, ui
         }
 
     #undef  ZSTDGPU_BUFFER
+}
+
+static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+{
+    ZSTDGPU_ASSERT(stageIndex < kzstdgpu_ResourceAllocation_StageCount);
+    if (stageIndex >= kzstdgpu_ResourceAllocation_StageCount)
+        return;
+
+    zstdgpu_ResourceDataGpu_TermBuffers(outResData, stageIndex);
 
     // release the heaps
     D3D12AID_SAFE_RELEASE(outResData->gpuOnly_Heap[stageIndex]);

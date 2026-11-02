@@ -1899,6 +1899,12 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
         {
             zstdgpu_ResourceDataGpu_Term(&req->resData, stageIndex);
         }
+        // A single buffer can grow while the stage's heaps do not (e.g. FseElems holds every FSE table in a batch that does
+        // not use the FSE arena). Keep the heaps and recreate all of the stage's buffers at the offsets of the new layout.
+        else if (0 == zstdgpu_ResourceDataGpu_CanReuseBuffers(&req->resData, &req->resInfo, stageIndex))
+        {
+            zstdgpu_ResourceDataGpu_TermBuffers(&req->resData, stageIndex);
+        }
 
         // NOTE(pamartis): try re-creating heap and then resources (will trigger only if they were released or never created)
         zstdgpu_ResourceDataGpu_InitHeap(&req->resData, &req->resInfo, req->device, stageIndex);
