@@ -88,6 +88,11 @@ static void zstdgpu_Srt_Fill_BlockCountAllLookback(zstdgpu_Memset_SRT &srt, cons
     zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.PerFrameBlockCountAllLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
 }
 
+static void zstdgpu_Srt_Fill_FseArenaHeader(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
+{
+    zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.FseArena, cpuRes.DispatchArgs, tgOffset, workItemCount, value);
+}
+
 static void zstdgpu_Srt_Fill_RawBlockSizePrefixLookback(zstdgpu_Memset_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes, uint32_t tgOffset, uint32_t workItemCount, uint32_t value)
 {
     zstdgpu_Srt_Fill(srt, cpuRes, cpuRes.RawBlockSizePrefixLookback, cpuRes.DispatchArgs, tgOffset, workItemCount, value);

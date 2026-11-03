@@ -168,6 +168,7 @@ typedef struct zstdgpu_DecompressSequences_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerSeqStreamFinalOffset1;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerSeqStreamFinalOffset2;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerSeqStreamFinalOffset3;
+    ZSTDGPU_RO_TYPED_BUFFER(int32_t, int16_t)               inFseProbs;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
     ZSTDGPU_RO_RAW_BUFFER(uint32_t)                         inCompressedData;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inSeqStreamToRef;
@@ -178,9 +179,11 @@ typedef struct zstdgpu_DecompressSequences_SRT
     ZSTDGPU_RO_BUFFER(zstdgpu_FseInfo)                      inFseInfos;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamSeqStart;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inFseElems;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFseArena;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inDispatchArgs;
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
+    uint32_t                                                fseArenaStreamCount;
 } zstdgpu_DecompressSequences_SRT;
 
 typedef struct zstdgpu_FinaliseSequenceOffsets_SRT

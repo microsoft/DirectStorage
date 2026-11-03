@@ -3451,6 +3451,8 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 // LDS partitioning macro lists for sequence decompression with in-LDS output caching
 // Cache stores kzstdgpu_DecompressSequences_LdsStoreCache_DwCount triplets (llen, mlen, offs) per stream, laid out as 3 SoA regions.
 // Bank conflicts are avoided via index swizzling
+// With the FSE arena, the caches double as the FSE table build's LDS before decoding starts. The arena
+// adds no LDS of its own: at 12 KB per group, a single extra dword drops NVIDIA Ada from 7 to 6 resident groups.
 #define ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(base, size)      \
     ZSTDGPU_LDS_SIZE(size)                                              \
     ZSTDGPU_LDS_BASE(base)                                              \
@@ -3473,9 +3475,164 @@ static void zstdgpu_ShaderEntry_DecompressSequences_SingleStream(ZSTDGPU_PARAM_I
 #define kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF 1
 #endif
 
+// Whether the kernel builds its LL/OF/ML decode tables in the FSE arena (1, the default) or reads the
+// tables [Init FSE Tables] persisted in FseElems (0).
+#ifndef kzstdgpu_DecompressSequences_FseArena
+#define kzstdgpu_DecompressSequences_FseArena 1
+#define kzstdgpu_DecompressSequences_FseArena_UNDEF 1
+#endif
+
 #include "zstdgpu_lds_decl_size.h"
 ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
 #include "zstdgpu_lds_decl_undef.h"
+
+#if kzstdgpu_DecompressSequences_FseArena
+// Before decoding starts, the store caches hold the group's table build: the FSE index and owner of each
+// build item, the group's arena slot (padded to keep the scratch bank-aligned), then the LDS scratch of each
+// wave that builds tables.
+static const uint32_t kzstdgpu_FseArena_BuildLdsDwCount = 3u * kzstdgpu_DecompressSequences_StreamsPerTG * kzstdgpu_DecompressSequences_LdsStoreCache_DwCount;
+static const uint32_t kzstdgpu_FseArena_BuildSlotDwCount = 32u;
+// A wave's scratch holds the symbol at each table position, the positive-count symbols, and each symbol's next state.
+static const uint32_t kzstdgpu_FseArena_BuildScratchDwCount = kzstdgpu_MaxCount_FseElems + 2u * kzstdgpu_MaxCount_FseProbs;
+
+static uint32_t zstdgpu_FseArena_LoadFseIdx(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt, uint32_t seqStreamIdx, uint32_t tableType)
+{
+    if (tableType == 0)
+        return srt.inSeqStreamToLLenFseId[seqStreamIdx];
+    else if (tableType == 1)
+        return srt.inSeqStreamToOffsFseId[seqStreamIdx];
+    return srt.inSeqStreamToMLenFseId[seqStreamIdx];
+}
+
+static uint32_t zstdgpu_FseArena_TableOffset(uint32_t tableType)
+{
+    return tableType == 0 ? kzstdgpu_FseArena_StreamOffsetLLen
+                          : (tableType == 1 ? kzstdgpu_FseArena_StreamOffsetOffs : kzstdgpu_FseArena_StreamOffsetMLen);
+}
+
+// Narrows `match`, a mask of the wave's first 32 lanes, to the lanes whose `value` agrees with this lane's in bit `bit`.
+static uint32_t zstdgpu_FseArena_WaveMatchBit(uint32_t match, uint32_t value, uint32_t bit)
+{
+    const bool isSet = 0u != ((value >> bit) & 1u);
+    return match & (WaveActiveBallot(isSet).x ^ (isSet ? 0u : ~0u));
+}
+
+// Builds one LL/OF/ML decode table into the arena at `dst` from its normalized distribution in FseProbs
+// with the canonical zstd construction, bit-identical to zstdgpu_ShaderEntry_InitFseTable. The calling
+// wave builds the table cooperatively in `scratch`, `kzstdgpu_FseArena_BuildScratchDwCount` dwords of LDS
+// it owns, and stores each run of consecutive table elements with one coalesced store.
+static void zstdgpu_FseArena_BuildTable(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSequences_SRT) srt,
+                                        uint32_t fseIdx,
+                                        uint32_t dst,
+                                        zstdgpu_lds_uintptr_t scratch,
+                                        uint32_t laneIdx,
+                                        uint32_t laneCnt)
+{
+    if (fseIdx < kzstdgpu_FseRleTableCount)
+    {
+        // RLE table: a single element whose symbol is the table index.
+        if (0 == laneIdx)
+            srt.inoutFseArena[dst] = zstdgpu_PackFseElem(fseIdx, 0, 0);
+        return;
+    }
+
+    const zstdgpu_lds_uintptr_t spread     = scratch;
+    const zstdgpu_lds_uintptr_t positive   = scratch + kzstdgpu_MaxCount_FseElems;
+    const zstdgpu_lds_uintptr_t symbolNext = positive + kzstdgpu_MaxCount_FseProbs;
+
+    const uint32_t info         = srt.inFseInfos[fseIdx].fseProbCountAndAccuracyLog2;
+    const uint32_t accuracyLog2 = info >> 8u;
+    const uint32_t frqCount     = zstdgpu_MinU32(info & 0xffu, kzstdgpu_MaxCount_FseProbs);
+    const uint32_t frqOffset    = (fseIdx - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t tblCount     = zstdgpu_MinU32(1u << accuracyLog2, kzstdgpu_MaxCount_FseElems);
+    const uint32_t step         = (tblCount >> 1) + (tblCount >> 3) + 3;
+    const uint32_t mask         = tblCount - 1;
+
+    // Phase 0: lay low-probability (-1) symbols at the table top in symbol order, list the positive-count
+    // symbols with the first spread index of each (`symbol << 24 | index`), and seed each symbol's next
+    // state with its count.
+    uint32_t lowCount = 0;
+    uint32_t positiveCount = 0;
+    uint32_t spreadCount = 0;
+    for (uint32_t symbolBase = 0; symbolBase < frqCount; symbolBase += laneCnt)
+    {
+        const uint32_t symbol = symbolBase + laneIdx;
+        const int32_t prob = symbol < frqCount ? (int32_t)srt.inFseProbs[frqOffset + symbol] : 0;
+        const bool isLow = prob == -1;
+        const bool isPositive = prob > 0;
+        const uint32_t count = isPositive ? zstdgpu_MinU32((uint32_t)prob, tblCount) : 0u;
+        const uint32_t lowIdx = lowCount + WavePrefixCountBits(isLow);
+        const uint32_t positiveIdx = positiveCount + WavePrefixCountBits(isPositive);
+        const uint32_t spreadIdx = spreadCount + WavePrefixSum(count);
+        if (isLow && lowIdx < tblCount)
+            zstdgpu_LdsStoreU32(spread + (tblCount - 1u - lowIdx), symbol);
+        if (isPositive)
+            zstdgpu_LdsStoreU32(positive + positiveIdx, (symbol << 24) | spreadIdx);
+        if (symbol < frqCount)
+            zstdgpu_LdsStoreU32(symbolNext + symbol, isLow ? 1u : ((uint32_t)prob & 0xffffu));
+        lowCount += WaveActiveCountBits(isLow);
+        positiveCount += WaveActiveCountBits(isPositive);
+        spreadCount += WaveActiveSum(count);
+    }
+
+    // Phase 1: spread the positive-count symbols over the positions below the low-probability ones with
+    // the zstd step walk. Walk step `r` lands on `(r * step) & mask`, and the steps landing below the
+    // low-probability symbols take consecutive spread indices, so each lane finds its symbol by search.
+    const uint32_t positionCount = tblCount - zstdgpu_MinU32(lowCount, tblCount);
+    const uint32_t spreadEnd = zstdgpu_MinU32(spreadCount, positionCount);
+    uint32_t spreadBase = 0;
+    for (uint32_t stepBase = 0; stepBase < tblCount; stepBase += laneCnt)
+    {
+        const uint32_t stepIdx = stepBase + laneIdx;
+        const uint32_t pos = (stepIdx * step) & mask;
+        const bool isSpread = stepIdx < tblCount && pos < positionCount;
+        const uint32_t spreadIdx = spreadBase + WavePrefixCountBits(isSpread);
+        spreadBase += WaveActiveCountBits(isSpread);
+        if (isSpread && spreadIdx < spreadEnd)
+        {
+            // The last positive-count symbol whose first spread index is not above `spreadIdx`.
+            uint32_t first = 0;
+            uint32_t count = positiveCount;
+            while (count > 1u)
+            {
+                const uint32_t half = count >> 1;
+                const uint32_t mid = first + half;
+                first = (zstdgpu_LdsLoadU32(positive + mid) & 0x00ffffffu) <= spreadIdx ? mid : first;
+                count -= half;
+            }
+            zstdgpu_LdsStoreU32(spread + pos, zstdgpu_LdsLoadU32(positive + first) >> 24);
+        }
+    }
+
+    // Phase 2: a position's next state is its symbol's count plus the number of earlier positions holding
+    // the symbol. Lanes count the earlier positions within their run of (up to 32) positions by matching
+    // the 6 symbol bits across the wave, and the last lane of each symbol advances its next state.
+    const uint32_t runCnt = zstdgpu_MinU32(laneCnt, 32u);
+    for (uint32_t posBase = 0; posBase < tblCount; posBase += runCnt)
+    {
+        const uint32_t pos = posBase + laneIdx;
+        const bool inTable = laneIdx < runCnt && pos < tblCount;
+        const uint32_t symbol = inTable ? (zstdgpu_LdsLoadU32(spread + pos) & 63u) : 0u;
+        uint32_t match = WaveActiveBallot(inTable).x;
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 0u);
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 1u);
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 2u);
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 3u);
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 4u);
+        match = zstdgpu_FseArena_WaveMatchBit(match, symbol, 5u);
+        if (inTable)
+        {
+            const uint32_t rank = zstdgpu_CountBitsU32(match & ((1u << laneIdx) - 1u));
+            const uint32_t next = zstdgpu_LdsLoadU32(symbolNext + symbol);
+            const uint32_t nstate = next + rank;
+            const uint32_t bitcnt = accuracyLog2 - zstdgpu_FindFirstBitHiU32(nstate);
+            srt.inoutFseArena[dst + pos] = zstdgpu_PackFseElem(symbol, bitcnt, (nstate << bitcnt) - tblCount);
+            if (0u == (match >> laneIdx >> 1u))
+                zstdgpu_LdsStoreU32(symbolNext + symbol, next + zstdgpu_CountBitsU32(match));
+        }
+    }
+}
+#endif
 
 ZSTDGPU_WARN_PUSH_MSVC()
 ZSTDGPU_WARN_STOP_MSVC(6262) /**< CPU reference path emulates shader LDS with an intentionally large local array. */
@@ -3506,18 +3663,127 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     const uint32_t seqStreamIdxInGroup = zstdgpu_MinU32(laneStreamIdxInGroup, seqStreamCntInGroup - 1u);
     const uint32_t seqStreamIdx = seqStreamBeg + seqStreamIdxInGroup;
 
-    const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
+    #include "zstdgpu_lds_decl_base.h"
+    ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
+    #include "zstdgpu_lds_decl_undef.h"
 
+#if kzstdgpu_DecompressSequences_FseArena
+    // Build items are type-major, one per stream and table type. Until decoding starts, the store caches
+    // hold the FSE index and owner of each build item, the group's arena slot, and the scratch of each
+    // building wave.
+    const uint32_t buildItemCount = streamsPerGroup * 3u;
+    const zstdgpu_lds_uintptr_t buildFseIdx = GS_LLenCache;
+    const zstdgpu_lds_uintptr_t buildOwner = GS_LLenCache + buildItemCount;
+    const zstdgpu_lds_uintptr_t buildSlot = GS_LLenCache + buildItemCount * 2u;
+    const zstdgpu_lds_uintptr_t buildScratch = buildSlot + kzstdgpu_FseArena_BuildSlotDwCount;
+
+    // Acquire an arena slot for the group's tables; a slot is owned by at most one group at a time.
+    // A failed claim returns the dword's ownership snapshot, so the next attempt jumps straight to a
+    // slot that was free in that snapshot, or skips the whole dword when all of its slots were taken.
+    const uint32_t arenaSlotCount = srt.fseArenaStreamCount / streamsPerGroup;
+    if (threadId == 0)
+    {
+        uint32_t slot = groupId % arenaSlotCount;
+        for (;;)
+        {
+            const uint32_t slotBit = 1u << (slot & 31u);
+            uint32_t prevBits = 0;
+            InterlockedOr(srt.inoutFseArena[slot >> 5u], slotBit, prevBits);
+            if (0 == (prevBits & slotBit))
+                break;
+            const uint32_t dwordSlotBeg = slot & ~31u;
+            const uint32_t dwordSlotCnt = zstdgpu_MinU32(arenaSlotCount - dwordSlotBeg, 32u);
+            const uint32_t dwordSlotMask = dwordSlotCnt == 32u ? 0xffffffffu : ((1u << dwordSlotCnt) - 1u);
+            const uint32_t freeBits = ~prevBits & dwordSlotMask;
+            if (0 != freeBits)
+                slot = dwordSlotBeg + zstdgpu_FindFirstBitLoU32(freeBits);
+            else
+                slot = (dwordSlotBeg + 32u >= arenaSlotCount) ? 0u : dwordSlotBeg + 32u;
+        }
+        zstdgpu_LdsStoreU32(buildSlot, slot);
+    }
+
+    ZSTDGPU_FOR_WORK_ITEMS(buildId, buildItemCount, threadId, tgSize)
+    {
+        const uint32_t tableType = buildId / streamsPerGroup;
+        const uint32_t buildStream = buildId - tableType * streamsPerGroup;
+        const uint32_t fseIdx = buildStream < seqStreamCntInGroup ? zstdgpu_FseArena_LoadFseIdx(srt, seqStreamBeg + buildStream, tableType) : ~0u;
+        zstdgpu_LdsStoreU32(buildFseIdx + buildId, fseIdx);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // A table is built once, by its owner: the first stream of the group that uses it. The other streams
+    // share the owner's copy.
+    ZSTDGPU_FOR_WORK_ITEMS(buildId, buildItemCount, threadId, tgSize)
+    {
+        const uint32_t typeBeg = (buildId / streamsPerGroup) * streamsPerGroup;
+        const uint32_t fseIdx = zstdgpu_LdsLoadU32(buildFseIdx + buildId);
+        uint32_t owner = typeBeg;
+        while (owner < buildId && zstdgpu_LdsLoadU32(buildFseIdx + owner) != fseIdx)
+            ++owner;
+        zstdgpu_LdsStoreU32(buildOwner + buildId, owner - typeBeg);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // The slot stays wave-uniform until the group releases it after decoding.
+    const uint32_t arenaSlot = WaveReadLaneFirst(zstdgpu_LdsLoadU32(buildSlot));
+    const uint32_t arenaSlotBase = zstdgpu_FseArena_HeaderDwCount(srt.fseArenaStreamCount) + arenaSlot * streamsPerGroup * kzstdgpu_FseArena_StreamDwCount;
+
+    // The distinct tables are dealt round-robin, in build item order, to as many waves as the caches hold
+    // scratch for; each wave builds its tables one at a time, cooperatively.
+    const uint32_t buildWaveCnt = zstdgpu_MinU32(waveCnt, (kzstdgpu_FseArena_BuildLdsDwCount - buildItemCount * 2u - kzstdgpu_FseArena_BuildSlotDwCount) / kzstdgpu_FseArena_BuildScratchDwCount);
+    ZSTDGPU_ASSERT(buildWaveCnt > 0);
+    if (waveIdx < buildWaveCnt)
+    {
+        const zstdgpu_lds_uintptr_t scratch = buildScratch + waveIdx * kzstdgpu_FseArena_BuildScratchDwCount;
+        const uint32_t itemsPerBallot = zstdgpu_MinU32(laneCnt, 32u);
+        uint32_t tableIdx = 0;
+        for (uint32_t buildBase = 0; buildBase < buildItemCount; buildBase += itemsPerBallot)
+        {
+            const uint32_t buildId = buildBase + laneIdx;
+            const uint32_t buildStream = buildId % streamsPerGroup;
+            const bool isOwner = laneIdx < itemsPerBallot && buildId < buildItemCount && buildStream < seqStreamCntInGroup
+                              && zstdgpu_LdsLoadU32(buildOwner + buildId) == buildStream;
+            uint32_t owners = WaveActiveBallot(isOwner).x;
+            while (0u != owners)
+            {
+                const uint32_t ownerId = buildBase + zstdgpu_FindFirstBitLoU32(owners);
+                owners &= owners - 1u;
+                if (tableIdx % buildWaveCnt == waveIdx)
+                {
+                    const uint32_t ownerType = ownerId / streamsPerGroup;
+                    const uint32_t ownerStream = ownerId - ownerType * streamsPerGroup;
+                    zstdgpu_FseArena_BuildTable(srt,
+                                                zstdgpu_LdsLoadU32(buildFseIdx + ownerId),
+                                                arenaSlotBase + ownerStream * kzstdgpu_FseArena_StreamDwCount + zstdgpu_FseArena_TableOffset(ownerType),
+                                                scratch,
+                                                laneIdx,
+                                                laneCnt);
+                }
+                ++tableIdx;
+            }
+        }
+    }
+    AllMemoryBarrierWithGroupSync();
+
+    // Element `e` of the table a stream decodes with lives at `start + e`. Decoding overwrites the build
+    // items, so every thread reads its stream's owners before any thread starts decoding.
+    const uint32_t startLLen = arenaSlotBase + kzstdgpu_FseArena_StreamOffsetLLen
+                             + zstdgpu_LdsLoadU32(buildOwner + seqStreamIdxInGroup) * kzstdgpu_FseArena_StreamDwCount;
+    const uint32_t startOffs = arenaSlotBase + kzstdgpu_FseArena_StreamOffsetOffs
+                             + zstdgpu_LdsLoadU32(buildOwner + streamsPerGroup + seqStreamIdxInGroup) * kzstdgpu_FseArena_StreamDwCount;
+    const uint32_t startMLen = arenaSlotBase + kzstdgpu_FseArena_StreamOffsetMLen
+                             + zstdgpu_LdsLoadU32(buildOwner + streamsPerGroup * 2u + seqStreamIdxInGroup) * kzstdgpu_FseArena_StreamDwCount;
+    GroupMemoryBarrierWithGroupSync();
+#endif
+
+    // The stream's inputs are loaded after the table build so they do not stay live across it.
     const zstdgpu_OffsetAndSize seqRefDst = zstdgpu_GetSequenceStartAndCount(srt, seqStreamIdx, seqStreamCnt);
 
     const zstdgpu_SeqStreamInfo seqRef = zstdgpu_LoadSeqStreamInfo(srt, seqStreamIdx);
 
     uint32_t offset1, offset2, offset3;
     zstdgpu_SequenceOffsets_Init(offset1, offset2, offset3);
-
-    #include "zstdgpu_lds_decl_base.h"
-    ZSTDGPU_DECOMPRESS_SEQUENCES_LDS_OUT_CACHE_LDS(0, DecompressSequences_MultiStream_LdsOutCache);
-    #include "zstdgpu_lds_decl_undef.h"
 
     const uint32_t kStoreCacheBankCount = 32;
     const uint32_t kStoreCacheBankMask = kStoreCacheBankCount - 1u;
@@ -3536,9 +3802,18 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
     const uint32_t literalSize = srt.inoutBlockSizePrefix[seqRef.blockId];
     uint32_t totalMLen = 0;
 
+#if kzstdgpu_DecompressSequences_FseArena
+    // Valid states are below the table size; masking keeps the reads of corrupt streams inside the group's slot.
+    #define ZSTDGPU_FSE_TABLE_INDEX(start, state) ((start) + ((state) & (kzstdgpu_MaxCount_FseElems - 1u)))
+    #define ZSTDGPU_FSE_TABLE_ELEM(index) srt.inoutFseArena[index]
+#else
+    const uint32_t cmpBlockCnt = srt.inCounters[0].Blocks_CMP;
     const uint32_t startLLen = zstdgpu_ComputeFseDataStartFromFseIndexLLen(seqRef.fseLLen, cmpBlockCnt);
     const uint32_t startOffs = zstdgpu_ComputeFseDataStartFromFseIndexOffs(seqRef.fseOffs, cmpBlockCnt);
     const uint32_t startMLen = zstdgpu_ComputeFseDataStartFromFseIndexMLen(seqRef.fseMLen, cmpBlockCnt);
+    #define ZSTDGPU_FSE_TABLE_INDEX(start, state) ((start) + (state))
+    #define ZSTDGPU_FSE_TABLE_ELEM(index) srt.inFseElems[index]
+#endif
 
     {
         const uint32_t initBitcntLLen = srt.inFseInfos[seqRef.fseLLen].fseProbCountAndAccuracyLog2 >> 8;
@@ -3567,13 +3842,13 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
             // Decode phase: each active thread decodes up to cacheDwordsPerStream sequences into its LDS cache
             for (; seqIdx < seqIdxBatchEnd; )
             {
-                stateLLen += startLLen;
-                stateOffs += startOffs;
-                stateMLen += startMLen;
+                stateLLen = ZSTDGPU_FSE_TABLE_INDEX(startLLen, stateLLen);
+                stateOffs = ZSTDGPU_FSE_TABLE_INDEX(startOffs, stateOffs);
+                stateMLen = ZSTDGPU_FSE_TABLE_INDEX(startMLen, stateMLen);
 
-                const uint32_t fseElemLLen = srt.inFseElems[stateLLen];
-                const uint32_t fseElemOffs = srt.inFseElems[stateOffs];
-                const uint32_t fseElemMLen = srt.inFseElems[stateMLen];
+                const uint32_t fseElemLLen = ZSTDGPU_FSE_TABLE_ELEM(stateLLen);
+                const uint32_t fseElemOffs = ZSTDGPU_FSE_TABLE_ELEM(stateOffs);
+                const uint32_t fseElemMLen = ZSTDGPU_FSE_TABLE_ELEM(stateMLen);
 
                 uint32_t llen = 0, offs = 0, mlen = 0;
                 zstdgpu_ReadSeqBitsAndDecompress(
@@ -3638,6 +3913,15 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
         srt.inoutPerSeqStreamFinalOffset3[seqStreamIdx] = offset3;
     }
 
+#if kzstdgpu_DecompressSequences_FseArena
+    // Release the slot once every thread is done reading the group's tables.
+    AllMemoryBarrierWithGroupSync();
+    if (threadId == 0)
+        InterlockedAnd(srt.inoutFseArena[arenaSlot >> 5u], ~(1u << (arenaSlot & 31u)));
+#endif
+
+    #undef ZSTDGPU_FSE_TABLE_ELEM
+    #undef ZSTDGPU_FSE_TABLE_INDEX
     #undef ZSTDGPU_BACKWARD_BITBUF
     //ZSTDGPU_ASSERT(bitBuffer.hadlastrefill && bitBuffer.bitcnt == 0);
 }
@@ -3656,6 +3940,11 @@ ZSTDGPU_WARN_POP_MSVC()
 #ifdef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
 #undef kzstdgpu_DecompressSequences_ThreadsPerStream_UNDEF
 #undef kzstdgpu_DecompressSequences_ThreadsPerStream
+#endif
+
+#ifdef kzstdgpu_DecompressSequences_FseArena_UNDEF
+#undef kzstdgpu_DecompressSequences_FseArena_UNDEF
+#undef kzstdgpu_DecompressSequences_FseArena
 #endif
 
 static void zstdgpu_ShaderEntry_FinaliseSequenceOffsets(ZSTDGPU_PARAM_INOUT(zstdgpu_FinaliseSequenceOffsets_SRT) srt, uint32_t threadId)

@@ -125,7 +125,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , LitGroupEndPerHuffmanTableLookback) \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset1Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset2Lookback)  \
-    ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)
+    ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)  \
+    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )
 
 #define ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()     \
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()      \
@@ -178,6 +179,9 @@ typedef struct zstdgpu_ResourceInfo
     uint64_t gpuOnly_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
     uint64_t cpu2Gpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
     uint64_t gpu2Cpu_ByteCount[kzstdgpu_ResourceAllocation_StageCount];
+
+    // The number of sequence streams the FSE arena holds tables for (0 when the arena is unused).
+    uint32_t FseArena_StreamCount;
 
     // declare byte offsets
     #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpuOnlyByteOffset;
@@ -302,7 +306,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
 
-static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
+static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount, uint32_t fseArenaStreamCapacity)
 {
     const uint32_t BlocksRAWRefs_Count = rawBlockCount;
     const uint32_t BlocksRLERefs_Count = rleBlockCount;
@@ -334,9 +338,18 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t NonRLE_FseTableCount = cmpBlockCount * 4 + 3; // 4 FSE tables per compressed block (Huff, LLen, Offs, MLen) + 3 default tables for (LLen, Offs, MLen);
     const uint32_t FseTable_Count = kzstdgpu_FseRleTableCount + NonRLE_FseTableCount;
     const uint32_t FseProbs_Count = NonRLE_FseTableCount * kzstdgpu_MaxCount_FseProbs;
-    const uint32_t FseTableElem_Count = kzstdgpu_FseRleTableCount + cmpBlockCount * (kzstdgpu_FseElemMaxCount_HufW + SeqFseElemMaxCount) + SeqFseElemMaxCount;
+    // With the FSE arena (non-zero capacity), [Decompress Sequences] builds the sequence tables itself,
+    // so only the RLE and Huffman weight tables (which lead the layout) are persisted.
+    const bool usesFseArena = 0 != fseArenaStreamCapacity;
+    const uint32_t FseTableElem_Count = usesFseArena
+                                      ? kzstdgpu_FseRleTableCount + cmpBlockCount * kzstdgpu_FseElemMaxCount_HufW
+                                      : kzstdgpu_FseRleTableCount + cmpBlockCount * (kzstdgpu_FseElemMaxCount_HufW + SeqFseElemMaxCount) + SeqFseElemMaxCount;
 
     const uint32_t FseElems_Count = FseTableElem_Count;
+    outInfo->FseArena_StreamCount = usesFseArena ? zstdgpu_FseArena_StreamCount(cmpBlockCount, fseArenaStreamCapacity) : 0u;
+    // At least one element keeps the buffer bindable when the arena is unused or empty.
+    const uint32_t FseArena_Count = zstdgpu_MaxU32(1u, zstdgpu_FseArena_HeaderDwCount(outInfo->FseArena_StreamCount)
+                                                     + outInfo->FseArena_StreamCount * kzstdgpu_FseArena_StreamDwCount);
 
     const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_MaxCount_HuffmanWeights;
     const uint32_t DecompressedHuffmanWeightCount_Count = cmpBlockCount;
@@ -494,9 +507,9 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpu2Cpu(outInfo);
 }
 
-static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount)
+static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount, uint32_t fseArenaStreamCapacity)
 {
-    zstdgpu_ResourceInfo_Stage_1_InitSize(outInfo, rawBlockCount, rleBlockCount, cmpBlockCount);
+    zstdgpu_ResourceInfo_Stage_1_InitSize(outInfo, rawBlockCount, rleBlockCount, cmpBlockCount, fseArenaStreamCapacity);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetGpuOnly(outInfo);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetCpu2Gpu(outInfo);
     zstdgpu_ResourceInfo_Stage_1_InitOffsetGpu2Cpu(outInfo);
@@ -760,12 +773,72 @@ static void zstdgpu_ResourceDataGpu_Init(zstdgpu_ResourceDataGpu *outResData, co
     zstdgpu_ResourceDataGpu_Init_GpuToCpu(outResData, info, device, stageIndex);
 }
 
-static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+static uint64_t zstdgpu_ResourceDataGpu_GetBufferByteSize(ID3D12Resource *buffer)
 {
-    ZSTDGPU_ASSERT(stageIndex < kzstdgpu_ResourceAllocation_StageCount);
-    if (stageIndex >= kzstdgpu_ResourceAllocation_StageCount)
-        return;
+    return NULL != buffer ? buffer->GetDesc().Width : 0;
+}
 
+// Returns 1 if every buffer of a given stage that the current layout needs already exists and is large enough.
+// Buffers stay at the heap offsets of the layout they were created with, so a stage reuses either all of them or none.
+static uint32_t zstdgpu_ResourceDataGpu_CanReuseBuffers(const zstdgpu_ResourceDataGpu *resData, const zstdgpu_ResourceInfo *info, uint32_t stageIndex)
+{
+    #define ZSTDGPU_BUFFER(type, name)                                                                      \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->gpuOnly.name) < info->name##_ByteSizeInternal) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    #define ZSTDGPU_BUFFER(type, name)                                                                      \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->cpu2Gpu.name) < info->name##_ByteSizeInternal) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    #define ZSTDGPU_BUFFER(type, name)                                                                          \
+        if (zstdgpu_ResourceDataGpu_GetBufferByteSize(resData->gpu2Cpu.name) < ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name)) \
+            return 0;
+        if (stageIndex == 0)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()
+        }
+        else if (stageIndex == 1)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_1()
+        }
+        else if (stageIndex == 2)
+        {
+            ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
+        }
+    #undef  ZSTDGPU_BUFFER
+
+    return 1;
+}
+
+// Releases the buffers of a given stage and keeps its heaps.
+static void zstdgpu_ResourceDataGpu_TermBuffers(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+{
     // release the resources
     #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->gpuOnly.name);
         if (stageIndex == 0)
@@ -812,6 +885,15 @@ static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, ui
         }
 
     #undef  ZSTDGPU_BUFFER
+}
+
+static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
+{
+    ZSTDGPU_ASSERT(stageIndex < kzstdgpu_ResourceAllocation_StageCount);
+    if (stageIndex >= kzstdgpu_ResourceAllocation_StageCount)
+        return;
+
+    zstdgpu_ResourceDataGpu_TermBuffers(outResData, stageIndex);
 
     // release the heaps
     D3D12AID_SAFE_RELEASE(outResData->gpuOnly_Heap[stageIndex]);

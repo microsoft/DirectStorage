@@ -275,6 +275,38 @@ static const uint32_t kzstdgpu_FseDefaultProbAccuracy_MLen = 6;
 // RLE table with symbol S uses fseTableIndex = S. Real tables start at index 256.
 static const uint32_t kzstdgpu_FseRleTableCount = 256;
 
+// FSE sequence decode-table arena. Instead of reading the LL/OF/ML decode tables of every compressed
+// block from FseElems, a [Decompress Sequences] group rebuilds the tables of the streams it decodes
+// from FseProbs into an arena slot it owns while it runs. Groups acquire a slot from an ownership
+// bitmap on entry and release it on exit, so the arena only has to cover the groups resident on the
+// GPU at once. Groups that find no free slot wait for one, which bounds concurrency but not correctness.
+
+// A slot holds the LL, OF and ML tables of each of its streams, `StreamDwCount` dwords per stream:
+// stream `i` of a slot owns dwords `[i * StreamDwCount, (i + 1) * StreamDwCount)`, with each table
+// at its `StreamOffset<Type>`.
+static const uint32_t kzstdgpu_FseArena_StreamOffsetLLen = 0;
+static const uint32_t kzstdgpu_FseArena_StreamOffsetOffs = kzstdgpu_FseElemMaxCount_LLen;
+static const uint32_t kzstdgpu_FseArena_StreamOffsetMLen = kzstdgpu_FseElemMaxCount_LLen + kzstdgpu_FseElemMaxCount_Offs;
+static const uint32_t kzstdgpu_FseArena_StreamDwCount    = kzstdgpu_FseElemMaxCount_LLen + kzstdgpu_FseElemMaxCount_Offs + kzstdgpu_FseElemMaxCount_MLen;
+// Stream counts are multiples of 64, so the arena splits into whole slots for any power-of-two streams-per-group
+// up to 64 (the arena-backed kernel decodes 32 streams per group).
+static const uint32_t kzstdgpu_FseArena_StreamAlign      = 64;
+// Smallest arena capacity: 384 groups of 32 streams, 8 per multiprocessor of a 48-SM GPU.
+static const uint32_t kzstdgpu_FseArena_MinStreamCapacity = 12288;
+
+// The header is the slot ownership bitmap: one bit per slot, and a slot holds at least one stream.
+// It is padded to 32 dwords so that every table starts on a 128-byte boundary.
+static inline uint32_t zstdgpu_FseArena_HeaderDwCount(uint32_t streamCount)
+{
+    return (((streamCount + 31u) / 32u) + 31u) & ~31u;
+}
+
+static inline uint32_t zstdgpu_FseArena_StreamCount(uint32_t cmpBlockCount, uint32_t streamCapacity)
+{
+    const uint32_t aligned = (cmpBlockCount + kzstdgpu_FseArena_StreamAlign - 1u) & ~(kzstdgpu_FseArena_StreamAlign - 1u);
+    return aligned < streamCapacity ? aligned : streamCapacity;
+}
+
 static const uint32_t kzstdgpu_FrameStatusFlag_ReservedBitSet = 1u << 0u;
 static const uint32_t kzstdgpu_FrameStatusFlag_ChecksumBitSet = 1u << 1u;
 static const uint32_t kzstdgpu_FrameStatusFlag_DictionaryUsed = 1u << 2u;
@@ -511,6 +543,7 @@ typedef struct uint32_t4
 } uint32_t4;
 static inline void GroupMemoryBarrierWithGroupSync(void) { }
 static inline void DeviceMemoryBarrierWithGroupSync(void) { }
+static inline void AllMemoryBarrierWithGroupSync(void) { }
 static inline bool WaveIsFirstLane(void) { return true; }
 static inline uint32_t WaveActiveCountBits(bool bit) { return bit ? 1 : 0; }
 static inline uint32_t WavePrefixCountBits(bool bit) { (void)bit; return 0; }
@@ -530,6 +563,8 @@ template <typename T> static inline T WaveActiveBitXor(T x) { return x; }
 template <typename T> static inline T WavePrefixSum(T x) { (void)x; return 0; }
 static inline void InterlockedAdd(uint32_t & dst, uint32_t x) { dst += x; }
 static inline void InterlockedOr (uint32_t & dst, uint32_t x) { dst |= x; }
+static inline void InterlockedOr (uint32_t & dst, uint32_t x, uint32_t & ret) { ret = dst; dst |= x; }
+static inline void InterlockedAnd(uint32_t & dst, uint32_t x) { dst &= x; }
 static inline void InterlockedMin(uint32_t & dst, uint32_t x) { dst = dst < x ? dst : x; }
 static inline void InterlockedMax(uint32_t & dst, uint32_t x) { dst = dst > x ? dst : x; }
 static inline void InterlockedAdd(uint32_t & dst, uint32_t x, uint32_t & ret) { ret = dst; dst += x; }
@@ -614,6 +649,18 @@ static inline uint32_t zstdgpu_FindFirstBitHiU32(uint32_t v)
 #else
     unsigned long index = 0;
     uint32_t found = _BitScanReverse(&index, v);
+    ZSTDGPU_ASSERT(0 != found);
+    return (uint32_t)index;
+#endif
+}
+
+static inline uint32_t zstdgpu_FindFirstBitLoU32(uint32_t v)
+{
+#ifdef __hlsl_dx_compiler
+    return firstbitlow(v);
+#else
+    unsigned long index = 0;
+    uint32_t found = _BitScanForward(&index, v);
     ZSTDGPU_ASSERT(0 != found);
     return (uint32_t)index;
 #endif
