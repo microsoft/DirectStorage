@@ -87,6 +87,7 @@ ZSTDGPU_WARN_POP_MSVC()
 #include "ZstdGpuParseFrames.h"
 #include "ZstdGpuPrefixSequenceOffsets.h"
 #include "ZstdGpuPrefixSum.h"
+#include "ZstdGpuPrefixSumInclusive.h"
 #include "ZstdGpuPropagateFseIndex.h"
 #include "ZstdGpuUpdateDispatchArgs.h"
 
@@ -609,6 +610,7 @@ static uint32_t zstdgpu_Count_SRTs_Stage(uint32_t stageIndex)
     ZSTDGPU_KERNEL(ParseFrames                                      ,   L"Parse Frames")                                                        \
     ZSTDGPU_KERNEL(PrefixSequenceOffsets                            ,   L"Prefix Sequence Offsets")                                             \
     ZSTDGPU_KERNEL(PrefixSum                                        ,   L"Prefix Sum")                                                          \
+    ZSTDGPU_KERNEL(PrefixSumInclusive                               ,   L"Prefix Sum (Inclusive)")                                              \
     ZSTDGPU_KERNEL(PropagateFseIndex                                ,   L"Propagate FSE Index")                                                 \
     ZSTDGPU_KERNEL(UpdateDispatchArgs                               ,   L"Update Dispatch Args")
 
@@ -762,6 +764,9 @@ struct zstdgpu_PersistentContextImpl
     #undef ZSTDGPU_KERNEL
     uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+
+    d3d12aid_ComputeRsPs    PrefixSumInclusive;
+    ID3D12CommandSignature *PrefixSumInclusive_CmdSig;
     bool                    executeIndirectWorkaround;
 };
 
@@ -787,6 +792,8 @@ struct zstdgpu_PerRequestContextImpl
 
     uint32_t                DecompressLiterals_StreamsPerGroup;
     uint32_t                DecompressSequences_StreamsPerGroup;
+    d3d12aid_ComputeRsPs    PrefixSumInclusive;
+    ID3D12CommandSignature *PrefixSumInclusive_CmdSig;
     bool                    executeIndirectWorkaround;
 
     zstdgpu_Srts            srts;
@@ -834,6 +841,9 @@ struct zstdgpu_PerRequestContextImpl
 
     uint32_t                setupFlags;
 };
+
+// The inclusive PrefixSum variant shares the PrefixSum SRT.
+static const uint32_t kzstdgpu_SrtConstsRootSlot_PrefixSumInclusive = kzstdgpu_SrtConstsRootSlot_PrefixSum;
 
 
 uint32_t zstdgpu_GetPersistentContextRequiredMemorySizeInBytes(void)
@@ -893,6 +903,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         #define ZSTDGPU_KERNEL(name) const zstdgpu_CompiledShader *shader##name = NULL;
             ZSTDGPU_RUNTIME_KERNEL_LIST_SPECIALISED()
         #undef ZSTDGPU_KERNEL
+        const zstdgpu_CompiledShader *shaderPrefixSumInclusive = ZSTDGPU_KERNEL_GET(PrefixSumInclusive);
 
         context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
 
@@ -983,6 +994,13 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             ZSTDGPU_DISPATCH32_CMD_SIG_LIST()
         #undef ZSTDGPU_DISPATCH32_CMD_SIG
 
+        d3d12aid_ComputeRsPs_Create(&context->PrefixSumInclusive, device, shaderPrefixSumInclusive->code, shaderPrefixSumInclusive->size);
+        context->PrefixSumInclusive.rs->SetName(shaderPrefixSumInclusive->desc);
+        context->PrefixSumInclusive.ps->SetName(shaderPrefixSumInclusive->desc);
+
+        dispatchArgDesc[0].Constant.RootParameterIndex = kzstdgpu_SrtConstsRootSlot_PrefixSumInclusive;
+        D3D12AID_CHECK(device->CreateCommandSignature(&cmdSigDesc, context->PrefixSumInclusive.rs, D3D12AID_IID_PPV_ARGS(&context->PrefixSumInclusive_CmdSig)));
+
         *outPersistentContext = context;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
@@ -1000,12 +1018,14 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPersistentContext(void **outMemoryBlock, uin
         #define ZSTDGPU_KERNEL(name) d3d12aid_ComputeRsPs_Release(&inPersistentContext->name);
             ZSTDGPU_RUNTIME_KERNEL_LIST()
         #undef ZSTDGPU_KERNEL
+        d3d12aid_ComputeRsPs_Release(&inPersistentContext->PrefixSumInclusive);
 
         D3D12AID_SAFE_RELEASE(inPersistentContext->dispatchCmdSig);
 
         #define ZSTDGPU_DISPATCH32_CMD_SIG(name) D3D12AID_SAFE_RELEASE(inPersistentContext->name##_CmdSig);
             ZSTDGPU_DISPATCH32_CMD_SIG_LIST()
         #undef ZSTDGPU_DISPATCH32_CMD_SIG
+        D3D12AID_SAFE_RELEASE(inPersistentContext->PrefixSumInclusive_CmdSig);
 
         D3D12AID_SAFE_RELEASE(inPersistentContext->device);
 
@@ -1058,6 +1078,11 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         #undef ZSTDGPU_KERNEL
         context->DecompressLiterals_StreamsPerGroup = persistentContext->DecompressLiterals_StreamsPerGroup;
         context->DecompressSequences_StreamsPerGroup = persistentContext->DecompressSequences_StreamsPerGroup;
+        context->PrefixSumInclusive = persistentContext->PrefixSumInclusive;
+        context->PrefixSumInclusive_CmdSig = persistentContext->PrefixSumInclusive_CmdSig;
+        context->PrefixSumInclusive.rs->AddRef();
+        context->PrefixSumInclusive.ps->AddRef();
+        context->PrefixSumInclusive_CmdSig->AddRef();
         context->executeIndirectWorkaround = persistentContext->executeIndirectWorkaround;
 
         context->srts.heap = NULL;
@@ -1124,12 +1149,14 @@ ZSTDGPU_ENUM(Status) zstdgpu_DestroyPerRequestContext(void **outMemoryBlock, uin
         #define ZSTDGPU_KERNEL(name) d3d12aid_ComputeRsPs_Release(&inPerRequestContext->srts.name);
             ZSTDGPU_RUNTIME_KERNEL_LIST()
         #undef ZSTDGPU_KERNEL
+        d3d12aid_ComputeRsPs_Release(&inPerRequestContext->PrefixSumInclusive);
 
         D3D12AID_SAFE_RELEASE(inPerRequestContext->dispatchCmdSig);
 
         #define ZSTDGPU_DISPATCH32_CMD_SIG(name) D3D12AID_SAFE_RELEASE(inPerRequestContext->name##_CmdSig);
             ZSTDGPU_DISPATCH32_CMD_SIG_LIST()
         #undef ZSTDGPU_DISPATCH32_CMD_SIG
+        D3D12AID_SAFE_RELEASE(inPerRequestContext->PrefixSumInclusive_CmdSig);
 
         D3D12AID_SAFE_RELEASE(inPerRequestContext->device);
 
@@ -3109,10 +3136,16 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Prefix Block Sizes]");
 
+        // NOTE: Certain drivers have a bug where this ExecuteIndirect runs with the `outputInclusive` value (0) of
+        // the direct [Prefix Sums] dispatches of the same shader instead of (1) as set in the root constant. Use a
+        // separate PSO with `outputInclusive` hardcoded to work around that issue until it is addressed by the IHV.
+        zstdgpu_Srts srts = req->srts;
+        srts.PrefixSum = req->PrefixSumInclusive;
+
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
         ZSTDGPU_KERNEL_SCOPE(PrefixBlockSizes, cmdList,
-            zstdgpu_Bind_PrefixSum_BlockSizesAll(cmdList, req->srts, req->resData.gpuOnly, /* outputInclusive */1);
-            zstdgpu_DispatchIndirect(cmdList, PrefixSum, PrefixBlockSizesAll);
+            zstdgpu_Bind_PrefixSum_BlockSizesAll(cmdList, srts, req->resData.gpuOnly, /* outputInclusive */1);
+            zstdgpu_DispatchIndirect(cmdList, PrefixSumInclusive, PrefixBlockSizesAll);
         );
 
         PIXEndEvent(cmdList);

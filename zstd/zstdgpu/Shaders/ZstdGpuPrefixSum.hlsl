@@ -25,6 +25,11 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
 
     zstdgpu_Srt_Fill(srt);
 
+#ifdef kzstdgpu_PrefixSum_OutputInclusive
+    // `ZstdGpuPrefixSumInclusive.hlsl` has `outputInclusive` hardcoded instead of read through the root signature.
+    srt.outputInclusive = kzstdgpu_PrefixSum_OutputInclusive;
+#endif
+
     const uint32_t i = zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_PrefixSum + threadId;
     if (i >= srt.workItemCount)
         return;
