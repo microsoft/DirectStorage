@@ -536,11 +536,11 @@ static void zstdgpu_ResourceDataGpu_InitZero(zstdgpu_ResourceDataGpu *outResData
         ZSTDGPU_ALL_BUFFERS_LIST()
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) outResData->cpu2Gpu.name = NULL;
+    #define ZSTDGPU_BUFFER(type, name) outResData->cpu2Gpu.name = NULL; outResData->cpu2Gpu.name##Cpu = NULL;
             ZSTDGPU_ALL_BUFFERS_LIST_UPLOAD()
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) outResData->gpu2Cpu.name = NULL;
+    #define ZSTDGPU_BUFFER(type, name) outResData->gpu2Cpu.name = NULL; outResData->gpu2Cpu.name##Cpu = NULL;
         ZSTDGPU_ALL_BUFFERS_LIST_READBACK()
     #undef  ZSTDGPU_BUFFER
 }
@@ -623,14 +623,20 @@ static void zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(zstdgpu_ResourceDa
 #if USE_PLACED_BUFFERS
     #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)              \
         bufDesc.Width = info->name##_ByteSizeInternal;                  \
-        outResData->dest.name = d3d12aid_Resource_CreatePlaced(         \
-            device,                                                     \
-            heap,                                                       \
-            baseOffset + info->name##_##dest##ByteOffset,               \
-            &bufDesc,                                                   \
-            D3D12_RESOURCE_STATE_##state                                \
-        );                                                              \
-        outResData->dest.name->SetName(L"" #name "_" #dest);
+        if (NULL != heap)                                               \
+        {                                                               \
+            outResData->dest.name = d3d12aid_Resource_CreatePlaced(     \
+                device,                                                 \
+                heap,                                                   \
+                baseOffset + info->name##_##dest##ByteOffset,           \
+                &bufDesc,                                               \
+                D3D12_RESOURCE_STATE_##state                            \
+            );                                                          \
+        }                                                               \
+        if (NULL != outResData->dest.name)                              \
+        {                                                               \
+            outResData->dest.name->SetName(L"" #name "_" #dest);        \
+        }
 
 #else
     #define ZSTDGPU_CREATE_BUFFER(name, dest, state, type)              \
@@ -640,17 +646,22 @@ static void zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(zstdgpu_ResourceDa
             &bufDesc,                                                   \
             D3D12_HEAP_TYPE_##type                                      \
         );                                                              \
-        outResData->dest.name->SetName(L"" #name "_" #dest);
+        if (NULL != outResData->dest.name)                              \
+        {                                                               \
+            outResData->dest.name->SetName(L"" #name "_" #dest);        \
+        }
 #endif
 
-#define ZSTDGPU_BUFFER(type, name)                                              \
-    if (NULL == outResData->gpuOnly.name && 0 != info->name##_ByteSizeInternal) \
-    {                                                                           \
-        ZSTDGPU_CREATE_BUFFER(name, gpuOnly, COMMON, DEFAULT);                  \
+#define ZSTDGPU_BUFFER(type, name)                                                          \
+    if (success && NULL == outResData->gpuOnly.name && 0 != info->name##_ByteSizeInternal)  \
+    {                                                                                       \
+        ZSTDGPU_CREATE_BUFFER(name, gpuOnly, COMMON, DEFAULT);                              \
+        success = NULL != outResData->gpuOnly.name;                                         \
     }
 
-static void zstdgpu_ResourceDataGpu_Init_GpuOnly(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
+static uint32_t zstdgpu_ResourceDataGpu_Init_GpuOnly(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
 {
+    uint32_t success = 1;
     uint64_t baseOffset = outResData->gpuOnly_HeapOffset[stageIndex];
     D3D12_RESOURCE_DESC bufDesc;
     d3d12aid_Resource_InitAsBuffer(&bufDesc, 0);
@@ -664,6 +675,7 @@ static void zstdgpu_ResourceDataGpu_Init_GpuOnly(zstdgpu_ResourceDataGpu *outRes
         bufDesc.Flags |= D3D12XBOX_RESOURCE_FLAG_ALLOW_INDIRECT_BUFFER;
         outResData->gpuOnly.DispatchArgs = d3d12aid_Resource_CreateCommitted_WithHeapTypeAndFlags(device, &bufDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12XBOX_HEAP_FLAG_ALLOW_INDIRECT_BUFFERS);
         bufDesc.Flags &= ~D3D12XBOX_RESOURCE_FLAG_ALLOW_INDIRECT_BUFFER;
+        success = NULL != outResData->gpuOnly.DispatchArgs;
 #endif
 
         ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
@@ -676,24 +688,30 @@ static void zstdgpu_ResourceDataGpu_Init_GpuOnly(zstdgpu_ResourceDataGpu *outRes
     {
         ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
     }
-
+    return success;
 }
 
 #undef ZSTDGPU_BUFFER
 
-#define ZSTDGPU_BUFFER(type, name)                                              \
-    if (NULL == outResData->cpu2Gpu.name && 0 != info->name##_ByteSizeInternal) \
-    {                                                                           \
-        ZSTDGPU_CREATE_BUFFER(name, cpu2Gpu, GENERIC_READ, UPLOAD);             \
-        outResData->cpu2Gpu.name##Cpu = (type *)d3d12aid_Resource_MapWrite(outResData->cpu2Gpu.name);\
-    }                                                                           \
-    else if (NULL == outResData->cpu2Gpu.name##Cpu)                             \
-    {                                                                           \
-        outResData->cpu2Gpu.name##Cpu = NULL;                                   \
+#define ZSTDGPU_BUFFER(type, name)                                                          \
+    if (success && NULL == outResData->cpu2Gpu.name && 0 != info->name##_ByteSizeInternal)  \
+    {                                                                                       \
+        ZSTDGPU_CREATE_BUFFER(name, cpu2Gpu, GENERIC_READ, UPLOAD);                         \
+        outResData->cpu2Gpu.name##Cpu = NULL;                                               \
+        if (NULL != outResData->cpu2Gpu.name)                                               \
+        {                                                                                   \
+            outResData->cpu2Gpu.name##Cpu = (type *)d3d12aid_Resource_MapWrite(outResData->cpu2Gpu.name);\
+        }                                                                                   \
+        success = NULL != outResData->cpu2Gpu.name##Cpu;                                    \
+    }                                                                                       \
+    else if (NULL == outResData->cpu2Gpu.name##Cpu)                                         \
+    {                                                                                       \
+        outResData->cpu2Gpu.name##Cpu = NULL;                                               \
     }
 
-static void zstdgpu_ResourceDataGpu_Init_CpuToGpu(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
+static uint32_t zstdgpu_ResourceDataGpu_Init_CpuToGpu(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
 {
+    uint32_t success = 1;
     uint64_t baseOffset = outResData->cpu2Gpu_HeapOffset[stageIndex];
     D3D12_RESOURCE_DESC bufDesc;
     d3d12aid_Resource_InitAsBuffer(&bufDesc, 0);
@@ -711,24 +729,31 @@ static void zstdgpu_ResourceDataGpu_Init_CpuToGpu(zstdgpu_ResourceDataGpu *outRe
     {
         ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2()
     }
+    return success;
 }
 
 #undef  ZSTDGPU_BUFFER
 
 // A skipped read-back buffer is neither created nor mapped, and its CPU pointer stays NULL.
-#define ZSTDGPU_BUFFER(type, name)                                                          \
-    if (NULL == outResData->gpu2Cpu.name && 0 != ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name))     \
-    {                                                                                       \
-        ZSTDGPU_CREATE_BUFFER(name, gpu2Cpu, COPY_DEST, READBACK);                          \
-        outResData->gpu2Cpu.name##Cpu = (const type *)d3d12aid_Resource_MapRead(outResData->gpu2Cpu.name);  \
-    }                                                                                       \
-    else if (NULL == outResData->gpu2Cpu.name)                                              \
-    {                                                                                       \
-        outResData->gpu2Cpu.name##Cpu = NULL;                                               \
+#define ZSTDGPU_BUFFER(type, name)                                                                  \
+    if (success && NULL == outResData->gpu2Cpu.name && 0 != ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name))  \
+    {                                                                                               \
+        ZSTDGPU_CREATE_BUFFER(name, gpu2Cpu, COPY_DEST, READBACK);                                  \
+        outResData->gpu2Cpu.name##Cpu = NULL;                                                       \
+        if (NULL != outResData->gpu2Cpu.name)                                                       \
+        {                                                                                           \
+            outResData->gpu2Cpu.name##Cpu = (const type *)d3d12aid_Resource_MapRead(outResData->gpu2Cpu.name);  \
+        }                                                                                           \
+        success = NULL != outResData->gpu2Cpu.name##Cpu;                                            \
+    }                                                                                               \
+    else if (NULL == outResData->gpu2Cpu.name)                                                      \
+    {                                                                                               \
+        outResData->gpu2Cpu.name##Cpu = NULL;                                                       \
     }
 
-static void zstdgpu_ResourceDataGpu_Init_GpuToCpu(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
+static uint32_t zstdgpu_ResourceDataGpu_Init_GpuToCpu(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
 {
+    uint32_t success = 1;
     uint64_t baseOffset = outResData->gpu2Cpu_HeapOffset[stageIndex];
 
     D3D12_RESOURCE_DESC bufDesc;
@@ -747,17 +772,21 @@ static void zstdgpu_ResourceDataGpu_Init_GpuToCpu(zstdgpu_ResourceDataGpu *outRe
     {
         ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()
     }
+    return success;
 }
 
 #undef  ZSTDGPU_BUFFER
 
 #undef  ZSTDGPU_CREATE_BUFFER
 
-static void zstdgpu_ResourceDataGpu_Init(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
+// Returns 0 if a buffer could not be created or mapped (for example, after device removal). The caller must then
+// release the stage with `zstdgpu_ResourceDataGpu_Term`.
+static uint32_t zstdgpu_ResourceDataGpu_Init(zstdgpu_ResourceDataGpu *outResData, const zstdgpu_ResourceInfo *info, ID3D12Device *device, uint32_t stageIndex)
 {
-    zstdgpu_ResourceDataGpu_Init_GpuOnly(outResData, info, device, stageIndex);
-    zstdgpu_ResourceDataGpu_Init_CpuToGpu(outResData, info, device, stageIndex);
-    zstdgpu_ResourceDataGpu_Init_GpuToCpu(outResData, info, device, stageIndex);
+    uint32_t success = zstdgpu_ResourceDataGpu_Init_GpuOnly(outResData, info, device, stageIndex);
+    success = success && zstdgpu_ResourceDataGpu_Init_CpuToGpu(outResData, info, device, stageIndex);
+    success = success && zstdgpu_ResourceDataGpu_Init_GpuToCpu(outResData, info, device, stageIndex);
+    return success;
 }
 
 static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, uint32_t stageIndex)
@@ -782,7 +811,7 @@ static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, ui
         }
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->cpu2Gpu.name);
+    #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->cpu2Gpu.name); outResData->cpu2Gpu.name##Cpu = NULL;
         if (stageIndex == 0)
         {
             ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()
@@ -797,7 +826,7 @@ static void zstdgpu_ResourceDataGpu_Term(zstdgpu_ResourceDataGpu *outResData, ui
         }
     #undef  ZSTDGPU_BUFFER
 
-    #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->gpu2Cpu.name);
+    #define ZSTDGPU_BUFFER(type, name) D3D12AID_SAFE_RELEASE(outResData->gpu2Cpu.name); outResData->gpu2Cpu.name##Cpu = NULL;
         if (stageIndex == 0)
         {
             ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_0()
