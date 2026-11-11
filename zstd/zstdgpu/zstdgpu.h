@@ -116,9 +116,10 @@ ZSTDGPU_API void zstdgpu_CountCompressedLiteralsAndSequences(zstdgpu_CountLitera
 
 typedef enum zstdgpu_Status
 {
-    kzstdgpu_StatusSuccess          = 0,
-    kzstdgpu_StatusInvalidArgument  = 1,
-    kzstdgpu_StatusForceInt         = 0x7fffffff
+    kzstdgpu_StatusSuccess                  = 0,
+    kzstdgpu_StatusInvalidArgument          = 1,
+    kzstdgpu_StatusResourceCreationFailed   = 2, /**< A D3D12 heap, resource or descriptor heap could not be created, or a resource could not be mapped (for example, after device removal). */
+    kzstdgpu_StatusForceInt                 = 0x7fffffff
 } zstdgpu_Status;
 
 typedef struct zstdgpu_PersistentContextImpl *zstdgpu_PersistentContext;
@@ -238,6 +239,9 @@ ZSTDGPU_API uint32_t zstdgpu_IsAnyStageReadbackRequired(zstdgpu_PerRequestContex
 
 /**
  *  @brief      Returns memory requirement for each heap type per submission stage for a given `zstdgpu_PerRequestContext`
+ *
+ *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` if the stage is sized from counters read back after the
+ *              previous stage and that stage failed with `kzstdgpu_StatusResourceCreationFailed`.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByteCount, uint64_t *outUploadHeapByteCount, uint64_t *outReadbackHeapByteCount, uint32_t *outShaderVisibleDescriptorCount, zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex);
 
@@ -256,6 +260,10 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *out
  *              for `stageIndex` supplied into this function.
  *
  *  @note       The caller must compute required memory for a given `stageIndex` via `zstdgpu_GetGpuMemoryRequirement`
+ *
+ *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` without recording any commands if a resource could not be
+ *              created in the supplied heaps or mapped (for example, after device removal). Do not submit later stages
+ *              of the request after a failure.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
                                                             uint32_t stageIndex,
@@ -276,6 +284,9 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
  *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
  *
  *  @note       The caller must compute required memory via `zstdgpu_GetAllStageGpuMemoryRequirement`
+ *
+ *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` without recording any commands if a resource could not be
+ *              created in the supplied heaps or mapped (for example, after device removal).
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
                                                                      struct ID3D12GraphicsCommandList *cmdList,
@@ -294,6 +305,10 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_Per
  *
  *  @note       The caller must wait for GPU idle before calling this function if `zstdgpu_IsReadbackRequired` return `1`
  *              for `stageIndex` supplied into this function.
+ *
+ *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` without recording any commands if a heap, resource or
+ *              descriptor heap could not be created, or a resource could not be mapped (for example, after device
+ *              removal). Do not submit later stages of the request after a failure.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext inPerRequestContext, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList);
 
@@ -303,5 +318,8 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestCo
  *
  *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
  *
+ *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` without recording any commands if a heap, resource or
+ *              descriptor heap could not be created, or a resource could not be mapped (for example, after device
+ *              removal).
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12GraphicsCommandList *cmdList);
