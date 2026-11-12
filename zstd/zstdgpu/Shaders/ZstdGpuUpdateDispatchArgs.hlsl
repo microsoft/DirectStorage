@@ -26,17 +26,21 @@
  *  attributed to one frame. Every frame is marked, because once predicated work is skipped no
  *  frame's output can be trusted.
  *
- *  A frame that already carries a more specific failure (bad magic, dictionary, reserved bit, ...)
- *  keeps it: that reason is the more useful one, and such frames were never going to be decoded.
+ *  `keepSpecificFailures` decides whether a frame that already carries a more specific failure
+ *  (bad magic, dictionary, reserved bit, ...) keeps it. That is only meaningful once
+ *  [Parse Frames :: Collect Blocks] has written this request's statuses (stage 1). Before that
+ *  (stage 0) the buffer holds whatever an earlier request or the caller left there, so every frame
+ *  must be overwritten: a stale code would otherwise survive, and stale non-negative garbage would
+ *  read as success.
  *
  *  Single-threaded, and that is deliberate -- this loop only ever runs when the decode has already
  *  failed, so its cost is irrelevant. On the success path it is one comparison.
  */
-static void zstdgpu_MarkAllFramesFailed(ZSTDGPU_RW_BUFFER(uint32_t) inoutFrameStatus, uint32_t frameCount, uint32_t status)
+static void zstdgpu_MarkAllFramesFailed(ZSTDGPU_RW_BUFFER(uint32_t) inoutFrameStatus, uint32_t frameCount, uint32_t status, uint32_t keepSpecificFailures)
 {
     for (uint32_t frameIdx = 0; frameIdx < frameCount; ++frameIdx)
     {
-        if (kzstdgpu_FrameStatus_Success == inoutFrameStatus[frameIdx])
+        if (0 == keepSpecificFailures || kzstdgpu_FrameStatus_Success == inoutFrameStatus[frameIdx])
         {
             inoutFrameStatus[frameIdx] = status;
         }
@@ -95,10 +99,11 @@ void main()
         // ORDERING, and it is load-bearing: [Parse Frames :: Collect Blocks] writes every frame's
         // status in stage 1, i.e. AFTER this pass, with an unconditional assignment that would
         // overwrite these marks. It cannot: that pass is predicated on exactly the mask written
-        // above, so it runs only when this mask is zero and there was nothing to mark.
+        // above, so it runs only when this mask is zero and there was nothing to mark. For the same
+        // reason no status of this request exists yet, so every frame is overwritten.
         if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
         {
-            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_BlockCountExceeded);
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_BlockCountExceeded, /* keepSpecificFailures */ 0u);
         }
     }
     else if (srt.stage == 1)
@@ -144,7 +149,7 @@ void main()
         // point, so a frame rejected on its own merits keeps that more specific reason.
         if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
         {
-            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_ScratchExceeded);
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_ScratchExceeded, /* keepSpecificFailures */ 1u);
         }
     }
     else

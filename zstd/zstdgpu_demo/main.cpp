@@ -1424,6 +1424,7 @@ static int demoRun(void *demoCtx)
     bool blkCnt = false;
     bool forceEstBlk = false;
     bool seqCnt = false;
+    bool perStage = false;
     bool chkGpu = false;
     bool chkCpu = false;
     bool simGpu = false;
@@ -1624,6 +1625,10 @@ static int demoRun(void *demoCtx)
                     seqCnt = true;
                     blkCnt = true; // --seq-cnt implies --blk-cnt
                 }
+                else if (0 == wcscmp(argv[argi], L"--per-stage"))
+                {
+                    perStage = true;
+                }
                 else if (0 == wcscmp(argv[argi], L"--force-est-blk"))
                 {
                     forceEstBlk = true;
@@ -1756,6 +1761,13 @@ static int demoRun(void *demoCtx)
                 ctx->retv = 1;
                 return 0;
             }
+            if (perStage && ssm)
+            {
+                debugPrint(L"[ERROR] '--per-stage' cannot be combined with '--ssm': single submission records every stage "
+                           L"in one command list.\n");
+                ctx->retv = 1;
+                return 0;
+            }
             if (1 == argc || badArg)
             {
                 debugPrint(L"USAGE:\n");
@@ -1775,6 +1787,7 @@ static int demoRun(void *demoCtx)
     debugPrint(L"\t                                     pre-scan. The estimate is unsound, so the decode is expected to be WRONG; the\n");
     debugPrint(L"\t                                     point is that the frame status buffer must report it. Never use for real work.\n");
                 debugPrint(L"\t--seq-cnt                 [Optional] Also uses SetupBlockInfoConstants (implies --blk-cnt). Merges all stages into single submission.\n");
+                debugPrint(L"\t--per-stage               [Optional] Submits stage by stage (zstdgpu_Submit{With,}{Internal,External}Memory per stage) even when no stage needs a readback, e.g. with --seq-cnt. Cannot be combined with --ssm.\n");
                 debugPrint(L"\t--prf-lvl <0, 1, 2>       [Optional] Chooses the level of profiling: 0 - overall bandwidth in GB/s, 1 - stage cost, 2 - internal pass cost.\n");
                 debugPrint(L"\t--idx-{min,max} <number>  [Optional] Chooses the {minimal, maximal} index of the frame to decompress in multi-frame .zst file. Both values are clamped to the number of available frames.\n");
                 debugPrint(L"\t--frame-batch-count <n>   [Optional] Tiles the working set into batches of <n> frames each (one batch per GPU dispatch); the whole set is decoded batch by batch. Default: one batch covering all frames. Latency/bandwidth are reported per batch, plus a pooled total (P50 latency / median bandwidth across the batches, excluding a partial final batch).\n");
@@ -1786,7 +1799,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-limit <count>       [Optional] Decodes only the first <count> blocks of every frame (0 = all). Cannot be combined with --chk-cpu/--chk-gpu/--sim-gpu, which compare against whole-frame references.\n");
                 debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
-                debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of exactly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are plain arithmetic (0, K, 2K, ...); every block ordinal is a legal cut. Forces one frame per batch. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
+                debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of exactly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are plain arithmetic (0, K, 2K, ...); every block ordinal is a legal cut. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
                 debugPrint(L"\t--slice-mb <MB>           [Optional] Same as --blk-slice but stated as a per-slice DECOMPRESSED megabyte budget, converted by zstdgpu_SliceBlockCountForDecompressedBudget. This is the axis a caller actually has, since scratch is sized from decompressed size.\n");
                 debugPrint(L"\t--plan-mb <MB>            [Optional] Per-DISPATCH decompressed megabyte budget. Unlike --slice-mb (which gives every frame the same block count), the planner packs as many whole frames into a dispatch as fit and slices only a frame that does not, so a large frame no longer monopolises a dispatch. Cannot be combined with --blk-slice/--slice-mb.\n");
                 if (badArg)
@@ -2390,8 +2403,9 @@ static int demoRun(void *demoCtx)
                         frameAdvance[j] = remBlocks;
                     anyAdvance += frameAdvance[j];
 
-                    // Upper bound on what this frame contributes to THIS dispatch -- the quantity the
-                    // arena is sized from, and the one --plan-mb bounds while --blk-slice does not.
+                    // Upper bound on what this frame contributes to THIS dispatch -- the quantity
+                    // --plan-mb bounds and --blk-slice does not. Library scratch is still sized for
+                    // the whole batch.
                     {
                         uint64_t b64 = (uint64_t)frameAdvance[j] * (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
                         if (0 != batchFrameInfo[j].uncompSize && batchFrameInfo[j].uncompSize < b64)
@@ -2585,7 +2599,7 @@ static int demoRun(void *demoCtx)
                 D3D12_HEAP_TYPE defaultType = D3D12_HEAP_TYPE_DEFAULT;
                 D3D12_HEAP_TYPE uploadType = D3D12_HEAP_TYPE_UPLOAD;
                 D3D12_HEAP_TYPE readbackType = D3D12_HEAP_TYPE_READBACK;
-                if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext))
+                if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext) && !perStage)
                 {
                     if (extMem /** a scenario with supplying external memory */)
                     {

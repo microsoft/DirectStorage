@@ -386,6 +386,26 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
 }
 
+/**
+ *  Byte size of the merged literal/sequence arena that stage 2 allocates for these inputs.
+ *
+ *  `arenaByteCount` of 0 means "size exactly to `literalCount` and `sequencesCount`", which is
+ *  what a caller that has read the real counters back from the GPU wants. A non-zero value is a
+ *  *jointly* sized arena, used when only the decompressed size is known; it is still floored at
+ *  the per-count minimums so the allocation is never empty.
+ *
+ *  This is the single definition used both by stage-2 sizing and by the stage-1 occupancy check,
+ *  which on the per-stage submission path is recorded before stage 2 has been sized.
+ */
+static uint32_t zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount)
+{
+    return (0 == arenaByteCount)
+         ? zstdgpu_ArenaBytesForCounts(literalCount, sequencesCount)
+         : zstdgpu_MaxU32(arenaByteCount,
+                          zstdgpu_ArenaBytesForCounts(kzstdgpu_MinCount_UncompressedLitBytes,
+                                                      kzstdgpu_MinCount_UncompressedSeqElems));
+}
+
 static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
     /*
@@ -393,24 +413,18 @@ static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo,
      *  records are addressed downwards from the top, and `kzstdgpu_ArenaGuardBytes` of slack
      *  separates them so the wide (whole-dword) literal store path cannot reach the records.
      *
-     *  `arenaByteCount` of 0 means "size exactly to `literalCount` and `sequencesCount`", which is
-     *  what a caller that has read the real counters back from the GPU wants. A non-zero value is a
-     *  *jointly* sized arena, used when only the decompressed size is known: sizing from the two
-     *  maxima independently costs 5x the decompressed size because it assumes the worst case of
-     *  both at once, whereas `litBytes + 3 * seqCount <= decompressedBytes` means they cannot both
-     *  be maximal and the joint bound is 4x. It is still floored at the per-count minimums so the
-     *  allocation is never empty.
+     *  A jointly sized arena exploits `litBytes + 3 * seqCount <= decompressedBytes`: literals and
+     *  sequences cannot both be maximal, so the arena needs `R/3` times the decompressed size for
+     *  an R-byte sequence record, where sizing the two maxima independently would need `1 + R/3`.
      */
-    const uint32_t DecompressedLiterals_Count       = (0 == arenaByteCount)
-                                                    ? zstdgpu_ArenaBytesForCounts(literalCount, sequencesCount)
-                                                    : zstdgpu_MaxU32(arenaByteCount,
-                                                                     zstdgpu_ArenaBytesForCounts(kzstdgpu_MinCount_UncompressedLitBytes,
-                                                                                                 kzstdgpu_MinCount_UncompressedSeqElems));
+    const uint32_t DecompressedLiterals_Count       = zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(literalCount, sequencesCount, arenaByteCount);
+
+    // Library-owned unless the caller supplies its own through `zstdgpu_SetupResumeState`.
+    const uint32_t FrameResumeState_Count           = uncompressedFrameCount * kzstdgpu_FrameResumeDwordCount;
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
     const uint32_t UnCompressedFramesRefs_Count     = uncompressedFrameCount;
-    const uint32_t FrameResumeState_Count           = uncompressedFrameCount * kzstdgpu_FrameResumeDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
 }
@@ -531,12 +545,12 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
         outInfo->FramesRefs_ByteSizeInternal     = 0;
     }
 
-    // NOTE: FrameStatus is normally a caller-supplied (external) resource, substituted after init.
-    // It is still sized internally so the binding is ALWAYS valid: UpdateDispatchArgs binds it as a
-    // ROOT UAV (a Direct SRT), which dereferences the resource at bind time rather than tolerating a
-    // null descriptor the way a bind-group table does. A caller that asks for no status buffer would
-    // otherwise crash the bind. The internal allocation is frameCount dwords and is released when the
-    // caller's resource is substituted in.
+    // NOTE: FrameStatus is always a caller-supplied (external) resource -- `zstdgpu_SetupOutputs`
+    // rejects a NULL one -- so it never gets internal storage. It is substituted at stage 0, before
+    // either of its bindings (the ParseFrames bind group and the UpdateDispatchArgs root UAV) is
+    // recorded. Internal storage would also enable its generic readback, which copies the caller's
+    // buffer into a request-sized one and is invalid whenever the two sizes differ.
+    outInfo->FrameStatus_ByteSizeInternal = 0;
 
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpuOnly(outInfo);
     zstdgpu_ResourceInfo_Stage_0_InitOffsetCpu2Gpu(outInfo);

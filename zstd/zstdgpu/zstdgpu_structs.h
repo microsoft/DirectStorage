@@ -363,11 +363,19 @@ static const uint32_t kzstdgpu_ArenaGuardBytes = 64;
  *
  *  The dword alignment of the literal region matters because the same memory is also addressed
  *  through a dword view.
+ *
+ *  Computed in 64 bits and saturated to UINT32_MAX: exact counts (caller-supplied, or read back
+ *  from the GPU) are not bounded by the decompressed size, and a wrapped value would size the
+ *  arena far too small on the host and hide the overflow from the GPU-side check. A saturated size
+ *  is rejected by the heap ceiling once rounded up to the heap alignment.
  */
-#define zstdgpu_ArenaBytesForCounts(litByteCount, seqElemCount)                              \
-    (zstdgpu_AlignUp((litByteCount), (uint32_t)sizeof(uint32_t))                             \
-     + kzstdgpu_ArenaGuardBytes                                                              \
-     + (seqElemCount) * kzstdgpu_SeqRecordDwordCount * (uint32_t)sizeof(uint32_t))
+static inline uint32_t zstdgpu_ArenaBytesForCounts(uint32_t litByteCount, uint32_t seqElemCount)
+{
+    const uint64_t litBytes = ((uint64_t)litByteCount + (uint64_t)(sizeof(uint32_t) - 1u)) & ~(uint64_t)(sizeof(uint32_t) - 1u);
+    const uint64_t seqBytes = (uint64_t)seqElemCount * (uint64_t)kzstdgpu_SeqRecordDwordCount * (uint64_t)sizeof(uint32_t);
+    const uint64_t bytes    = litBytes + (uint64_t)kzstdgpu_ArenaGuardBytes + seqBytes;
+    return (bytes > (uint64_t)0xffffffffu) ? 0xffffffffu : (uint32_t)bytes;
+}
 
 /**
  *  Dword index of sequence `seqIdx`'s record, measured down from the arena top `arenaTopDwords`.
@@ -1902,6 +1910,17 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
 
 #define zstdgpu_BlockWindowStart(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 0u)
 #define zstdgpu_BlockWindowLimit(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 1u)
+
+/**
+ *  Whether `blockOrdinal` lies in the window `[blockStart, blockStart + blockLimit)`, with a
+ *  `blockLimit` of 0 meaning "to the end of the frame". The end is never formed as
+ *  `blockStart + blockLimit`, which wraps in 32 bits for a large limit and would make the window
+ *  empty. The skip sentinel is handled by the caller.
+ */
+static inline uint32_t zstdgpu_BlockWindowContains(uint32_t blockOrdinal, uint32_t blockStart, uint32_t blockLimit)
+{
+    return (blockOrdinal >= blockStart && (0u == blockLimit || blockOrdinal - blockStart < blockLimit)) ? 1u : 0u;
+}
 
 typedef struct zstdgpu_LitStreamInfo
 {

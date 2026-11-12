@@ -364,9 +364,9 @@ ZSTDGPU_API uint32_t zstdgpu_SliceBlockCountForDecompressedBudget(uint64_t decom
  *
  *  NB: under single submission (`zstdgpu_SetupAllStageSubmission`) this is effectively REQUIRED.
  *      Block count cannot be bounded by the decompressed size -- a block may regenerate as little
- *      as zero bytes -- so without these counts the library has only an estimate, and exceeding it
- *      silently skips predicated work and corrupts the output. The sizing entry points therefore
- *      refuse that combination unless the caller opts in with
+ *      as zero bytes -- so without these counts the library has only an estimate, and when content
+ *      exceeds it every frame of the batch fails with `kzstdgpu_FrameStatus_BlockCountExceeded`.
+ *      The sizing entry points therefore refuse that combination unless the caller opts in with
  *      `zstdgpu_SetupAllowEstimatedBlockCounts`.
  *
  *      Supplying them is cheap: `zstdgpu_CountFramesAndBlocks` is a block-header hop that does not
@@ -384,13 +384,13 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestCon
  *  `zstdgpu_SetupFrameInfoConstants` instead, which is both sound and nearly free.
  *
  *  WHAT THIS OPTS INTO: the estimate is `(decompressedBytes + 4095) / 4096`, which is NOT a bound.
- *  Real content can exceed it by a wide margin. When it is exceeded the stage count checks fire
- *  and the predicated work is SKIPPED, so the decode returns WRONG OUTPUT WITH A SUCCESS STATUS.
- *  Nothing reports this: there is no overflow bit in the frame status buffer, and skipping
- *  silently is all `SetPredication` does.
+ *  Real content can exceed it by a wide margin. When it is exceeded the stage count checks fire,
+ *  the predicated work is skipped, and every frame of the batch reports
+ *  `kzstdgpu_FrameStatus_BlockCountExceeded` -- nothing in the batch is decoded.
  *
- *  It is therefore only appropriate for content you produced and trust. Do not use it on untrusted
- *  or adversarial input.
+ *  Callers must therefore check the frame status buffer and be prepared to retry a failed batch,
+ *  for example with staged submission, which sizes from counts read back from the GPU. Adversarial
+ *  input can force this failure.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllowEstimatedBlockCounts(zstdgpu_PerRequestContext inPerRequestContext);
 

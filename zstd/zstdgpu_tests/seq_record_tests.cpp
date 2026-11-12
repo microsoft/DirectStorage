@@ -126,15 +126,11 @@ TEST(SeqRecordPacking, RecordsAreContiguousAndDescending)
  *  value.
  *
  *  `(R/3) * size` exceeds a uint32 well below the 4 GiB decompressed limit. A wrapped value would
- *  produce an arena far SMALLER than the content provably needs, the joint occupancy predicate
- *  would fire, the predicated work would be silently skipped, and the decode would return wrong
- *  output with exit code 0 -- the exact failure mode this scheme exists to eliminate. Saturation
- *  turns that into an unsatisfiable requirement that every allocating path now checks.
+ *  produce an arena far SMALLER than the content provably needs. Saturation turns that into an
+ *  unsatisfiable requirement that every allocating path rejects at sizing time.
  *
- *  These live in a unit test because the adversarial corpus no longer reaches this path: the file
- *  that used to trip the ceiling (`public\fuzz\fail\fail_09_bad_blocksize.zst`) now sizes under it
- *  since the record narrowed to 8 bytes. The behaviour is pure host arithmetic, so it does not need
- *  a GPU or a corpus to pin.
+ *  These live in a unit test because no corpus content reaches this path at the current record
+ *  size. The behaviour is pure host arithmetic, so it does not need a GPU or a corpus to pin.
  */
 
 // Largest decompressed size whose arena bound still fits a uint32, found by bisection rather than
@@ -217,6 +213,24 @@ TEST(ArenaBound, SaturatesInsteadOfWrapping)
     EXPECT_GE(aligned, kzstdgpu_MaxScratchHeapByteCount);
 }
 
+TEST(ArenaBound, ExactCountOccupancySaturatesInsteadOfWrapping)
+{
+    // Exact counts (caller-supplied, or read back from the GPU) size the arena through
+    // zstdgpu_ArenaBytesForCounts. In 32-bit arithmetic a large count wrapped to a small arena that
+    // slipped past the heap ceiling; the GPU-side occupancy check wrapped the same way.
+    EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0u, 0x20000000u));
+    EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0xffffffffu, 0u));
+    EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0xffffffffu, 0xffffffffu));
+
+    // Below the limit the value is exact.
+    EXPECT_EQ(4u + kzstdgpu_ArenaGuardBytes + 8u * 3u, zstdgpu_ArenaBytesForCounts(1u, 3u));
+    EXPECT_EQ(0xfffffffcu, zstdgpu_ArenaBytesForCounts(0xfffffffcu - kzstdgpu_ArenaGuardBytes, 0u));
+
+    // Saturation must still be rejected once rounded to the heap alignment.
+    const uint64_t aligned = ((uint64_t)zstdgpu_ArenaBytesForCounts(0u, 0x20000000u) + 0xffffull) & ~0xffffull;
+    EXPECT_GE(aligned, kzstdgpu_MaxScratchHeapByteCount);
+}
+
 /***********************************************************************************************************************
  *  Slice block-count bound.
  *
@@ -269,4 +283,33 @@ TEST(SliceBudget, IsMonotonicAndSaturates)
     // returned window an upper bound; wrapping would silently make it far too small.
     EXPECT_EQ(0xffffffffu, zstdgpu_SliceBlockCountForDecompressedBudget(0xffffffffffffffffull));
     EXPECT_EQ(0xffffffffu, zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)kzstdgpu_MaxCount_LiteralBytes * 0x100000000ull));
+}
+
+/**********************************************************************************************************************
+ *  BlockWindow: membership of a block ordinal in `[blockStart, blockStart + blockLimit)`.
+ *
+ *  The end of the window must never be formed by addition: a large limit (such as the saturated
+ *  value `zstdgpu_SliceBlockCountForDecompressedBudget` returns) wraps in 32 bits, and the window
+ *  then silently contains nothing while every frame still reports success.
+ **********************************************************************************************************************/
+TEST(BlockWindow, LargeLimitDoesNotWrap)
+{
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(1u, 1u, 0xffffffffu));
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(5u, 3u, 0xfffffffeu));
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(0xfffffffeu, 1u, 0xffffffffu));
+    EXPECT_EQ(0u, zstdgpu_BlockWindowContains(0u, 1u, 0xffffffffu));
+}
+
+TEST(BlockWindow, BoundariesAndToEndOfFrame)
+{
+    // [2, 5): ordinals 2, 3, 4.
+    EXPECT_EQ(0u, zstdgpu_BlockWindowContains(1u, 2u, 3u));
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(2u, 2u, 3u));
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(4u, 2u, 3u));
+    EXPECT_EQ(0u, zstdgpu_BlockWindowContains(5u, 2u, 3u));
+
+    // A limit of 0 means "to the end of the frame".
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(0u, 0u, 0u));
+    EXPECT_EQ(1u, zstdgpu_BlockWindowContains(1000u, 7u, 0u));
+    EXPECT_EQ(0u, zstdgpu_BlockWindowContains(6u, 7u, 0u));
 }

@@ -591,3 +591,136 @@ TEST_F(ZstdDecompressionTests, RequestTooLargeStatusTest)
         }
     }
 }
+
+// Decodes through the C API on a caller-owned per-request context, so a test can reuse one context
+// across requests -- which ZstdDecompressionWork::Decompress never does.
+ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
+
+class ReusedContextWork : public ZstdDecompressionWork
+{
+public:
+    using ZstdDecompressionWork::ZstdDecompressionWork;
+
+    ID3D12Device* GetDevice() const
+    {
+        return m_device.get();
+    }
+
+    com_ptr<ID3D12Resource> NewBuffer(size_t size, const wchar_t* name)
+    {
+        return CreateBuffer(size, name);
+    }
+
+    void Fill(ID3D12Resource* buffer, uint8_t value)
+    {
+        std::vector<uint8_t> bytes(static_cast<size_t>(buffer->GetDesc().Width), value);
+        CopyToResource(buffer, bytes.data(), bytes.size());
+    }
+
+    std::vector<uint8_t> Read(ID3D12Resource* buffer)
+    {
+        std::vector<uint8_t> bytes;
+        CopyFromResource(bytes, buffer);
+        return bytes;
+    }
+
+    // Decodes one request on `req`, staged and with library-owned memory, with `resumeState`
+    // attached (or detached when NULL). Returns the per-frame statuses and decoded frames.
+    Frames Decode(
+        zstdgpu_PerRequestContext req,
+        std::vector<uint8_t>& data,
+        OffsetsAndSizes& offsetsAndSizes,
+        ID3D12Resource* resumeState,
+        std::vector<uint32_t>& outFrameStatus)
+    {
+        const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+        const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
+
+        auto input = CreateBuffer(data.size(), L"Input");
+        CopyToResource(input.get(), data.data(), data.size());
+        auto inputRefs = CreateBuffer(refsBytes, L"Input Refs");
+        CopyToResource(inputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.InputOffsets.data()), refsBytes);
+        auto output = CreateBuffer(offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, L"Output");
+        auto outputRefs = CreateBuffer(refsBytes, L"Output Refs");
+        CopyToResource(outputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.OutputOffsets.data()), refsBytes);
+        auto status = CreateBuffer(frameCount * sizeof(uint32_t), L"Frame Status");
+
+        uint32_t stageCount = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupInputsAsFramesInGpuMemory(&stageCount, req, input.get(), static_cast<uint32_t>(data.size()), inputRefs.get(), frameCount));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupOutputs(req, output.get(), offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, outputRefs.get(), frameCount, status.get()));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupResumeState(req, resumeState, /* clearResumeState */ 1));
+
+        for (uint32_t stage = 0; stage < stageCount; ++stage)
+        {
+            m_commandList->Reset(m_commandAllocator.get(), nullptr);
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SubmitWithInternalMemory(req, stage, m_commandList.get()));
+            if (stage + 1 == stageCount)
+            {
+                // Advances the context's GPU timestamp queries once per request, as the demo does.
+                // A reused context that skips this runs out of query slots on its next request.
+                zstdgpu_ReadbackTimestamps(req, m_commandList.get());
+            }
+            m_commandList->Close();
+            ExecuteCommandListsSynchronously(m_commandList.get());
+        }
+
+        const std::vector<uint8_t> statusBytes = Read(status.get());
+        outFrameStatus.assign(
+            reinterpret_cast<const uint32_t*>(statusBytes.data()),
+            reinterpret_cast<const uint32_t*>(statusBytes.data()) + frameCount);
+
+        const std::vector<uint8_t> decoded = Read(output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : offsetsAndSizes.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+};
+
+// A caller that detaches its resume buffer (zstdgpu_SetupResumeState with NULL) must get
+// library-owned storage on the next request, even when that request reuses the context and its
+// buffers. Writing into the detached buffer would destroy whatever state the caller saved there.
+TEST_F(ZstdDecompressionTests, DetachedResumeStateIsNotWritten)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionDetachedResumeStateTest");
+
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    std::vector<uint8_t> requestMemory(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_PerRequestContext req = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x41);
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x42);
+    const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+
+    // zstdgpu_SetupResumeState documents the buffer as 4 uint32_t per frame.
+    com_ptr<ID3D12Resource> callerResume = work.NewBuffer(frameCount * 4u * sizeof(uint32_t), L"Caller Resume State");
+
+    std::vector<uint32_t> frameStatus;
+    work.Decode(req, data, offsetsAndSizes, callerResume.get(), frameStatus);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+
+    // The caller saves something of its own in the buffer, then detaches it.
+    const uint8_t kSentinel = 0xA5;
+    work.Fill(callerResume.get(), kSentinel);
+
+    Frames frames = work.Decode(req, data, offsetsAndSizes, nullptr, frameStatus);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0], std::vector<uint8_t>{0x41});
+    EXPECT_EQ(frames[1], std::vector<uint8_t>{0x42});
+
+    const std::vector<uint8_t> after = work.Read(callerResume.get());
+    EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume buffer was written";
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}

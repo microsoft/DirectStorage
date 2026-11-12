@@ -846,10 +846,10 @@ struct zstdgpu_PerRequestContextImpl
     uint32_t                zstdCompressedFramesByteCount;
 
     /*
-     *  Decode only the first `zstdBlockLimitPerFrame` blocks of every frame; 0 means the whole
-     *  frame. This is the prefix half of intra-frame slicing: a slice starting at block 0 needs no
-     *  carried state, because its output cursor and repcodes are the frame's initial ones.
-     *  Resuming at a later block additionally requires those to be carried in, which is separate.
+     *  Batch-uniform block window `[zstdBlockStartPerFrame, zstdBlockStartPerFrame +
+     *  zstdBlockLimitPerFrame)`, used when no per-frame window buffer is supplied; a limit of 0
+     *  means "to the end of the frame". A window starting after block 0 relies on the resume state
+     *  (`zstdgpu_SetupResumeState`) for its output cursor and repeat offsets.
      */
     uint32_t                zstdBlockStartPerFrame;
     uint32_t                zstdBlockLimitPerFrame;
@@ -1398,10 +1398,20 @@ ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupOutputs(zstdgpu_PerRequestContext 
 ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupResumeState(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *resumeState, uint32_t clearResumeState)
 {
     uint32_t proceed = 1;
+    proceed = proceed && (NULL != inPerRequestContext);
     proceed = proceed && (inPerRequestContext->thisMemoryBlock == (void *)inPerRequestContext);
     ZSTDGPU_ASSERT(proceed > 0);
     if (proceed)
     {
+        // The resource table may still reference the buffer being replaced. Drop that reference
+        // too, so a later request allocates library-owned storage (or substitutes the new buffer)
+        // instead of clearing and rewriting a buffer the caller has detached.
+        if (NULL != inPerRequestContext->frameResumeState &&
+            resumeState != inPerRequestContext->frameResumeState &&
+            inPerRequestContext->resData.gpuOnly.FrameResumeState == inPerRequestContext->frameResumeState)
+        {
+            D3D12AID_SAFE_RELEASE(inPerRequestContext->resData.gpuOnly.FrameResumeState);
+        }
         D3D12AID_SAFE_RELEASE(inPerRequestContext->frameResumeState);
 
         inPerRequestContext->frameResumeState = resumeState;
@@ -1470,6 +1480,14 @@ ZSTDGPU_API ZSTDGPU_ENUM(Status) zstdgpu_SetupBlockWindowPerFrame(zstdgpu_PerReq
 
     if (proceed)
     {
+        // Same as `zstdgpu_SetupResumeState`: drop the resource table's reference to a buffer the
+        // caller is replacing, so it is never read or kept alive after being detached.
+        if (NULL != req->blockWindowPerFrame &&
+            blockWindowPerFrame != req->blockWindowPerFrame &&
+            req->resData.gpuOnly.BlockWindowPerFrame == req->blockWindowPerFrame)
+        {
+            D3D12AID_SAFE_RELEASE(req->resData.gpuOnly.BlockWindowPerFrame);
+        }
         D3D12AID_SAFE_RELEASE(req->blockWindowPerFrame);
 
         req->blockWindowPerFrame = blockWindowPerFrame;
@@ -1594,23 +1612,19 @@ static uint32_t zstdgpu_OutputSizeToBlockCount(uint32_t size)
 }
 
 /**
- *  Rejects the one remaining configuration that can silently produce wrong output.
+ *  Refuses single submission with estimated block counts unless the caller opts in.
  *
  *  Single submission cannot read GPU counters back, so it must size per-block metadata before
  *  anything runs. With caller-supplied counts that is exact. Without them the only available
- *  number is `zstdgpu_OutputSizeToBlockCount`, which is an estimate and NOT a bound -- and when it
- *  is exceeded, the stage predicates skip the predicated work and the decode returns corrupt
- *  output with a SUCCESS status. Nothing reports it: the frame status buffer carries no overflow
- *  bit today, and the predicate is consumed by `SetPredication`, whose entire behaviour is to skip
- *  silently.
+ *  number is `zstdgpu_OutputSizeToBlockCount`, which is an estimate and NOT a bound. When content
+ *  exceeds it, the stage predicates skip the predicated work and every frame of the batch reports
+ *  `kzstdgpu_FrameStatus_BlockCountExceeded`: nothing is decoded, so the caller has to retry.
  *
- *  So this combination is refused rather than merely documented. Refusing is the whole point: a
- *  loud failure beats corrupt output with a success code.
- *
- *  It is not refused unconditionally, because `zstdgpu_SetupInputsAsFramesInGpuMemory` is a
- *  legitimate configuration in which the compressed bytes never touch the CPU and a host pre-scan
- *  is therefore impossible. Such a caller opts in with `zstdgpu_SetupAllowEstimatedBlockCounts`,
- *  which makes the risk explicit and acknowledged instead of silent and default.
+ *  That is why the configuration is opt-in rather than the default. It is not refused
+ *  unconditionally, because `zstdgpu_SetupInputsAsFramesInGpuMemory` is a legitimate
+ *  configuration in which the compressed bytes never touch the CPU and a host pre-scan is
+ *  therefore impossible. Such a caller opts in with `zstdgpu_SetupAllowEstimatedBlockCounts` and
+ *  handles the failure status.
  */
 static uint32_t zstdgpu_IsBlockCountSourceSound(zstdgpu_PerRequestContext req)
 {
@@ -1631,8 +1645,8 @@ static uint32_t zstdgpu_IsBlockCountSourceSound(zstdgpu_PerRequestContext req)
     if (!zstdgpu_IsBlockCountSourceSound(req))                                                          \
     {                                                                                                   \
         ZSTDGPU_ASSERT(!"zstdgpu: single submission without caller-supplied block counts. The block "    \
-                        "count estimate is NOT a bound, and exceeding it silently skips predicated "     \
-                        "work and corrupts the output. Call zstdgpu_SetupFrameInfoConstants with "       \
+                        "count estimate is NOT a bound; when content exceeds it every frame of the "     \
+                        "batch fails with BlockCountExceeded. Call zstdgpu_SetupFrameInfoConstants with "\
                         "exact counts from zstdgpu_CountFramesAndBlocks, or, if the compressed bytes "   \
                         "are GPU-resident and cannot be pre-scanned, opt in explicitly with "            \
                         "zstdgpu_SetupAllowEstimatedBlockCounts.");                                      \
@@ -1684,10 +1698,10 @@ static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, 
             // decompressed size (see `zstdgpu_OutputSizeToBlockCount`). Reaching this line at all
             // means the caller explicitly opted in via `zstdgpu_SetupAllowEstimatedBlockCounts`;
             // the sizing entry points otherwise refuse the configuration outright (see
-            // `zstdgpu_IsBlockCountSourceSound`). If the estimate is exceeded the stage-1/stage-2
-            // count checks fire, and because those drive `SetPredication`, the predicated work is
-            // SKIPPED SILENTLY -- there is no overflow bit in the frame status buffer today. That
-            // is precisely why this path has to be opted into rather than defaulted to.
+            // `zstdgpu_IsBlockCountSourceSound`). If the estimate is exceeded the stage count checks
+            // fire, the predicated work is skipped and every frame of the batch reports
+            // `kzstdgpu_FrameStatus_BlockCountExceeded`. That is why this path has to be opted into
+            // rather than defaulted to.
             cntRle = cntRaw = cntCmp = zstdgpu_OutputSizeToBlockCount(req->zstdUncompressedFramesByteCount);
         }
         else
@@ -1826,9 +1840,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         // Two distinct reasons this check must stay.
         //
         // 1. It is the backstop for the saturating arena bound. `zstdgpu_DecompressedSizeToArenaByteCount`
-        //    computes `4 * decompressedBytes` in 64 bits and clamps to UINT32_MAX rather than
+        //    computes `(R/3) * decompressedBytes` in 64 bits and clamps to UINT32_MAX rather than
         //    wrapping, which turns an impossible request into a merely enormous one. This check is
-        //    what then rejects it. Remove this and saturation becomes SILENT UNDERSIZING.
+        //    what then rejects it. Remove this and saturation undersizes the arena.
         // 2. Single submission cannot read counters back from the GPU, so it sizes scratch from
         //    bounds rather than from observed counts. Those bounds are proportional to the
         //    decompressed size, so a large enough batch can still out-ask any heap.
@@ -1837,8 +1851,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         // surface later as an opaque E_INVALIDARG out of CreateHeap.
         //
         // (This was originally a stopgap justified by literals and sequences being sized
-        //  separately at ~6.33x the decompressed size, which was genuinely unallocatable. The
-        //  merged arena at 4x removed that justification -- but not reason 1.)
+        //  separately, at `1 + R/3` times the decompressed size for an R-byte sequence record. The
+        //  merged arena, at `R/3`, removed that justification -- but not reason 1.)
         ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
@@ -2220,7 +2234,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
         }
 
         /*
-         *  The same ceiling `zstdgpu_GetGpuMemoryRequirement` (`:1586`) enforces. This path sizes
+         *  The same ceiling `zstdgpu_GetGpuMemoryRequirement` enforces. This path sizes
          *  and allocates directly, so it never calls that entry point; without this check the guard
          *  is present on the public sizing API but absent on both internal-memory submit paths,
          *  which is worse than having none, because the guard then merely looks present.
@@ -2351,16 +2365,15 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         zstdgpu_GetAllStageGpuMemoryRequirementInternal(&dflt, &upld, &rdbk, req);
 
         /*
-         *  The same ceiling the two public sizing entry points enforce (`:1586`, `:1659`).
+         *  The same ceiling the two public sizing entry points enforce.
          *
          *  This path allocates internally and so never calls either of them, which left the
          *  single-submission internal-memory path with NO backstop for the saturating arena bound.
-         *  That is not merely an uninformative-error problem: above roughly 1.6 GB decompressed
-         *  `zstdgpu_DecompressedSizeToArenaByteCount` saturates to UINT32_MAX, i.e. it reports an
-         *  arena SMALLER than the content provably needs. If the oversized heap then happened to be
-         *  allocatable, the joint occupancy predicate would fire and silently skip the predicated
-         *  work -- wrong output with a success exit code, exactly the failure this whole effort
-         *  exists to eliminate. Rejecting here keeps saturation loud.
+         *  Above roughly 1.6 GB decompressed `zstdgpu_DecompressedSizeToArenaByteCount` saturates
+         *  to UINT32_MAX, i.e. it reports an arena SMALLER than the content provably needs. If the
+         *  oversized heap then happened to be allocatable, the joint occupancy predicate would fire
+         *  and the whole batch would fail with `kzstdgpu_FrameStatus_ScratchExceeded` after the
+         *  allocation. Rejecting here reports the oversized request at sizing time instead.
          */
         ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (dflt >= kzstdgpu_MaxScratchHeapByteCount)
@@ -2886,9 +2899,12 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     // UpdateDispatchArgs needs it in state UAV, otherwise the debug later will flag RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH.
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Barrier for ExecuteIndirectWorkaround]");
-        D3D12_RESOURCE_BARRIER barriers[1];
+        D3D12_RESOURCE_BARRIER barriers[2];
         uint32_t bc = 0;
         setResourceState(barriers, bc++, req->resData.gpuOnly.DispatchArgs, NON_PIXEL_SHADER_RESOURCE, UNORDERED_ACCESS);
+        // last written by an earlier request sharing the caller's status buffer
+        // next written by [Update Dispatch Args :: Stage 0] when it reports a block-count overflow
+        setResourceUavSync(barriers, bc++, req->resData.gpuOnly.FrameStatus);
         ZSTDGPU_ASSERT(bc <= _countof(barriers));
         cmdList->ResourceBarrier(bc, barriers);
         PIXEndEvent(cmdList);
@@ -3185,12 +3201,15 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"Barrier for [Readback Counters :: After Block Parse] and [Update Dispatch Args] and [Compute `Per-Huffman Table` Literal Stream Count Prefix]");
-        D3D12_RESOURCE_BARRIER barriers[20];
+        D3D12_RESOURCE_BARRIER barriers[21];
         uint32_t bc = 0;
         {
             // last written by [Parse Compressed Blocks]
             // next read by [Update Dispatch Args :: Stage 1] as UAV
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.Counters);
+            // last written by [Parse Frames :: Collect Blocks] (every frame's status)
+            // next read and conditionally overwritten by [Update Dispatch Args :: Stage 1]
+            setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.FrameStatus);
             // last written by [Parse Compressed Blocks]
             // next written/updated by [Decompress Sequences]
             setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.BlockSizePrefix);
@@ -3250,6 +3269,22 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: Stage 1]");
+
+        /*
+         *  The arena occupancy check needs the size stage 2 will allocate. On the per-stage
+         *  submission path stage 2 has not been sized yet when stage 1 is recorded, so the size is
+         *  derived here from the same inputs stage-2 sizing uses. When stage 1 needs a readback,
+         *  stage 2 is sized from the counters read back, its predicate is never applied and
+         *  nothing is reported, so the value passed is irrelevant.
+         */
+        uint32_t arenaByteCount = req->resInfo.DecompressedLiterals_ByteSize;
+        if (0 == zstdgpu_IsReadbackRequired(req, 1))
+        {
+            uint32_t cntLit, cntSeq, arenaBytes;
+            zstdgpu_RecomputeAndRetrieveBlockInfoConstants(&cntLit, &cntSeq, &arenaBytes, req);
+            arenaByteCount = zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(cntLit, cntSeq, arenaBytes);
+        }
+
         zstdgpu_Bind_UpdateDispatchArgs(cmdList, req->srts, req->resData.gpuOnly,
             zstdgpu_UsesFseArenaKernel(req) ? req->DecompressSequencesFseArena_StreamsPerGroup : req->DecompressSequences_StreamsPerGroup,
             1 /* stage */,
@@ -3259,7 +3294,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->zstdUncompressedLitByteCountMax,
             req->zstdUncompressedSeqElemCountMax,
             req->executeIndirectWorkaround,
-            req->resInfo.DecompressedLiterals_ByteSize,
+            arenaByteCount,
             req->zstdFrameCount,
             // Matches the stage 2 `SetPredication` condition -- see the stage 0 site for why.
             (0 == zstdgpu_IsReadbackRequired(req, 1)) ? 1u : 0u

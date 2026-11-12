@@ -532,8 +532,7 @@ static inline uint32_t zstdgpu_ShaderEntry_ParseFrame(ZSTDGPU_PARAM_INOUT(zstdgp
          */
         const uint32_t skipFrame      = (kzstdgpu_BlockWindowSkipFrame == blockStart) ? 1u : 0u;
         const uint32_t atOrAfterStart = (blockOrdinal >= blockStart) ? 1u : 0u;
-        const uint32_t beforeEnd      = ((0u == blockLimit) || (blockOrdinal < blockStart + blockLimit)) ? 1u : 0u;
-        const uint32_t inWindow       = (0 == skipFrame && 0 != atOrAfterStart && 0 != beforeEnd) ? 1u : 0u;
+        const uint32_t inWindow       = (0 == skipFrame && 0 != zstdgpu_BlockWindowContains(blockOrdinal, blockStart, blockLimit)) ? 1u : 0u;
         const uint32_t entropyOnly    = (0 == skipFrame && isCmp && 0 == atOrAfterStart) ? 1u : 0u;
         const uint32_t emitBlock      = (0 != inWindow || 0 != entropyOnly) ? 1u : 0u;
         ++blockOrdinal;
