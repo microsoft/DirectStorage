@@ -619,17 +619,22 @@ static void RunBatchedCorrectnessTest(const std::vector<std::string>& allFiles,
         uint64_t dsz = zstdframe::GetTotalDecompressedSizeFromFile(f, &dsErr);
         if (dsz == 0) dsz = decompressedBudgetBytes;
 
+        // Overflow-safe: the budget is UINT64_MAX when uncapped, and an unknown size is charged
+        // the whole budget, so a plain sum can wrap and let an oversized batch through.
+        const bool overDecompressedBudget = batchDecompressedBytes >= decompressedBudgetBytes
+                                         || dsz > decompressedBudgetBytes - batchDecompressedBytes;
+
         // Process the batch if it is at the batch limits and move on to the next one
         if (!batch.empty() && (batch.size() >= countCap
                                || batchBytes + sz > budgetBytes
-                               || batchDecompressedBytes + dsz > decompressedBudgetBytes))
+                               || overDecompressedBudget))
         {
             runBatch();
         }
 
         batch.push_back(f);
         batchBytes += sz;
-        batchDecompressedBytes += dsz;
+        batchDecompressedBytes = (dsz > UINT64_MAX - batchDecompressedBytes) ? UINT64_MAX : batchDecompressedBytes + dsz;
     }
 
     // Finish running the final batch

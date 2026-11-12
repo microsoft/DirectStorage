@@ -89,10 +89,18 @@ void main()
                                      | (rawBlockCount > srt.rawBlockCountMax ? (1u << 1u) : 0u)
                                      | (rleBlockCount > srt.rleBlockCountMax ? (1u << 2u) : 0u);
 
-        srt.inoutPredicate[0] = predicateMask; // lower 32-bits of Stage 1 predicate
-        srt.inoutPredicate[1] = 0;             // upper 32-bits of Stage 1 predicate
-        srt.inoutPredicate[2] = predicateMask; // lower 32-bits of Stage 2 predicate
-        srt.inoutPredicate[3] = 0;             // upper 32-bits of Stage 2 predicate
+        // `reportsScratchOverflow` is set exactly when the host enforces this stage's checks with
+        // predication. When it is clear, stage 0 needs a readback: the maxima above are not yet
+        // known (they are typically zero), and the host sizes stage 1 from the counts it reads
+        // back. The bits must then not reach the stage-2 predicate either, which IS applied when
+        // stage 1 needs no readback (block constants supplied without frame constants) and would
+        // otherwise skip stage 2 silently on a correctly sized request.
+        const uint32_t enforcedMask = (0 != srt.reportsScratchOverflow) ? predicateMask : 0u;
+
+        srt.inoutPredicate[0] = enforcedMask; // lower 32-bits of Stage 1 predicate
+        srt.inoutPredicate[1] = 0;            // upper 32-bits of Stage 1 predicate
+        srt.inoutPredicate[2] = enforcedMask; // lower 32-bits of Stage 2 predicate
+        srt.inoutPredicate[3] = 0;            // upper 32-bits of Stage 2 predicate
 
         // Report the overflow instead of skipping silently.
         //

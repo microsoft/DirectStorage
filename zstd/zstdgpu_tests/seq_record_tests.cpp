@@ -21,6 +21,9 @@
 #include "zstdgpu_structs.h"
 #include "zstdgpu.h"
 
+#define ZSTDGPU_DISABLE_RESOURCE_DATA_GPU
+#include "zstdgpu_resources.h"
+
 namespace
 {
 
@@ -216,8 +219,9 @@ TEST(ArenaBound, SaturatesInsteadOfWrapping)
 TEST(ArenaBound, ExactCountOccupancySaturatesInsteadOfWrapping)
 {
     // Exact counts (caller-supplied, or read back from the GPU) size the arena through
-    // zstdgpu_ArenaBytesForCounts. In 32-bit arithmetic a large count wrapped to a small arena that
-    // slipped past the heap ceiling; the GPU-side occupancy check wrapped the same way.
+    // zstdgpu_ArenaBytesForCounts, which the GPU-side occupancy check also uses. In 32-bit
+    // arithmetic a large count wrapped to a small value; it must saturate instead.
+    // ArenaBound.ExactCountSaturationReachesTheHeapCeiling checks what sizing does with it.
     EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0u, 0x20000000u));
     EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0xffffffffu, 0u));
     EXPECT_EQ(0xffffffffu, zstdgpu_ArenaBytesForCounts(0xffffffffu, 0xffffffffu));
@@ -229,6 +233,22 @@ TEST(ArenaBound, ExactCountOccupancySaturatesInsteadOfWrapping)
     // Saturation must still be rejected once rounded to the heap alignment.
     const uint64_t aligned = ((uint64_t)zstdgpu_ArenaBytesForCounts(0u, 0x20000000u) + 0xffffull) & ~0xffffull;
     EXPECT_GE(aligned, kzstdgpu_MaxScratchHeapByteCount);
+}
+
+// Drives a saturating exact count through the real stage-2 sizing, whose total is what every
+// sizing entry point compares against kzstdgpu_MaxScratchHeapByteCount.
+TEST(ArenaBound, ExactCountSaturationReachesTheHeapCeiling)
+{
+    static zstdgpu_ResourceInfo info = {};
+
+    zstdgpu_ResourceInfo_Stage_2_Init(&info, 0u, 0x20000000u, /* arenaByteCount: exact counts */ 0u, 1u, 1u);
+    EXPECT_EQ(0xffffffffu, info.DecompressedLiterals_ByteSize);
+    EXPECT_GE(info.gpuOnly_ByteCount[2], kzstdgpu_MaxScratchHeapByteCount);
+
+    // A request just below saturation is sized exactly and stays under the ceiling.
+    zstdgpu_ResourceInfo_Stage_2_Init(&info, 1u, 3u, 0u, 1u, 1u);
+    EXPECT_EQ(zstdgpu_ArenaBytesForCounts(1u, 3u), info.DecompressedLiterals_ByteSize);
+    EXPECT_LT(info.gpuOnly_ByteCount[2], kzstdgpu_MaxScratchHeapByteCount);
 }
 
 /***********************************************************************************************************************

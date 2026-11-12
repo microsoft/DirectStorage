@@ -1168,6 +1168,8 @@ struct DemoCtx
     d3d12aid_MappedBuffer       zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer       zstdUnCompressedFramesRefs;
     d3d12aid_MappedBuffer       zstdFrameStatus;
+    d3d12aid_MappedBuffer       zstdFrameResumeState;
+    d3d12aid_MappedBuffer       zstdBlockWindowPerFrame;
     ID3D12Heap                 *readbackHeap[3];
     ID3D12Heap                 *uploadHeap[3];
     ID3D12Heap                 *defaultHeap[3];
@@ -1217,6 +1219,10 @@ static void demoCleanup(DemoCtx *ctx)
         d3d12aid_MappedBuffer_Release(&ctx->zstdUnCompressedFramesRefs);
     if (NULL != ctx->zstdFrameStatus.bufGpu)
         d3d12aid_MappedBuffer_Release(&ctx->zstdFrameStatus);
+    if (NULL != ctx->zstdFrameResumeState.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdFrameResumeState);
+    if (NULL != ctx->zstdBlockWindowPerFrame.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->zstdBlockWindowPerFrame);
 
     if (NULL != ctx->timestamps.heap)
         d3d12aid_Timestamps_Release(&ctx->timestamps);
@@ -1412,6 +1418,8 @@ static int demoRun(void *demoCtx)
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesMemory = ctx->zstdUnCompressedFramesMemory;
     d3d12aid_MappedBuffer      &zstdUnCompressedFramesRefs   = ctx->zstdUnCompressedFramesRefs;
     d3d12aid_MappedBuffer      &zstdFrameStatus              = ctx->zstdFrameStatus;
+    d3d12aid_MappedBuffer      &zstdFrameResumeState         = ctx->zstdFrameResumeState;
+    d3d12aid_MappedBuffer      &zstdBlockWindowPerFrame      = ctx->zstdBlockWindowPerFrame;
     ID3D12Heap                *(&readbackHeap)[3]            = ctx->readbackHeap;
     ID3D12Heap                *(&uploadHeap)[3]              = ctx->uploadHeap;
     ID3D12Heap                *(&defaultHeap)[3]             = ctx->defaultHeap;
@@ -1449,6 +1457,8 @@ static int demoRun(void *demoCtx)
     uint32_t blockStartPerFrame = 0; // first block ordinal decoded in every frame
     uint32_t blockDstOffset     = 0; // bytes already decoded by preceding slices, added to every frame's destination
     uint32_t blockSlice         = 0; // 0 => one dispatch per batch; N => decode N blocks per dispatch, resuming across dispatches
+    bool     blockSliceGiven    = false; // --blk-slice was passed (it and --slice-mb both set blockSlice)
+    bool     sliceMbGiven       = false; // --slice-mb was passed
     uint64_t planBudgetBytes    = 0; // 0 => no planning; N => per-DISPATCH decompressed byte budget, packing whole frames alongside slice pieces
     uint32_t zstdOffs = 0;
 
@@ -1531,16 +1541,21 @@ static int demoRun(void *demoCtx)
                         else if (nextBlockDstOfs)
                             blockDstOffset = value;
                         else if (nextBlockSlice)
+                        {
                             blockSlice = value;
+                            blockSliceGiven = true;
+                        }
                         else if (nextSliceMb)
                         {
                             /*
                              *  The caller states a DECOMPRESSED byte budget -- the axis it actually
                              *  has, since scratch is sized from decompressed size -- and the library
                              *  converts it to a block count. No block header is read here, and the
-                             *  demo never counts the frame's blocks.
+                             *  demo never counts the frame's blocks. Zero disables slicing, as it
+                             *  does for --blk-slice; the library would round it up to one block.
                              */
-                            blockSlice = zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)value * 1024ull * 1024ull);
+                            blockSlice = (0 != value) ? zstdgpu_SliceBlockCountForDecompressedBudget((uint64_t)value * 1024ull * 1024ull) : 0;
+                            sliceMbGiven = true;
                         }
                         else if (nextPlanMb)
                         {
@@ -1747,13 +1762,19 @@ static int demoRun(void *demoCtx)
                 ctx->retv = 1;
                 return 0;
             }
+            if (blockSliceGiven && sliceMbGiven)
+            {
+                debugPrint(L"[ERROR] '--blk-slice' and '--slice-mb' both set the per-frame slice size; pass only one.\n");
+                ctx->retv = 1;
+                return 0;
+            }
             /*
              *  --plan-mb and --blk-slice are alternative ways to drive the same per-frame window and
              *  resume machinery, and they disagree about what the budget means: --blk-slice gives
              *  EVERY frame the same block count per dispatch, while --plan-mb bounds the DISPATCH.
              *  Accepting both would silently let one overwrite the other.
              */
-            if (0 != planBudgetBytes && (0 != blockSlice || 0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockDstOffset))
+            if (0 != planBudgetBytes && (blockSliceGiven || sliceMbGiven || 0 != blockLimitPerFrame || 0 != blockStartPerFrame || 0 != blockDstOffset))
             {
                 debugPrint(L"[ERROR] '--plan-mb' cannot be combined with '--blk-slice', '--slice-mb', '--blk-limit', "
                            L"'--blk-start' or '--blk-dst-ofs': it plans every frame's window itself from a per-dispatch "
@@ -1800,7 +1821,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--blk-start <ordinal>     [Optional] First block ordinal decoded in every frame. Used with --blk-limit to decode a mid-frame slice.\n");
                 debugPrint(L"\t--blk-dst-ofs <bytes>     [Optional] Bytes already decoded by preceding slices, added to every frame's destination offset so a mid-frame slice lands where it belongs.\n");
                 debugPrint(L"\t--blk-slice <count>       [Optional] Decodes each frame as a sequence of slices of exactly <count> blocks, sharing one destination and one resume buffer. Exercises carried repeat offsets and the carried output cursor. Slice boundaries are plain arithmetic (0, K, 2K, ...); every block ordinal is a legal cut. Mutually exclusive with --blk-limit/--blk-start/--blk-dst-ofs.\n");
-                debugPrint(L"\t--slice-mb <MB>           [Optional] Same as --blk-slice but stated as a per-slice DECOMPRESSED megabyte budget, converted by zstdgpu_SliceBlockCountForDecompressedBudget. This is the axis a caller actually has, since scratch is sized from decompressed size.\n");
+                debugPrint(L"\t--slice-mb <MB>           [Optional] Same as --blk-slice but stated as a per-slice DECOMPRESSED megabyte budget, converted by zstdgpu_SliceBlockCountForDecompressedBudget. This is the axis a caller actually has, since scratch is sized from decompressed size. 0 disables slicing. Mutually exclusive with --blk-slice.\n");
                 debugPrint(L"\t--plan-mb <MB>            [Optional] Per-DISPATCH decompressed megabyte budget. Unlike --slice-mb (which gives every frame the same block count), the planner packs as many whole frames into a dispatch as fit and slices only a frame that does not, so a large frame no longer monopolises a dispatch. Cannot be combined with --blk-slice/--slice-mb.\n");
                 if (badArg)
                 {
@@ -1916,7 +1937,8 @@ static int demoRun(void *demoCtx)
 
             vcnt += zstdFrameInfo[i].uncompSize != 0 ? 1 : 0;
         }
-        zstdUnCompressedFramesMemorySizeInBytes = offs;
+        // Every destination is shifted by --blk-dst-ofs, so the buffer must reach that far too.
+        zstdUnCompressedFramesMemorySizeInBytes = offs + blockDstOffset;
 
         // Frames without a decompressed size (or the synthetic bad frame) cannot be
         // decoded and have no reference output to compare against. Instead of the
@@ -1991,6 +2013,7 @@ static int demoRun(void *demoCtx)
     // to zero bytes; keep a non-empty readback allocation so resource creation and
     // the library's output binding stay valid.
     if (maxBatchDecompBytes == 0) maxBatchDecompBytes = 256;
+    maxBatchDecompBytes += blockDstOffset; // every destination is shifted by --blk-dst-ofs
 
     // Reusable per-batch host buffers. Capacity is 'frameCapacity' (not the batch
     // frame count) because a batch re-scan may collect more frames than it finally
@@ -2180,8 +2203,6 @@ static int demoRun(void *demoCtx)
      *  ALLOW_UNORDERED_ACCESS -- exactly what the library needs -- and its CPU mapping makes the
      *  carried state inspectable when debugging a slice sequence.
      */
-    d3d12aid_MappedBuffer zstdFrameResumeState = {};
-    d3d12aid_MappedBuffer zstdBlockWindowPerFrame = {};
     if (slicing)
     {
         d3d12aid_MappedBuffer_Create(&zstdFrameResumeState, device, 1, sizeof(uint32_t) * kzstdgpu_FrameResumeDwordCount * maxBatchFrames, D3D12_HEAP_TYPE_READBACK);
@@ -2259,8 +2280,8 @@ static int demoRun(void *demoCtx)
             bool     sliceLastForBatch = true;
             uint64_t slicePeakPlannedBytes = 0;
 
-            uint32_t sliceStart = 0;
             uint32_t sliceIdx = 0;
+            uint64_t batchClksAll = 0;
             for (;;)
             {
             if (slicing)
@@ -2463,7 +2484,7 @@ static int demoRun(void *demoCtx)
                 }
                 // A batch of only undecodable frames produces no output; keep a
                 // non-empty size so the output binding stays valid.
-                zstdUnCompressedFramesMemorySizeInBytes = offs != 0 ? offs : 256;
+                zstdUnCompressedFramesMemorySizeInBytes = (offs != 0 ? offs : 256) + blockDstOffset;
             }
             zstdCompressedFramesMemorySizeInBytes = batchSpanAl;
 
@@ -3036,12 +3057,17 @@ static int demoRun(void *demoCtx)
                 #undef WRITE_CSV_DATA
                 #undef WRITE_CSV_HEADER
 
-                const uint64_t ns = (freqGpuClocks != 0) ? (clksAll * 1000000000) / freqGpuClocks : 0;
+                // A sliced batch takes several dispatches; its latency is their sum, and its
+                // bandwidth is the whole batch's output over that sum. Until the last slice the
+                // recorded sample is a partial total, which the next slice overwrites.
+                batchClksAll += clksAll;
+                const uint64_t ns = (freqGpuClocks != 0) ? (batchClksAll * 1000000000) / freqGpuClocks : 0;
                 const double batchBw = (ns != 0) ? ((double)zstdUnCompressedFramesMemorySizeInBytes / ns) : 0.0;
-                const double batchUs = (freqGpuClocks != 0) ? (double)(clksAll * 1000000) / (double)freqGpuClocks : 0.0;
+                const double batchUs = (freqGpuClocks != 0) ? (double)(batchClksAll * 1000000) / (double)freqGpuClocks : 0.0;
                 if (NULL != csvFile)
                 {
-                    if (timestampsEnabled)
+                    // A CSV row is one dispatch; a slice's own output size is not known here.
+                    if (timestampsEnabled && !slicing)
                         fwprintf_s(csvFile, L"%lf\n", batchBw);
                     else
                         fwprintf_s(csvFile, L"n/a\n");
@@ -3080,7 +3106,6 @@ static int demoRun(void *demoCtx)
             PIXEndEvent();
 
             ++sliceIdx;
-            sliceStart += blockLimitPerFrame;
             if (!slicing)
                 break;
             if (!windowOpen)

@@ -1758,8 +1758,8 @@ static void zstdgpu_RecomputeAndRetrieveBlockInfoConstants(uint32_t *outCntLit, 
             //      read in place from the compressed buffer, so this is slack, never a shortfall.)
             //   - sequences: every sequence emits >= 3 output bytes, so nseq <= dstBytes/3.
             // Because the single-submission path cannot read counters back from the GPU, an
-            // underestimate here is not recoverable -- it silently skips predicated work and
-            // corrupts the output. These must remain bounds.
+            // underestimate here is not recoverable within the request -- the predicated work is
+            // skipped and every frame fails with ScratchExceeded. These must remain bounds.
             cntLit = req->zstdUncompressedFramesByteCount;
             cntSeq = zstdgpu_OutputSizeToSequenceCount(req->zstdUncompressedFramesByteCount);
 
@@ -1814,6 +1814,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
 
     if (proceed)
     {
+        // Refuse before anything is sized: sizing mutates the request (estimated block maxima, resInfo).
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
+
         if (zstdgpu_AreReadbackCountersMissing(req, stageIndex))
         {
             return ZSTDGPU_ENUM_CONST(StatusResourceCreationFailed);
@@ -1853,7 +1856,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetGpuMemoryRequirement(uint64_t *outDefaultHeapByt
         // (This was originally a stopgap justified by literals and sequences being sized
         //  separately, at `1 + R/3` times the decompressed size for an R-byte sequence record. The
         //  merged arena, at `R/3`, removed that justification -- but not reason 1.)
-        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: scratch requirement exceeds the maximum supported heap size. "
@@ -1922,12 +1924,14 @@ ZSTDGPU_ENUM(Status) zstdgpu_GetAllStageGpuMemoryRequirement(uint64_t *outDefaul
 
     if (proceed)
     {
+        // Refuse before anything is sized: sizing mutates the request (estimated block maxima, resInfo).
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
+
         zstdgpu_GetAllStageGpuMemoryRequirementInternal(outDefaultHeapByteCount, outUploadHeapByteCount, outReadbackHeapByteCount, req);
 
         // See the matching check in `zstdgpu_GetGpuMemoryRequirement` for why this must stay: it is
         // both the report path for an oversized batch AND the backstop that makes the saturating
         // arena bound safe.
-        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (*outDefaultHeapByteCount >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
@@ -2208,6 +2212,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
 
     if (proceed)
     {
+        // Refuse before anything is sized: sizing mutates the request (estimated block maxima, resInfo).
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
+
         if (zstdgpu_AreReadbackCountersMissing(req, stageIndex))
         {
             return ZSTDGPU_ENUM_CONST(StatusResourceCreationFailed);
@@ -2239,7 +2246,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext 
          *  is present on the public sizing API but absent on both internal-memory submit paths,
          *  which is worse than having none, because the guard then merely looks present.
          */
-        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (req->resInfo.gpuOnly_ByteCount[stageIndex] >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: stage scratch requirement exceeds the maximum supported heap "
@@ -2358,6 +2364,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
 
     if (proceed)
     {
+        // Refuse before anything is sized: sizing mutates the request (estimated block maxima, resInfo).
+        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
+
         ID3D12Device *device = req->device;
         uint32_t success = 1;
         uint64_t dflt, upld, rdbk;
@@ -2375,7 +2384,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
          *  and the whole batch would fail with `kzstdgpu_FrameStatus_ScratchExceeded` after the
          *  allocation. Rejecting here reports the oversized request at sizing time instead.
          */
-        ZSTDGPU_REJECT_UNSOUND_BLOCK_COUNTS(req);
         if (dflt >= kzstdgpu_MaxScratchHeapByteCount)
         {
             ZSTDGPU_ASSERT(!"zstdgpu: single-submission scratch requirement exceeds the maximum "
@@ -2764,6 +2772,11 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(uploadBarrierCount, barriers);
     }
 #if ZSTDGPU_ENABLE_TIMESTAMPS
+    // Each request starts from the first query slot. Without this, a reused per-request context
+    // whose caller never called `zstdgpu_ReadbackTimestamps` keeps appending past the end of the
+    // query heap, and the command list fails to close. Slots left unresolved by the previous
+    // request are simply overwritten.
+    req->timestamps.activatedSlotCount = 0;
     // NOTE(pamartis): So far we don't include upload into measurement intentionally
     req->timestampSlot[kzstdgpu_KernelScope_Stage0_Start] = d3d12aid_Timestamps_Push(&req->timestamps, cmdList);
 #endif

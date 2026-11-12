@@ -593,9 +593,8 @@ TEST_F(ZstdDecompressionTests, RequestTooLargeStatusTest)
 }
 
 // Decodes through the C API on a caller-owned per-request context, so a test can reuse one context
-// across requests -- which ZstdDecompressionWork::Decompress never does.
-ZSTDGPU_API void zstdgpu_ReadbackTimestamps(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandList* cmdList);
-
+// across requests -- which ZstdDecompressionWork::Decompress never does. It deliberately never calls
+// zstdgpu_ReadbackTimestamps: a reused context must not depend on it to stay within its query slots.
 class ReusedContextWork : public ZstdDecompressionWork
 {
 public:
@@ -626,12 +625,14 @@ public:
 
     // Decodes one request on `req`, staged and with library-owned memory, with `resumeState`
     // attached (or detached when NULL). Returns the per-frame statuses and decoded frames.
+    // `blockInfo`, when given, is passed to zstdgpu_SetupBlockInfoConstants as {literal bytes, sequences}.
     Frames Decode(
         zstdgpu_PerRequestContext req,
         std::vector<uint8_t>& data,
         OffsetsAndSizes& offsetsAndSizes,
         ID3D12Resource* resumeState,
-        std::vector<uint32_t>& outFrameStatus)
+        std::vector<uint32_t>& outFrameStatus,
+        const uint32_t* blockInfo = nullptr)
     {
         const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
         const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
@@ -649,17 +650,15 @@ public:
         EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupInputsAsFramesInGpuMemory(&stageCount, req, input.get(), static_cast<uint32_t>(data.size()), inputRefs.get(), frameCount));
         EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupOutputs(req, output.get(), offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, outputRefs.get(), frameCount, status.get()));
         EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupResumeState(req, resumeState, /* clearResumeState */ 1));
+        if (nullptr != blockInfo)
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupBlockInfoConstants(req, blockInfo[0], blockInfo[1]));
+        }
 
         for (uint32_t stage = 0; stage < stageCount; ++stage)
         {
             m_commandList->Reset(m_commandAllocator.get(), nullptr);
             EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SubmitWithInternalMemory(req, stage, m_commandList.get()));
-            if (stage + 1 == stageCount)
-            {
-                // Advances the context's GPU timestamp queries once per request, as the demo does.
-                // A reused context that skips this runs out of query slots on its next request.
-                zstdgpu_ReadbackTimestamps(req, m_commandList.get());
-            }
             m_commandList->Close();
             ExecuteCommandListsSynchronously(m_commandList.get());
         }
@@ -718,6 +717,43 @@ TEST_F(ZstdDecompressionTests, DetachedResumeStateIsNotWritten)
 
     const std::vector<uint8_t> after = work.Read(callerResume.get());
     EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume buffer was written";
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}
+
+// Block constants without frame constants: stage 0 needs a readback (block-count maxima are not
+// known yet), while stage 1 does not, so stage 2 IS predicated. Stage 0's comparison against the
+// unknown (zero) block maxima must not leak into that predicate, or stage 2 -- which copies the
+// raw blocks -- is skipped silently and the request reports success with no output.
+TEST_F(ZstdDecompressionTests, BlockConstantsWithoutFrameConstantsDecode)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionBlockConstantsOnlyTest");
+
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    std::vector<uint8_t> requestMemory(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_PerRequestContext req = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x41);
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x42);
+    const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+
+    // RAW blocks only: no literals and no sequences.
+    const uint32_t blockInfo[2] = {0u, 0u};
+
+    std::vector<uint32_t> frameStatus;
+    Frames frames = work.Decode(req, data, offsetsAndSizes, nullptr, frameStatus, blockInfo);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0], std::vector<uint8_t>{0x41});
+    EXPECT_EQ(frames[1], std::vector<uint8_t>{0x42});
 
     void* memory = nullptr;
     uint32_t memorySize = 0;

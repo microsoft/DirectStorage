@@ -95,6 +95,22 @@ struct FrameBuilder
         u8(symbol);
     }
 
+    /**
+     *  `Block_Size` is the COMPRESSED payload size here. The host enumeration never decodes the
+     *  payload, so any bytes will do; they are chosen to look like a block header so that a walk
+     *  that tried to read them as one would go visibly wrong.
+     */
+    uint32_t CmpBlock(uint32_t payloadSize, bool lastBlock)
+    {
+        BlockHeader(2u, payloadSize, lastBlock);
+        const uint32_t payloadOffs = (uint32_t)bytes.size();
+        for (uint32_t i = 0; i < payloadSize; ++i)
+        {
+            u8(0x09u);
+        }
+        return payloadOffs;
+    }
+
     /** The API requires the backing allocation to be a multiple of 4 bytes. */
     uint32_t PaddedSize() const { return ((uint32_t)bytes.size() + 3u) & ~3u; }
 
@@ -169,6 +185,60 @@ TEST(CollectBlocks, ReportsEveryBlockOfASingleFrame)
     EXPECT_EQ('D', (char)blob[raw[0].offs + 3u]);
     EXPECT_EQ('E', (char)blob[raw[1].offs]);
     EXPECT_EQ('F', (char)blob[raw[1].offs + 1u]);
+}
+
+/**
+ *  Compressed blocks interleaved with RAW and RLE ones. A compressed block's offset and size are
+ *  reported as-is, and the walk must step over its payload by `Block_Size` -- unlike RLE. The RAW
+ *  and RLE blocks after each compressed block only land where expected if it did.
+ */
+TEST(CollectBlocks, CompressedBlocksAreReportedAndSteppedOver)
+{
+    FrameBuilder fb;
+
+    fb.BeginFrame(100u);
+    const uint32_t raw0Offs = fb.RawBlock("AB", 2u, false);
+    const uint32_t cmp0Offs = fb.CmpBlock(5u, false);
+    fb.RleBlock((uint8_t)'Q', 7u, false);
+    const uint32_t cmp1Offs = fb.CmpBlock(3u, false);
+    const uint32_t raw1Offs = fb.RawBlock("C", 1u, true);
+
+    const uint32_t contentSize = (uint32_t)fb.bytes.size();
+    const std::vector<uint8_t> blob = fb.PaddedCopy();
+
+    zstdgpu_CountFramesAndBlocksInfo counts = {};
+    zstdgpu_CountFramesAndBlocks(&counts, blob.data(), (uint32_t)blob.size(), contentSize);
+
+    EXPECT_EQ(1u, counts.frameCount);
+    EXPECT_EQ(2u, counts.rawBlockCount);
+    EXPECT_EQ(1u, counts.rleBlockCount);
+    EXPECT_EQ(2u, counts.cmpBlockCount);
+
+    std::vector<zstdgpu_OffsetAndSize> frames(counts.frameCount);
+    std::vector<zstdgpu_FrameInfo>     frameInfos(counts.frameCount);
+    zstdgpu_CollectFrames(frames.data(), frameInfos.data(), counts.frameCount, blob.data(), (uint32_t)blob.size(), contentSize);
+
+    EXPECT_EQ(contentSize, frames[0].size);
+
+    std::vector<zstdgpu_OffsetAndSize> raw(counts.rawBlockCount);
+    std::vector<zstdgpu_OffsetAndSize> rle(counts.rleBlockCount);
+    std::vector<zstdgpu_OffsetAndSize> cmp(counts.cmpBlockCount);
+
+    zstdgpu_CollectBlocks(raw.data(), rle.data(), cmp.data(), frames.data(), frameInfos.data(),
+                          0u, counts.frameCount, blob.data(), (uint32_t)blob.size(), contentSize);
+
+    EXPECT_EQ(cmp0Offs, cmp[0].offs);
+    EXPECT_EQ(5u, cmp[0].size);
+    EXPECT_EQ(cmp1Offs, cmp[1].offs);
+    EXPECT_EQ(3u, cmp[1].size);
+
+    EXPECT_EQ(raw0Offs, raw[0].offs);
+    EXPECT_EQ(raw1Offs, raw[1].offs);
+    EXPECT_EQ(1u, raw[1].size);
+    EXPECT_EQ('C', (char)blob[raw[1].offs]);
+
+    EXPECT_EQ((uint32_t)'Q', rle[0].offs);
+    EXPECT_EQ(7u, rle[0].size);
 }
 
 /**
