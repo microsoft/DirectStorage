@@ -906,6 +906,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         const zstdgpu_CompiledShader *shaderPrefixSumInclusive = ZSTDGPU_KERNEL_GET(PrefixSumInclusive);
 
         context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
+        context->executeIndirectWorkaround = false;
 
 #if defined(_GAMING_XBOX_SCARLETT)
         ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_LdsFseCache32);
