@@ -63,10 +63,13 @@
     ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          ) \
     \
     ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        ) \
-    ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        ) \
-    ZSTDGPU_BUFFER(uint32_t                                 , FrameResumeState              )
+    ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
 
-#define ZSTDGPU_BUFFERS_LIST_STAGE_2() /* empty so far*/
+// FrameResumeState is not read back: by the end of stage 2 it holds the state for the NEXT slice,
+// not the input this request decoded with, and a caller-supplied buffer stays in UNORDERED_ACCESS
+// and may be larger than the request, so a generic CopyResource from it would be invalid.
+#define ZSTDGPU_BUFFERS_LIST_STAGE_2() \
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameResumeState              )
 
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1() /* empty so far*/
 

@@ -693,6 +693,11 @@ static void zstdgpu_Test_DecompressSequences(zstdgpu_ResourceDataCpu & cpuRes, z
             zstdgpu_FinaliseSequenceOffsets_SRT srt;
             zstdgpu_Srt_Fill(srt, gpuReadbackRes, /* tgOffset */0, /* workItemCount */ gpuReadbackRes.Counters->Seq_Streams_DecodedItems, cpuArenaTopDwords);
             srt.inoutDecompressedLiterals_Seqs = (uint32_t *)cpuRes.DecompressedLiterals;
+            // The resume state is not read back from the GPU (by then it holds the NEXT slice's
+            // state). The decode started from the zeroed state the CPU reference also uses; the
+            // demo refuses --sim-gpu with slicing, so that is the right input here.
+            ZSTDGPU_ASSERT(NULL != cpuRes.FrameResumeState);
+            srt.inoutFrameResumeState = cpuRes.FrameResumeState;
             for (uint32_t i = 0; i < gpuReadbackRes.Counters->Seq_Streams_DecodedItems; ++i)
             {
                 zstdgpu_ShaderEntry_FinaliseSequenceOffsets(srt, i);
