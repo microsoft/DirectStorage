@@ -22,9 +22,14 @@
 [numthreads(kzstdgpu_TgSizeX_MemsetMemcpy, 1, 1)]
 void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 {
-    i += zstdgpu_ConvertTo32BitGroupId(groupId, ZstdConstants_MemsetMemcpy.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
+    // Read tgOffset and workItemCount through zstdgpu_Srt_Fill, which resolves workItemCount under executeIndirectWorkaround.
+    zstdgpu_MemsetMemcpy_SRT srt;
 
-    if (i >= ZstdConstants_MemsetMemcpy.workItemCount)
+    zstdgpu_Srt_Fill(srt);
+
+    i += zstdgpu_ConvertTo32BitGroupId(groupId, srt.tgOffset) * kzstdgpu_TgSizeX_MemsetMemcpy;
+
+    if (i >= srt.workItemCount)
     {
         return;
     }
