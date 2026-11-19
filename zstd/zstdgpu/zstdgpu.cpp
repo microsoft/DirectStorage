@@ -949,6 +949,14 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
         context->DecompressLiterals_StreamsPerGroup = kzstdgpu_StreamsPerGroup_DecompressLiterals;
         context->DecompressSequences_FseArenaStreamCapacity = 0;
         context->DecompressSequencesFseArena_StreamsPerGroup = 0;
+#if defined(_GAMING_XBOX)
+        context->executeIndirectWorkaround = false;
+#else
+        // Certain GPUs don't honor root constants set on the command list for an indirect dispatch whose
+        // command signature also sets root constants, so on PC every indirect dispatch uses a dispatch-only
+        // command signature (see zstdgpu_DispatchExecuteIndirectWorkaround).
+        context->executeIndirectWorkaround = true;
+#endif
 
 #if defined(_GAMING_XBOX_SCARLETT)
         ZSTDGPU_KERNEL_MAP(DecompressSequences, DecompressSequences_SingleStream_LdsFseCache32);
@@ -984,8 +992,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             context->DecompressSequencesFseArena_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
             context->DecompressSequences_FseArenaStreamCapacity = zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequencesFseArena_StreamsPerGroup);
             ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
-
-            context->executeIndirectWorkaround = (desc.DeviceId >= 0x7500);
         }
         else if (desc.VendorId == 0x10de)
         {
@@ -2385,8 +2391,8 @@ static void zstdgpu_DispatchExecuteIndirectWorkaround(
     uint32_t srtRootConstSlot,
     uint32_t dispatchSlot)
 {
-    // See comments in HLSL function zstdgpu_EmitDispatch for an extension to this to avoid exceeding 16 bits
-    // in the X dimension, but as those comments say, that is unnecessary.
+    // zstdgpu_EmitDispatch keeps each dimension of this single record within the D3D12 limit of 65,535
+    // thread groups (see the comments there).
 
     const uint32_t data[2] = { 0, ~dispatchSlot }; // { tgOffset, encoded workItemCount }
     cmdList->SetComputeRoot32BitConstants(srtRootConstSlot, 2, data, 0);

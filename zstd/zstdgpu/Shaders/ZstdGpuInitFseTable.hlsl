@@ -64,6 +64,10 @@ void main(uint2 groupId2 : SV_GroupId, uint32_t i : SV_GroupThreadId)
 
     const uint32_t groupId = zstdgpu_ConvertTo32BitGroupId(groupId2, srt.tgOffset);
 
+    // Each group builds one table. Groups past the last table have no work (see zstdgpu_EmitDispatch).
+    if (groupId >= srt.workItemCount)
+        return;
+
     const uint32_t cmpBlockCount = srt.inCounters[0].Blocks_CMP;
     if (srt.tableType == 1u) // LLen
     {
