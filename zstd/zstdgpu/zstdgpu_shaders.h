@@ -65,25 +65,25 @@ static void zstdgpu_EmitDispatch(ZSTDGPU_RW_BUFFER(uint32_t) dispatchArgs, ZSTDG
 
 #if defined(_GAMING_XBOX) || defined(__XBOX_SCARLETT) || defined(__XBOX_ONE)
     const bool writeSingleArgumentRecordOnly = true;
+    const uint32_t tgCountMaxX = ~0u; // zstdgpu_ConvertTo32BitGroupId reads the whole group id from X
 #else
-    // Part of the executeIndirectWorkaround requires MaxCommandCount=1 and avoiding an indirect count buffer.
-    // We could ensure that while still avoiding the potential to exceed a 16-bit group count in one dimension:
-    //  - Unconditionally record two plain dispatches on the command list. The second will often be empty.
-    //  - Set tgOffset directly to a special encoded value before the second dispatch that the shader checks
-    //    and fixes up, like is done for workItemCount.
-    // However, that is unnecessary because:
-    //  - GPUs/drivers that may need executeIndirectWorkaround support 32-bits in the _X_ dimension.
-    //  - The current D3D debug layer nor GBV warn about an _indirect_-dispatch exceeding 16-bits in any dimension.
+    // The executeIndirectWorkaround needs MaxCommandCount=1 and no indirect count buffer, so each dispatch is a
+    // single record. A record with more than 65,535 thread groups, the D3D12 limit per dimension, launches rows of
+    // 2^kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2 groups, which is the layout zstdgpu_ConvertTo32BitGroupId
+    // expects. The last row can launch groups past tgCount, so every indirectly dispatched kernel must return
+    // without side effects for a group that has no work.
     const bool writeSingleArgumentRecordOnly = executeIndirectWorkaround;
+    const uint32_t tgCountMaxX = 65535u; // D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION
 #endif
 
     if (writeSingleArgumentRecordOnly)
     {
-        // dispatch 0: no problems with # of threadgroup per dimension, support 32-bit
+        // dispatch 0: all thread groups, in rows when tgCount exceeds tgCountMaxX
+        const bool useRows = tgCount > tgCountMaxX;
         dispatchArgs[baseIdx + 0] = 0;          // tgOffset
         dispatchArgs[baseIdx + 1] = elemCount;  // workItemCount
-        dispatchArgs[baseIdx + 2] = tgCount;
-        dispatchArgs[baseIdx + 3] = 1;
+        dispatchArgs[baseIdx + 2] = useRows ? (1u << kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2) : tgCount;
+        dispatchArgs[baseIdx + 3] = useRows ? ((tgCount - 1u) >> kzstdgpu_MaxCount_ThreadGroupsPerDimensionLog2) + 1u : 1u;
         dispatchArgs[baseIdx + 4] = 1;
         dispatchCnts[slot] = 1;
     }
@@ -3645,6 +3645,11 @@ static void zstdgpu_ShaderEntry_DecompressSequences_MultiStream_LdsOutCache(ZSTD
 {
     const uint32_t seqStreamCnt = srt.inCounters[0].Seq_Streams;
     const uint32_t seqStreamBeg = groupId * streamsPerGroup;
+
+    // Groups past the last sequence stream have no work (see zstdgpu_EmitDispatch). The condition is uniform
+    // across the group, so the whole group returns before any wave operation or barrier.
+    if (seqStreamBeg >= seqStreamCnt)
+        return;
 
     const uint32_t seqStreamCntInGroup = zstdgpu_MinU32(seqStreamCnt - seqStreamBeg, streamsPerGroup);
 
