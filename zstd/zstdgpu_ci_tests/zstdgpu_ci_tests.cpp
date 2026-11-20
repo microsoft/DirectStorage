@@ -15,6 +15,9 @@
 //   ZstdGpuCorrectnessTests — These scenarios are executed over the corpus in batches (where appropriate) 
 //     - ExternalMemory     : --chk-gpu --ext-mem
 //     - ExternalMemorySeq  : --chk-gpu --ext-mem --ssm
+//     - ExternalMemoryPartial : --chk-gpu --ext-mem --ssm --out-kb 1024 --out-slots 16384
+//                            (every batch decoded as a series of 1 MiB partial-decode requests;
+//                             the slot override covers the fuzz corpus's very small blocks)
 //     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --ssm  (skipped on ARM)
 //
 //   ZstdGpuDemoTests — per-file scenarios (one .zst file per parameter):
@@ -720,6 +723,11 @@ TEST_P(ZstdGpuCorrectnessTests, ExternalMemory)
 TEST_P(ZstdGpuCorrectnessTests, ExternalMemorySeq)
 {
     RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--ssm"});
+}
+
+TEST_P(ZstdGpuCorrectnessTests, ExternalMemoryPartial)
+{
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--ssm", "--out-kb", "1024", "--out-slots", "16384"});
 }
 
 TEST_P(ZstdGpuCorrectnessTests, D3D12DebugLayerSeq)
