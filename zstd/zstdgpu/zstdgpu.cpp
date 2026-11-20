@@ -1689,6 +1689,15 @@ static void zstdgpu_GetCountLimits(uint32_t *outRaw, uint32_t *outRle, uint32_t 
     }
 }
 
+// Literal bytes can only come from compressed blocks, so a literal limit without a compressed-block limit is a
+// configuration error.
+static bool zstdgpu_CountLimitsAreConsistent(const zstdgpu_PerRequestContextImpl *req)
+{
+    uint32_t limRaw, limRle, limCmp, limLit, limSeq;
+    zstdgpu_GetCountLimits(&limRaw, &limRle, &limCmp, &limLit, &limSeq, req);
+    return 0 == limLit || limCmp > 0;
+}
+
 static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, uint32_t *outCntRle, uint32_t *outCntCmp, zstdgpu_PerRequestContext req)
 {
     uint32_t cntRaw, cntRle, cntCmp;
@@ -2016,7 +2025,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
     {
         if (stageIndex == 2)
         {
-            ZSTDGPU_ASSERT(req->zstdUncompressedLitByteCountMax == 0 || req->zstdCmpBlockCountMax > 0);
+            ZSTDGPU_ASSERT(zstdgpu_CountLimitsAreConsistent(req));
         }
 
         zstdgpu_ResourceDataGpu_Term(&req->resData, stageIndex);
@@ -2118,7 +2127,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerReques
     proceed = proceed && (NULL != uploadHeap || 0 == uploadHeapMemReq);
     proceed = proceed && (NULL != readbackHeap || 0 == readbackHeapMemReq);
     proceed = proceed && (NULL != shaderVisibleHeap || 0 == shaderVisibleHeapDscCount);
-    proceed = proceed && (req->zstdUncompressedLitByteCountMax == 0 || req->zstdCmpBlockCountMax > 0);
+    proceed = proceed && zstdgpu_CountLimitsAreConsistent(req);
     proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(defaultHeap_OffsetInBytes);
     proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(uploadHeap_OffsetInBytes);
     proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(readbackHeap_OffsetInBytes);
@@ -2959,6 +2968,17 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: Stage 0]");
+        /*
+         *  Without a readback the check below reports overflow, so it needs the block limits stage 1 will be sized
+         *  with. On the per-stage submission path stage 1 has not been sized yet when stage 0 is recorded, so they
+         *  are derived here from the same inputs stage-1 sizing uses; otherwise this would compare against limits
+         *  left unset or left over from a previous request.
+         */
+        if (0 == zstdgpu_IsReadbackRequired(req, 0))
+        {
+            uint32_t cntRaw, cntRle, cntCmp;
+            zstdgpu_RecomputeAndRetrieveFrameInfoConstants(&cntRaw, &cntRle, &cntCmp, req);
+        }
         uint32_t limRaw, limRle, limCmp, limLit, limSeq;
         zstdgpu_GetCountLimits(&limRaw, &limRle, &limCmp, &limLit, &limSeq, req);
         (void)limLit;

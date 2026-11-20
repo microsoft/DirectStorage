@@ -981,6 +981,33 @@ TEST_F(ZstdDecompressionTests, DetachedResumeRecordIsNotWritten)
     EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume record was written";
 }
 
+// A request set up for single submission may still be recorded one stage at a time. Stage 0 then reports block-count
+// overflow before stage 1 has been sized, so it must compare against the limits stage 1 will be sized with rather
+// than against limits that were never set (which reported every frame as BlockCountExceeded).
+TEST_F(ZstdDecompressionTests, SingleSubmissionRecordedPerStageDecodes)
+{
+    PartialDecodeTest test(L"ZstdDecompressionSingleSubmissionPerStageTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    Frames expected;
+    // One block of each type in a few KiB of output stays within the estimate (one block per type per 4 KiB).
+    AppendRawRleFrame(data, offsetsAndSizes, expected, {300u}, {false}, 0x30);
+    AppendRawRleFrame(data, offsetsAndSizes, expected, {40u}, {true}, 0x31);
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupAllStageSubmission(test.req));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupAllowEstimatedBlockCounts(test.req));
+
+    std::vector<uint32_t> status;
+    const Frames frames = test.work.Decode(test.req, data, offsetsAndSizes, nullptr, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(expected.size(), kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), expected.size());
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+    }
+}
+
 // Block constants without frame constants: stage 0 needs a readback (block-count maxima are not
 // known yet), while stage 1 does not, so stage 2 IS predicated. Stage 0's comparison against the
 // unknown (zero) block maxima must not leak into that predicate, or stage 2 -- which copies the

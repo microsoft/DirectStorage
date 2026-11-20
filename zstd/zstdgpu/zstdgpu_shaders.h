@@ -4439,8 +4439,8 @@ static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_Wri
     if (0 != isResumed && 0 == srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid])
         return;
 
-    // A frame that did not decode (rejected by its header, or by a count check) has no position to resume from,
-    // and its window was never planned.
+    // A frame the frame parser rejected (not a zstd frame, an unsupported header, or the request-size limit) has
+    // no position to resume from. A count check never gets here: it skips this pass along with the rest of stage 2.
     if (kzstdgpu_FrameStatus_Success != srt.inoutFrameStatus[frameIdx])
     {
         srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid] = 0u;
