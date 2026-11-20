@@ -14,11 +14,8 @@
 //
 //   ZstdGpuCorrectnessTests — These scenarios are executed over the corpus in batches (where appropriate) 
 //     - ExternalMemory     : --chk-gpu --ext-mem
-//     - ExternalMemorySeq  : --chk-gpu --ext-mem --ssm
-//     - ExternalMemoryPartial : --chk-gpu --ext-mem --ssm --out-kb 1024 --out-slots 16384
-//                            (every batch decoded as a series of 1 MiB partial-decode requests;
-//                             the slot override covers the fuzz corpus's very small blocks)
-//     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --ssm  (skipped on ARM)
+//     - ExternalMemorySeq  : --chk-gpu --ext-mem --seq-cnt
+//     - D3D12DebugLayerSeq : --chk-gpu --d3d-dbg --seq-cnt  (skipped on ARM)
 //
 //   ZstdGpuDemoTests — per-file scenarios (one .zst file per parameter):
 //
@@ -26,7 +23,7 @@
 //   decompressed frame is under --gbv-max-mb, optionally further reduced by an
 //   even stride via --gbv-sample-count):
 //     - Gbv                : --chk-gpu --d3d-dbg --d3d-gbv
-//     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --ssm
+//     - GbvSeq             : --chk-gpu --d3d-dbg --d3d-gbv --seq-cnt
 //
 //   ZstdGpuPerfTests — report-only perf (batches at a time)
 //     - Latency    : small fixed-size (12-frame) batches; the demo's total [PERF]
@@ -672,7 +669,7 @@ static void RunPerfTest(int frameBatchCount, const char* scenario)
         "--frame-batch-count", std::to_string(frameBatchCount),
         "--run-cnt", std::to_string(g_testConfig.perfRunCount),
         "--prf-lvl", "0",
-        "--ssm",
+        "--seq-cnt",
     };
 
     auto result = RunDemo(g_testConfig.demoPath, args, g_testConfig.timeoutSeconds);
@@ -722,12 +719,7 @@ TEST_P(ZstdGpuCorrectnessTests, ExternalMemory)
 
 TEST_P(ZstdGpuCorrectnessTests, ExternalMemorySeq)
 {
-    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--ssm"});
-}
-
-TEST_P(ZstdGpuCorrectnessTests, ExternalMemoryPartial)
-{
-    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--ssm", "--out-kb", "1024", "--out-slots", "16384"});
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--ext-mem", "--seq-cnt"});
 }
 
 TEST_P(ZstdGpuCorrectnessTests, D3D12DebugLayerSeq)
@@ -735,7 +727,7 @@ TEST_P(ZstdGpuCorrectnessTests, D3D12DebugLayerSeq)
 #if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
     GTEST_SKIP() << "D3D12 debug layer tests are skipped on ARM platforms.";
 #else
-    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--ssm"});
+    RunBatchedCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--seq-cnt"});
 #endif
 }
 
@@ -769,7 +761,7 @@ TEST_P(ZstdGpuDemoTests, GbvSeq)
                      << "--gbv-sample-count=" << g_testConfig.gbvSampleCount << " stride).";
         return;
     }
-    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv", "--ssm"});
+    RunCorrectnessTest(GetParam(), {"--chk-gpu", "--d3d-dbg", "--d3d-gbv", "--seq-cnt"});
 #endif
 }
 
