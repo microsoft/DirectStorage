@@ -1528,10 +1528,17 @@ static int demoRun(void *demoCtx)
                         else if (nextOutKb)
                         {
                             // The output budget of each partial-decode request (see zstdgpu_SetupPartialDecode).
-                            outBudgetBytes = value * 1024u;
+                            if (0 == value || value > 0xffffffffu / 1024u)
+                                badArg = true;
+                            else
+                                outBudgetBytes = value * 1024u;
                         }
                         else if (nextOutSlots)
                             outSlots = value;
+                    }
+                    else if (nextOutKb || nextOutSlots)
+                    {
+                        badArg = true;
                     }
 
                     nextRepCount = false;
@@ -1686,6 +1693,12 @@ static int demoRun(void *demoCtx)
              *  request is done (--chk-gpu). The per-stage intermediate checks of --sim-gpu describe one
              *  whole-frame request and do not apply.
              */
+            if (0 != outSlots && 0 == outBudgetBytes)
+            {
+                debugPrint(L"[ERROR] '--out-slots' needs '--out-kb': it sets the block slots of each partial-decode request.\n");
+                ctx->retv = 1;
+                return 0;
+            }
             if (0 != outBudgetBytes && simGpu)
             {
                 debugPrint(L"[ERROR] '--out-kb' cannot be combined with '--sim-gpu': the per-stage simulation describes a "

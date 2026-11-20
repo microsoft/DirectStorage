@@ -307,8 +307,9 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t Predicate_Count = 2;
 
     /*
-     *  Sized for the whole batch even though it is read only when the caller supplies a per-frame
-     *  window array, because the descriptor has to be valid either way. 8 bytes per frame.
+     *  Fixed size: a copy of the caller's resume record followed by the last frame's planned window
+     *  (see `kzstdgpu_PartialDecodeStateDwordCount`). Allocated even when partial decode is off, because the
+     *  descriptor has to be valid either way.
      */
     const uint32_t PartialDecodeState_Count = kzstdgpu_PartialDecodeStateDwordCount;
 

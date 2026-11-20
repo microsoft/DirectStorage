@@ -4439,6 +4439,14 @@ static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_Wri
     if (0 != isResumed && 0 == srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid])
         return;
 
+    // A frame that did not decode (rejected by its header, or by a count check) has no position to resume from,
+    // and its window was never planned.
+    if (kzstdgpu_FrameStatus_Success != srt.inoutFrameStatus[frameIdx])
+    {
+        srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid] = 0u;
+        return;
+    }
+
     const uint32_t blockCount = srt.inCounters[0].Blocks_RAW
                               + srt.inCounters[0].Blocks_RLE
                               + srt.inCounters[0].Blocks_CMP;

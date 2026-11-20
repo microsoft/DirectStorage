@@ -918,6 +918,37 @@ TEST_F(ZstdDecompressionTests, PartialDecodeOutOfSlotsReportsBlockCountExceeded)
     EXPECT_EQ(status[0], kzstdgpu_FrameStatus_BlockCountExceeded);
 }
 
+// A partial decode uses its own block limits. Block constants the caller set for whole-frame requests on the
+// same context must still apply once partial decode is detached, not the partial request's (smaller) slot count.
+TEST_F(ZstdDecompressionTests, PartialDecodeKeepsCallerFrameConstants)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeConstantsTest");
+
+    std::vector<uint8_t> oneBlock;
+    OffsetsAndSizes oneBlockRefs{};
+    Frames oneBlockExpected;
+    AppendRawRleFrame(oneBlock, oneBlockRefs, oneBlockExpected, {1u}, {true}, 0x70);
+
+    std::vector<uint8_t> dense;
+    OffsetsAndSizes denseRefs{};
+    Frames denseExpected;
+    AppendRawRleFrame(dense, denseRefs, denseExpected, std::vector<uint32_t>(32, 3u), std::vector<bool>(32, true), 0x71);
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupFrameInfoConstants(test.req, 64u, 64u, 64u));
+
+    std::vector<uint32_t> status;
+    ReusedContextWork::PartialArgs args{test.record.get(), 0u, 1u, 1u, /* slots */ 8u};
+    const Frames partial = test.work.Decode(test.req, oneBlock, oneBlockRefs, &args, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(1, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(partial.size(), 1u);
+    EXPECT_EQ(partial[0], oneBlockExpected[0]);
+
+    const Frames whole = test.work.Decode(test.req, dense, denseRefs, nullptr, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(1, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(whole.size(), 1u);
+    EXPECT_EQ(whole[0], denseExpected[0]);
+}
+
 // A caller that detaches its resume record (zstdgpu_SetupPartialDecode with NULL) gets a whole decode on the
 // next request, even when that request reuses the context, and the detached record is not written: it may
 // hold another frame's state.

@@ -130,8 +130,9 @@ void main()
         // for Huffman weights because those numbers are the same because each FSE table decompresses its own Huffman weights' stream.
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressHuffmanWeights, srt.inoutCounters[0].FseHufW,                  kzstdgpu_TgSizeX_DecompressHuffmanWeights, executeIndirectWorkaround);
 
-        // NOTE(pamartis): We also do decoding of uncompressed Huffman Weights stored as two nibbles per byte to make sure final representation
-        // (a byte per weight) becomes identical, so identical representation simplfies initialisation of Huffman tables to use during literal decoding
+        // NOTE(pamartis): We also decode uncompressed Huffman Weights (two per byte, first weight in the high nibble) into the layout
+        // FSE-compressed weights are decoded into (two per byte, first weight in the low nibble; see `kzstdgpu_HuffmanWeightBytesPerTable`),
+        // so initialisation of Huffman tables used during literal decoding reads a single representation
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecodeHuffmanWeights,     srt.inoutCounters[0].HUF_WgtStreams,           kzstdgpu_TgSizeX_DecodeHuffmanWeights, executeIndirectWorkaround);
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_DecompressSequences,      srt.inoutCounters[0].Seq_Streams,              srt.decompressSequences_StreamsPerTG, executeIndirectWorkaround);
         zstdgpu_EmitDispatch(srt.inoutDispatchArgs, srt.inoutDispatchCnts, kzstdgpu_DispatchSlot_FinaliseSequenceOffsets,  srt.inoutCounters[0].Seq_Streams_DecodedItems, kzstdgpu_TgSizeX_FinaliseSequenceOffsets, executeIndirectWorkaround);

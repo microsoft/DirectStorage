@@ -1458,6 +1458,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext req,
         if (NULL == resumeRecord)
         {
             req->partialFlags = 0;
+            req->partialLastFrameLimit = 0;
+            req->partialOutputBudget = 0;
+            req->partialBlockSlots = 0;
             return ZSTDGPU_ENUM_CONST(StatusSuccess);
         }
         req->partialFlags = kzstdgpu_PartialDecodeFlag_LastFramePartial
@@ -1465,11 +1468,6 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext req,
         req->partialLastFrameLimit = lastFrameOutputLimit;
         req->partialOutputBudget = outputBudgetBytes;
         req->partialBlockSlots = zstdgpu_MaxU32(blockSlotCount, kzstdgpu_MinCount_Blocks);
-        // Stage 0 checks the block counts against these before staged submission sizes stage 1, so they are
-        // set now rather than left to sizing.
-        req->zstdRawBlockCountMax = req->partialBlockSlots;
-        req->zstdRleBlockCountMax = req->partialBlockSlots;
-        req->zstdCmpBlockCountMax = req->partialBlockSlots;
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
@@ -1477,10 +1475,9 @@ ZSTDGPU_ENUM(Status) zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext req,
 
 uint32_t zstdgpu_PartialDecodeBlockSlotCount(uint32_t outputBudgetBytes, uint32_t frameCount)
 {
-    // Every frame takes at least one slot. On top of that, real content measured at up to ~116 blocks per
-    // MiB of output in its densest stretches (the zstd block splitter emits blocks of a few KiB), so one slot
-    // per 8 KiB leaves headroom; the rest covers the resumed frame's re-parsed table-defining blocks and the
-    // block that crosses the limit. This is an allowance, not a bound: content denser than this fails
+    // Every frame takes at least one slot. On top of that, the zstd block splitter can emit blocks of a few
+    // KiB in dense stretches of real content, so one slot per 8 KiB of output leaves headroom; the rest
+    // covers the resumed frame's re-parsed table-defining blocks and the block that crosses the limit. This is an allowance, not a bound: content denser than this fails
     // loudly with `kzstdgpu_FrameStatus_BlockCountExceeded`.
     const uint64_t slots = (uint64_t)frameCount + (((uint64_t)outputBudgetBytes + 8191u) / 8192u) + 2u + 4u;
     return slots > 0xffffffffull ? 0xffffffffu : (uint32_t)slots;
@@ -1652,6 +1649,46 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
 }
 
 
+/**
+ *  A partial decode's literal and sequence counts and arena size, derived from its output budget. The resumed
+ *  frame and the whole frames decode at most their share of the budget. The last frame's blocks are chosen
+ *  until a lower bound on their output (literals + 3 bytes per sequence) reaches its share, so they can exceed
+ *  it by at most one block's lower bound, and one block's lower bound is at most 128 KiB. The same joint bound
+ *  as whole-request sizing then applies to `budget + 128 KiB`.
+ */
+static void zstdgpu_PartialDecodeLitSeqCounts(uint32_t *outCntLit, uint32_t *outCntSeq, uint32_t *outArenaBytes, const zstdgpu_PerRequestContextImpl *req)
+{
+    const uint64_t bytes64 = (uint64_t)req->partialOutputBudget + (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+    const uint32_t bytes = bytes64 > 0xffffffffull ? 0xffffffffu : (uint32_t)bytes64;
+    *outCntLit = zstdgpu_MaxU32(bytes, kzstdgpu_MinCount_UncompressedLitBytes);
+    *outCntSeq = zstdgpu_MaxU32(zstdgpu_OutputSizeToSequenceCount(bytes), kzstdgpu_MinCount_UncompressedSeqElems);
+    *outArenaBytes = zstdgpu_DecompressedSizeToArenaByteCount(bytes);
+}
+
+/**
+ *  The limits the stage count checks compare against. A partial decode uses its own (block slots and
+ *  budget-derived counts) and leaves the constants the caller set for whole-frame requests untouched, so
+ *  detaching it restores them. Stage 0's check runs before staged submission sizes stage 1, so the partial
+ *  limits cannot wait for sizing.
+ */
+static void zstdgpu_GetCountLimits(uint32_t *outRaw, uint32_t *outRle, uint32_t *outCmp, uint32_t *outLit, uint32_t *outSeq, const zstdgpu_PerRequestContextImpl *req)
+{
+    if (0 != req->partialFlags)
+    {
+        uint32_t arenaBytes = 0;
+        *outRaw = *outRle = *outCmp = req->partialBlockSlots;
+        zstdgpu_PartialDecodeLitSeqCounts(outLit, outSeq, &arenaBytes, req);
+    }
+    else
+    {
+        *outRaw = req->zstdRawBlockCountMax;
+        *outRle = req->zstdRleBlockCountMax;
+        *outCmp = req->zstdCmpBlockCountMax;
+        *outLit = req->zstdUncompressedLitByteCountMax;
+        *outSeq = req->zstdUncompressedSeqElemCountMax;
+    }
+}
+
 static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, uint32_t *outCntRle, uint32_t *outCntCmp, zstdgpu_PerRequestContext req)
 {
     uint32_t cntRaw, cntRle, cntCmp;
@@ -1659,9 +1696,6 @@ static void zstdgpu_RecomputeAndRetrieveFrameInfoConstants(uint32_t *outCntRaw, 
     {
         // Every block type may take every slot.
         cntRaw = cntRle = cntCmp = req->partialBlockSlots;
-        req->zstdRawBlockCountMax = cntRaw;
-        req->zstdRleBlockCountMax = cntRle;
-        req->zstdCmpBlockCountMax = cntCmp;
     }
     else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasFrameInfoConstants))
     {
@@ -1721,20 +1755,8 @@ static void zstdgpu_RecomputeAndRetrieveBlockInfoConstants(uint32_t *outCntLit, 
     uint32_t arenaBytes = 0;
     if (0 != req->partialFlags)
     {
-        /*
-         *  A partial decode is sized from its output budget, not from the frames' full sizes. The resumed frame
-         *  and the whole frames decode at most their share of the budget. The last frame's blocks are chosen
-         *  until a lower bound on their output (literals + 3 bytes per sequence) reaches its share, so they can
-         *  exceed it by at most one block's lower bound, and one block's lower bound is at most 128 KiB. The
-         *  same joint bound as whole-request sizing then applies to `budget + 128 KiB`.
-         */
-        const uint64_t bytes64 = (uint64_t)req->partialOutputBudget + (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
-        const uint32_t bytes = bytes64 > 0xffffffffull ? 0xffffffffu : (uint32_t)bytes64;
-        cntLit = zstdgpu_MaxU32(bytes, kzstdgpu_MinCount_UncompressedLitBytes);
-        cntSeq = zstdgpu_MaxU32(zstdgpu_OutputSizeToSequenceCount(bytes), kzstdgpu_MinCount_UncompressedSeqElems);
-        arenaBytes = zstdgpu_DecompressedSizeToArenaByteCount(bytes);
-        req->zstdUncompressedLitByteCountMax = cntLit;
-        req->zstdUncompressedSeqElemCountMax = cntSeq;
+        // A partial decode is sized from its output budget, not from the frames' full sizes.
+        zstdgpu_PartialDecodeLitSeqCounts(&cntLit, &cntSeq, &arenaBytes, req);
     }
     else if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_HasBlockInfoConstants))
     {
@@ -2937,11 +2959,15 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
     }
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: Stage 0]");
+        uint32_t limRaw, limRle, limCmp, limLit, limSeq;
+        zstdgpu_GetCountLimits(&limRaw, &limRle, &limCmp, &limLit, &limSeq, req);
+        (void)limLit;
+        (void)limSeq;
         zstdgpu_Bind_UpdateDispatchArgs(cmdList, req->srts, req->resData.gpuOnly, req->DecompressSequences_StreamsPerGroup,
             /* stage */0,
-            req->zstdCmpBlockCountMax,
-            req->zstdRawBlockCountMax,
-            req->zstdRleBlockCountMax,
+            limCmp,
+            limRaw,
+            limRle,
             /* litByteCountMax, unused for stage 0 */0,
             /* seqElemCountMax, unused for stage 0 */0,
             req->executeIndirectWorkaround,
@@ -3314,14 +3340,16 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             arenaByteCount = zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(cntLit, cntSeq, arenaBytes);
         }
 
+        uint32_t limRaw, limRle, limCmp, limLit, limSeq;
+        zstdgpu_GetCountLimits(&limRaw, &limRle, &limCmp, &limLit, &limSeq, req);
         zstdgpu_Bind_UpdateDispatchArgs(cmdList, req->srts, req->resData.gpuOnly,
             zstdgpu_UsesFseArenaKernel(req) ? req->DecompressSequencesFseArena_StreamsPerGroup : req->DecompressSequences_StreamsPerGroup,
             1 /* stage */,
-            req->zstdCmpBlockCountMax,
-            req->zstdRawBlockCountMax,
-            req->zstdRleBlockCountMax,
-            req->zstdUncompressedLitByteCountMax,
-            req->zstdUncompressedSeqElemCountMax,
+            limCmp,
+            limRaw,
+            limRle,
+            limLit,
+            limSeq,
             req->executeIndirectWorkaround,
             arenaByteCount,
             req->zstdFrameCount,
@@ -3489,12 +3517,16 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
 
     {
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Update Dispatch Args :: DecompressLiterals]");
+        uint32_t limRaw, limRle, limCmp, limLit, limSeq;
+        zstdgpu_GetCountLimits(&limRaw, &limRle, &limCmp, &limLit, &limSeq, req);
+        (void)limLit;
+        (void)limSeq;
         zstdgpu_Bind_UpdateDispatchArgs(cmdList, req->srts, req->resData.gpuOnly,
             req->DecompressSequences_StreamsPerGroup,
             2 /* stage */,
-            req->zstdCmpBlockCountMax,
-            req->zstdRawBlockCountMax,
-            req->zstdRleBlockCountMax,
+            limCmp,
+            limRaw,
+            limRle,
             /* litByteCountMax, unused for stage == 2 */0,
             /* seqElemCountMax, unused for stage == 2 */0,
             req->executeIndirectWorkaround,
@@ -3549,6 +3581,9 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.SeqStreamToOffsFseId);
         setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.SeqStreamToMLenFseId);
         setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.SeqStreamToBlockId);
+        // last written by [Parse Compressed Blocks]
+        // next read by [Write Frame Resume] (partial decode)
+        setResourceUavToSrvSync(barriers, bc ++, req->resData.gpuOnly.BlockTableDefs);
         // last written by [Parse Compressed Blocks]
         // next written by [Decompress Huffman Weights] and read as UAV by [Decode Uncompressed Huffman Weights]
         setResourceUavSync(barriers, bc ++, req->resData.gpuOnly.DecompressedHuffmanWeightCount);
