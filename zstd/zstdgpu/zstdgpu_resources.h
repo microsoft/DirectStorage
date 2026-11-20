@@ -346,7 +346,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t SeqFseElemMaxCount = kzstdgpu_FseElemMaxCount_LLen + kzstdgpu_FseElemMaxCount_Offs + kzstdgpu_FseElemMaxCount_MLen;
     const uint32_t NonRLE_FseTableCount = cmpBlockCount * 4 + 3; // 4 FSE tables per compressed block (Huff, LLen, Offs, MLen) + 3 default tables for (LLen, Offs, MLen);
     const uint32_t FseTable_Count = kzstdgpu_FseRleTableCount + NonRLE_FseTableCount;
-    const uint32_t FseProbs_Count = NonRLE_FseTableCount * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t FseProbs_Count = zstdgpu_FseProbCount(cmpBlockCount);
     // With the FSE arena (non-zero capacity), [Decompress Sequences] builds the sequence tables itself,
     // so only the RLE and Huffman weight tables (which lead the layout) are persisted.
     const bool usesFseArena = 0 != fseArenaStreamCapacity;
@@ -360,7 +360,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t FseArena_Count = zstdgpu_MaxU32(1u, zstdgpu_FseArena_HeaderDwCount(outInfo->FseArena_StreamCount)
                                                      + outInfo->FseArena_StreamCount * kzstdgpu_FseArena_StreamDwCount);
 
-    const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_MaxCount_HuffmanWeights;
+    const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_HuffmanWeightBytesPerTable;
     const uint32_t DecompressedHuffmanWeightCount_Count = cmpBlockCount;
 
     const uint32_t FseInfos_Count = FseTable_Count;

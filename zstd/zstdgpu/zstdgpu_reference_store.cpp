@@ -346,7 +346,7 @@ void zstdgpu_ReferenceStore_Report_FseTable(const int16_t *probs, uint32_t symCo
         const uint32_t localIdx = GFseProbTableIndex##name++;                                               \
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(localIdx, GBlockCountCMP);                  \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(localIdx, GBlockCountCMP);          \
-        const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
+        const uint32_t fseProbStart = zstdgpu_FseProbOffset(fseIndex, GBlockCountCMP);     \
         GLastTableIndex_Fse##name = storeExpr;                                                              \
         GZstd.FseInfos[fseIndex] = zstdgpu_CreateFseInfo(symCount, accuracyLog2);                           \
         memcpy(&GZstd.FseProbs[fseProbStart], probs, sizeof(probs[0]) * symCount);                          \
@@ -378,7 +378,7 @@ void zstdgpu_ReferenceStore_Report_FseDefaultTable(const int16_t *probs, uint32_
     {                                                                                                       \
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(0, GBlockCountCMP);                         \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(0, GBlockCountCMP);                 \
-        const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
+        const uint32_t fseProbStart = zstdgpu_FseProbOffset(fseIndex, GBlockCountCMP);     \
         GLastTableIndex_Fse##name = fseIndex;                                                               \
         if (GFseProbDefaultTable##name##Stored == 0)                                                        \
         {                                                                                                   \
@@ -471,11 +471,29 @@ void zstdgpu_ReferenceStore_Report_HuffmanWeightSubBlock(const void *base, uint3
     GZstd.HufLitIdToHufWId_DBG[GHufLitIndex ++] = GLastTableIndex_FseHufW = index;
 }
 
+// Stores weights two per byte, in the layout the GPU uses (see `kzstdgpu_HuffmanWeightBytesPerTable`).
+static void zstdgpu_ReferenceStore_PackHuffmanWeights(uint8_t *dst, const uint8_t *weights, uint32_t weightCount)
+{
+    for (uint32_t i = 0; i < weightCount; i += 2)
+    {
+        const uint32_t hi = (i + 1 < weightCount) ? weights[i + 1] : 0u;
+        dst[i >> 1] = (uint8_t)((weights[i] & 0xfu) | ((hi & 0xfu) << 4));
+    }
+}
+
+// Compares the first `weightCount` packed weights; the unused nibble of an odd count is ignored.
+static int zstdgpu_ReferenceStore_HuffmanWeightsEqual(const uint8_t *a, const uint8_t *b, uint32_t weightCount)
+{
+    if (0 != memcmp(a, b, weightCount >> 1))
+        return 0;
+    return (weightCount & 1) ? ((a[weightCount >> 1] & 0xf) == (b[weightCount >> 1] & 0xf)) : 1;
+}
+
 void zstdgpu_ReferenceStore_Report_DecompressedHuffmanWeights(const uint8_t *weights, uint32_t weightCount)
 {
     uint32_t index = GFseCompressedHuffmanWeightCount - 1;
 
-    memcpy(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_MaxCount_HuffmanWeights], weights, weightCount);
+    zstdgpu_ReferenceStore_PackHuffmanWeights(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_HuffmanWeightBytesPerTable], weights, weightCount);
 
     ZSTDGPU_ASSERT(GZstd.DecompressedHuffmanWeightCount[index] == 0);
     ZSTDGPU_ASSERT(weightCount < kzstdgpu_MaxCount_HuffmanWeights);
@@ -487,7 +505,7 @@ void zstdgpu_ReferenceStore_Report_UncompressedHuffmanWeights(const uint8_t *wei
     uint32_t index = GUnCompressedHuffmanWeightCount - 1;
     index = GBlockCountCMP - 1u - index;
 
-    memcpy(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_MaxCount_HuffmanWeights], weights, weightCount);
+    zstdgpu_ReferenceStore_PackHuffmanWeights(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_HuffmanWeightBytesPerTable], weights, weightCount);
 
     ZSTDGPU_ASSERT(GZstd.DecompressedHuffmanWeightCount[index] == weightCount);
     ZSTDGPU_ASSERT(weightCount < kzstdgpu_MaxCount_HuffmanWeights);
@@ -737,12 +755,12 @@ static ZSTDGPU_ENUM(Validate_Result) izstdgpu_ReferenceStore_Validate_FseTable(u
         const uint32_t probCount = refFseInfos[refFseInfoIndex].fseProbCountAndAccuracyLog2 & 0xff;
         const uint32_t symbolCount = 1u << (refFseInfos[refFseInfoIndex].fseProbCountAndAccuracyLog2 >> 8u);
 
-        // FseProbs are indexed at (fseInfoIndex - 256) * MaxCount_FseProbs
+        // FseProbs are indexed by zstdgpu_FseProbOffset
         // For RLE (fseInfoIndex < 256), probCount is 0 so no comparison is needed
         if (probCount > 0)
         {
-            const uint32_t refProbStart = (refFseInfoIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
-            const uint32_t tstProbStart = (tstFseInfoIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
+            const uint32_t refProbStart = zstdgpu_FseProbOffset(refFseInfoIndex, cmpBlockCount);
+            const uint32_t tstProbStart = zstdgpu_FseProbOffset(tstFseInfoIndex, cmpBlockCount);
 
             if (0 != memcmp(&refFseProbs[refProbStart], &tstFseProbs[tstProbStart], probCount * sizeof(refFseProbs[0])))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -989,8 +1007,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
             uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
             uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
 
-            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-            const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
+            const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
 
             if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -998,7 +1016,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
             if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (0 != memcmp(refStart, tstStart, refCount))
+            if (!zstdgpu_ReferenceStore_HuffmanWeightsEqual(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }
@@ -1033,8 +1051,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeig
             uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
             uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
 
-            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-            const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
+            const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
 
             if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1042,7 +1060,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeig
             if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (0 != memcmp(refStart, tstStart, refCount))
+            if (!zstdgpu_ReferenceStore_HuffmanWeightsEqual(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }

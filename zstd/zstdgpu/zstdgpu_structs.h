@@ -233,6 +233,9 @@ static const uint32_t kzstdgpu_MaxCount_BlockSizeBits   = 17u;
 static const uint32_t kzstdgpu_MaxCount_LiteralBytes    = 1u << kzstdgpu_MaxCount_BlockSizeBits;
 
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeights              = 256;
+// Decoded Huffman weights are stored two per byte: a weight never exceeds 12, so it fits in 4 bits. Weight `i`
+// of a table is the low nibble of byte `i / 2` when `i` is even and the high nibble when it is odd.
+static const uint32_t kzstdgpu_HuffmanWeightBytesPerTable           = kzstdgpu_MaxCount_HuffmanWeights / 2;
 #if 1 // ASSUME_11BIT_HUFFMAN_CODES
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightBits           = 11;
 #else
@@ -444,7 +447,9 @@ static uint32_t zstdgpu_DecompressedSizeToArenaByteCount(uint32_t size)
     return (bytes > (uint64_t)0xffffffffu) ? 0xffffffffu : (uint32_t)bytes;
 }
 
-static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 7;
+// Maximum FSE accuracy logs, as in the zstd format specification and the reference decoder. The Huffman
+// weight table's is 6 (some early drafts of the specification said 7).
+static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 6;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_LLen = 9;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_Offs = 8;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_MLen = 9;
@@ -1799,6 +1804,55 @@ static uint32_t zstdgpu_ComputeFseIndexOffs(uint32_t indexOffs, uint32_t cmpBloc
 static uint32_t zstdgpu_ComputeFseIndexMLen(uint32_t indexMLen, uint32_t cmpBlockCount)
 {
     return kzstdgpu_FseRleTableCount + (3 * cmpBlockCount + 2) + indexMLen;
+}
+
+/*
+ *  Per-table strides of the FSE probability buffer. Each is the largest symbol count a table of that type
+ *  can legally carry, rounded up: Huffman weights <= 13, LL 36, OF 32 (offset codes up to 31) and ML 53.
+ *  The header parser stops a table at its stride, so a corrupt one cannot spill into the next table.
+ *  Sizing every table to `kzstdgpu_MaxCount_FseProbs` instead cost 512 bytes per compressed block.
+ */
+static const uint32_t kzstdgpu_FseProbStride_HufW = 16;
+static const uint32_t kzstdgpu_FseProbStride_LLen = 40;
+static const uint32_t kzstdgpu_FseProbStride_Offs = 40;
+static const uint32_t kzstdgpu_FseProbStride_MLen = 56;
+
+// Total probability entries for a batch: one table of each type per compressed block, plus the default LL, OF
+// and ML tables (Huffman weights have no default).
+static uint32_t zstdgpu_FseProbCount(uint32_t cmpBlockCount)
+{
+    return cmpBlockCount * kzstdgpu_FseProbStride_HufW
+         + (cmpBlockCount + 1u) * (kzstdgpu_FseProbStride_LLen + kzstdgpu_FseProbStride_Offs + kzstdgpu_FseProbStride_MLen);
+}
+
+// Offset of a table's probabilities. `fseIndex` is a non-RLE table index from `zstdgpu_ComputeFseIndex*`; the
+// probability tables follow the same type-major order.
+static uint32_t zstdgpu_FseProbOffset(uint32_t fseIndex, uint32_t cmpBlockCount)
+{
+    const uint32_t j = fseIndex - kzstdgpu_FseRleTableCount;
+    if (j < cmpBlockCount)
+        return j * kzstdgpu_FseProbStride_HufW;
+
+    uint32_t base = cmpBlockCount * kzstdgpu_FseProbStride_HufW;
+    if (j < 2u * cmpBlockCount + 1u)
+        return base + (j - cmpBlockCount) * kzstdgpu_FseProbStride_LLen;
+
+    base += (cmpBlockCount + 1u) * kzstdgpu_FseProbStride_LLen;
+    if (j < 3u * cmpBlockCount + 2u)
+        return base + (j - (2u * cmpBlockCount + 1u)) * kzstdgpu_FseProbStride_Offs;
+
+    base += (cmpBlockCount + 1u) * kzstdgpu_FseProbStride_Offs;
+    return base + (j - (3u * cmpBlockCount + 2u)) * kzstdgpu_FseProbStride_MLen;
+}
+
+// The symbol capacity of a table's probabilities, i.e. its stride.
+static uint32_t zstdgpu_FseProbStride(uint32_t fseIndex, uint32_t cmpBlockCount)
+{
+    const uint32_t j = fseIndex - kzstdgpu_FseRleTableCount;
+    return j < cmpBlockCount               ? kzstdgpu_FseProbStride_HufW
+         : j < 2u * cmpBlockCount + 1u     ? kzstdgpu_FseProbStride_LLen
+         : j < 3u * cmpBlockCount + 2u     ? kzstdgpu_FseProbStride_Offs
+                                           : kzstdgpu_FseProbStride_MLen;
 }
 
 static uint32_t zstdgpu_ComputeFseDataStartHufW(uint32_t indexHufW, uint32_t /* cmpBlockCount */)

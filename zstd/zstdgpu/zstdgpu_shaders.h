@@ -813,21 +813,16 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
         srt.inoutFseInfos[i] = rleInfo;
     }
 
-    // NOTE(pamartis): We start from `srt.cmpBlockCount * kzstdgpu_MaxCount_FseProbs` because
-    // it's the maximal size of FSE probabilities used for Huffman Weights FSE tables, but those don't have "default" probabilities,
-    // and therefore not initialised.
-    uint32_t dstStart = cmpBlockCnt * kzstdgpu_MaxCount_FseProbs;
+    // The default LL, OF and ML probabilities go to the slots of the default tables (Huffman weights have none).
+    uint32_t dstStart = zstdgpu_FseProbOffset(zstdgpu_ComputeFseIndexLLen(0, cmpBlockCnt), cmpBlockCnt);
     uint32_t srcStart = 0;
-
-    // NOTE(pamartis): The reason we use extra `kzstdgpu_MaxCount_FseProbs` is to be able to store default probabilities
-    const uint32_t dstTableStride = cmpBlockCnt * kzstdgpu_MaxCount_FseProbs + kzstdgpu_MaxCount_FseProbs;
 
     ZSTDGPU_FOR_WORK_ITEMS(i, kzstdgpu_FseDefaultProbCount_LLen, threadId, kzstdgpu_TgSizeX_InitCounters)
     {
         srt.inoutFseProbs[dstStart + i] = srt.inFseProbsDefault[srcStart + i];
     }
 
-    dstStart += dstTableStride;
+    dstStart = zstdgpu_FseProbOffset(zstdgpu_ComputeFseIndexOffs(0, cmpBlockCnt), cmpBlockCnt);
     srcStart += kzstdgpu_FseDefaultProbCount_LLen;
 
     ZSTDGPU_FOR_WORK_ITEMS(i, kzstdgpu_FseDefaultProbCount_Offs, threadId, kzstdgpu_TgSizeX_InitCounters)
@@ -835,7 +830,7 @@ static void zstdgpu_ShaderEntry_InitResources(ZSTDGPU_PARAM_INOUT(zstdgpu_InitRe
         srt.inoutFseProbs[dstStart + i] = srt.inFseProbsDefault[srcStart + i];
     }
 
-    dstStart += dstTableStride;
+    dstStart = zstdgpu_FseProbOffset(zstdgpu_ComputeFseIndexMLen(0, cmpBlockCnt), cmpBlockCnt);
     srcStart += kzstdgpu_FseDefaultProbCount_Offs;
 
     ZSTDGPU_FOR_WORK_ITEMS(i, kzstdgpu_FseDefaultProbCount_MLen, threadId, kzstdgpu_TgSizeX_InitCounters)
@@ -848,25 +843,29 @@ static void zstdgpu_ParseFseHeader(ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer
                                    ZSTDGPU_RW_BUFFER(zstdgpu_FseInfo) outFseInfo,
                                    ZSTDGPU_RW_TYPED_BUFFER(int32_t, int16_t) outFseProb,
                                    uint32_t outFseTableIndex,
-                                   uint32_t accuracyLog2Max)
+                                   uint32_t accuracyLog2Max,
+                                   uint32_t cmpBlockCount)
 {
-    const uint32_t outFseProbTableOffset = outFseTableIndex * kzstdgpu_MaxCount_FseProbs - kzstdgpu_FseRleTableCount * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t outFseProbTableOffset = zstdgpu_FseProbOffset(outFseTableIndex, cmpBlockCount);
+    const uint32_t symbolCap = zstdgpu_FseProbStride(outFseTableIndex, cmpBlockCount);
     if (accuracyLog2Max > 15)
     {
         ZSTDGPU_BREAK();
     }
 
-    const uint32_t accuracyLog2 = 5u + zstdgpu_Forward_BitBuffer_Get(buffer, 4);
+    uint32_t accuracyLog2 = 5u + zstdgpu_Forward_BitBuffer_Get(buffer, 4);
     if (accuracyLog2 > accuracyLog2Max)
     {
+        // Corrupt input. Clamp so the table built from this header stays inside its fixed-size slot.
         ZSTDGPU_BREAK();
+        accuracyLog2 = accuracyLog2Max;
     }
 
     // `remain` is in range [32; 512]; we use uint32_t only due to HLSL.
     int32_t remain = 1u << accuracyLog2;
     uint32_t symbol = 0;
 
-    while (remain > 0 && symbol < kzstdgpu_MaxCount_FseProbs)
+    while (remain > 0 && symbol < symbolCap)
     {
         uint32_t bits = zstdgpu_FindFirstBitHiU32(remain + 1u) + 1u;
         zstdgpu_Forward_BitBuffer_Refill(buffer, bits);
@@ -921,7 +920,7 @@ static void zstdgpu_ParseFseHeader(ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer
 
             do
             {
-                for (uint32_t i = 0; i < repeat && symbol < kzstdgpu_MaxCount_FseProbs; ++i)
+                for (uint32_t i = 0; i < repeat && symbol < symbolCap; ++i)
                 {
                     outFseProb[outFseProbTableOffset + symbol] = 0;
                     symbol += 1;
@@ -939,7 +938,7 @@ static void zstdgpu_ParseFseHeader(ZSTDGPU_PARAM_INOUT(zstdgpu_Forward_BitBuffer
         }
     }
     zstdgpu_Forward_BitBuffer_ByteAlign(buffer);
-    if (remain != 0 || symbol >= kzstdgpu_MaxCount_FseProbs)
+    if (remain != 0 || symbol >= symbolCap)
     {
         // "When last symbol reaches cumulated total of 1 << Accuracy_Log, decoding is complete.
         // If the last symbol makes cumulated total go above 1 << Accuracy_Log, distribution is considered corrupted."
@@ -1346,7 +1345,7 @@ static void zstdgpu_ShaderEntry_ParseCompressedBlocks(ZSTDGPU_PARAM_INOUT(zstdgp
                         WaveReadLaneFirst(fseWaveTableStart##name) + WavePrefixCountBits(true),\
                         srt.compressedBlockCount                                            \
                     );                                                                      \
-                    zstdgpu_ParseFseHeader(buffer, srt.inoutFseInfos, srt.inoutFseProbs, fseTableIndex##name, kzstdgpu_FseProbMaxAccuracy_##name)
+                    zstdgpu_ParseFseHeader(buffer, srt.inoutFseInfos, srt.inoutFseProbs, fseTableIndex##name, kzstdgpu_FseProbMaxAccuracy_##name, srt.compressedBlockCount)
 
                 ALLOCATE_FSE_TABLE_INDEX(HufW);
 
@@ -1775,7 +1774,7 @@ static void zstdgpu_ShaderEntry_InitFseTable(ZSTDGPU_PARAM_INOUT(zstdgpu_InitFse
     #include "zstdgpu_lds_decl_undef.h"
 
     const uint32_t tableIndex    = srt.tableStartIndex + groupId;
-    const uint32_t frqDataOffset = tableIndex * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t frqDataOffset = zstdgpu_FseProbOffset(kzstdgpu_FseRleTableCount + tableIndex, srt.inCounters[0].Blocks_CMP);
     const uint32_t tblDataOffset = srt.tableDataStart + groupId * srt.tableDataCount;
 
     const zstdgpu_FseInfo fseInfo = srt.inFseInfos[kzstdgpu_FseRleTableCount + tableIndex];
@@ -1790,7 +1789,7 @@ static void zstdgpu_ShaderEntry_InitFseTable(ZSTDGPU_PARAM_INOUT(zstdgpu_InitFse
     // make sure `tblDataCount` is never `> kzstdgpu_MaxCount_FseElems`
     //      9 - for Literal Length and Match Length FSEs
     //      8 - for Offsets FSE
-    //      7 - for Huffman Weight FSE
+    //      6 - for Huffman Weight FSE
     const uint32_t tblAllDataCount = zstdgpu_MinU32(tblDataCount, kzstdgpu_MaxCount_FseElems);
 
     // NB: compute the number of symbols/per symbol freqeuncies aligned up to threadgroup size.
@@ -2468,9 +2467,22 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
     uint32_t state1 = zstdgpu_Backward_BitBuffer_V0_Get(buffer, initialBitcnt);
 
     uint32_t fseTableOffset = zstdgpu_ComputeFseDataStartHufW(threadId, cmpBlockCnt);
-    uint32_t hufTableOffset = threadId * kzstdgpu_MaxCount_HuffmanWeights;
+    const uint32_t hufTableByteOffset = threadId * kzstdgpu_HuffmanWeightBytesPerTable;
 
-    uint32_t hufWeightIndex = hufTableOffset;
+    // Weights are stored two per byte (see `kzstdgpu_HuffmanWeightBytesPerTable`): an even weight waits in
+    // `hufWeightPending` for its odd partner. A corrupt stream that decodes more weights than a table holds
+    // stops being stored rather than spilling into the next table.
+    uint32_t hufWeightIndex = 0;
+    uint32_t hufWeightPending = 0;
+    #define ZSTDGPU_STORE_HUF_WEIGHT(weight)                                                                            \
+    {                                                                                                                   \
+        const uint32_t w_ = (weight) & 0xfu;                                                                            \
+        if (0u == (hufWeightIndex & 1u))                                                                                \
+            hufWeightPending = w_;                                                                                      \
+        else if (hufWeightIndex < kzstdgpu_MaxCount_HuffmanWeights)                                                     \
+            zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableByteOffset + (hufWeightIndex >> 1u), hufWeightPending | (w_ << 4u)); \
+        hufWeightIndex++;                                                                                               \
+    }
     // TODO IMPROVEMENT TEST 2: don't store decompresed Huffman weights immediately, one byte at a time per VMEM instruction,
     //                          but consider accumulating bytes into a single 32-bit value and store that,
     //                          furthermore, consider storing 32-bit values into LDS first(threadgroup needs TG_Size * 256 bytes of LDS)
@@ -2487,7 +2499,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem0 = srt.inFseElems[offsetState0];
         // peek
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(fseElem0));
+        ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(fseElem0));
 
         // update
         uint32_t bits0 = zstdgpu_FseElem_Bitcnt(fseElem0);
@@ -2498,7 +2510,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]));
+            ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]));
             break;
         }
 
@@ -2506,7 +2518,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem1 = srt.inFseElems[offsetState1];
         // peek
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(fseElem1));
+        ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(fseElem1));
 
         // update
         uint32_t bits1 = zstdgpu_FseElem_Bitcnt(fseElem1);
@@ -2517,7 +2529,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]));
+            ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]));
             break;
         }
 #if 0
@@ -2525,7 +2537,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem0 = srt.inFseElems[offsetState0];
         // peek
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(fseElem0));
+        ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(fseElem0));
 
         // update
         bits0 = zstdgpu_FseElem_Bitcnt(fseElem0);
@@ -2536,7 +2548,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]));
+            ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState1]));
             break;
         }
 
@@ -2544,7 +2556,7 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
 
         const uint32_t fseElem1 = srt.inFseElems[offsetState1];
         // peek
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(fseElem1));
+        ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(fseElem1));
 
         // update
         bits1 = zstdgpu_FseElem_Bitcnt(fseElem1);
@@ -2555,12 +2567,15 @@ static void zstdgpu_ShaderEntry_DecompressHuffmanWeights(ZSTDGPU_PARAM_INOUT(zst
         }
         else
         {
-            zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufWeightIndex++, zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]));
+            ZSTDGPU_STORE_HUF_WEIGHT(zstdgpu_FseElem_Symbol(srt.inFseElems[offsetState0]));
             break;
         }
 #endif
     }
-    zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeightCount, threadId, hufWeightIndex - hufTableOffset);
+    #undef ZSTDGPU_STORE_HUF_WEIGHT
+    if ((hufWeightIndex & 1u) && hufWeightIndex < kzstdgpu_MaxCount_HuffmanWeights)
+        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableByteOffset + (hufWeightIndex >> 1u), hufWeightPending);
+    zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeightCount, threadId, hufWeightIndex);
 }
 
 static void zstdgpu_ShaderEntry_DecodeHuffmanWeights(ZSTDGPU_PARAM_INOUT(zstdgpu_DecodeHuffmanWeights_SRT) srt, uint32_t threadId)
@@ -2575,23 +2590,20 @@ static void zstdgpu_ShaderEntry_DecodeHuffmanWeights(ZSTDGPU_PARAM_INOUT(zstdgpu
     zstdgpu_Forward_BitBuffer bitBuffer;
     zstdgpu_Forward_BitBuffer_InitWithSegment(bitBuffer, srt.inCompressedData, srt.inHufRefs[hufTableIndex], srt.compressedBufferSizeInBytes);
 
-    const uint32_t hufTableOffset = hufTableIndex * kzstdgpu_MaxCount_HuffmanWeights;
+    const uint32_t hufTableByteOffset = hufTableIndex * kzstdgpu_HuffmanWeightBytesPerTable;
     const uint32_t hufTableWeightCount = srt.inoutDecompressedHuffmanWeightCount[hufTableIndex];
 
-    // TODO(pamartis): this is largely vanilla implementation, we don't need to do full loop
-    // and limit ourselves to reading 4 bits one by one.
+    // The stream carries weight 2j in the high nibble and 2j+1 in the low one; storage is the other way
+    // round (see `kzstdgpu_HuffmanWeightBytesPerTable`), so each byte is nibble-swapped.
     for (uint32_t j = 0; j < (hufTableWeightCount >> 1u); ++j)
     {
         const uint32_t elem10 = zstdgpu_Forward_BitBuffer_Get(bitBuffer, 8);
-        const uint32_t huffmanWeight0 = elem10 >> 4u;
-        const uint32_t huffmanWeight1 = elem10 & 0xfu;
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableOffset + 2 * j + 0, huffmanWeight0);
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableOffset + 2 * j + 1, huffmanWeight1);
+        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableByteOffset + j, (elem10 >> 4u) | ((elem10 & 0xfu) << 4u));
     }
     if (hufTableWeightCount & 1u)
     {
         const uint32_t huffmanWeight = zstdgpu_Forward_BitBuffer_Get(bitBuffer, 8) >> 4u;
-        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableOffset + hufTableWeightCount - 1u, huffmanWeight);
+        zstdgpu_TypedStoreU8(srt.inoutDecompressedHuffmanWeights, hufTableByteOffset + (hufTableWeightCount >> 1u), huffmanWeight);
     }
 }
 
@@ -2665,7 +2677,7 @@ static void zstdgpu_PreInitHuffmanTableToLds(ZSTDGPU_RO_TYPED_BUFFER(uint32_t, u
 
     ZSTDGPU_FOR_WORK_ITEMS(i, weightCntMinusOne, threadId, threadCnt)
     {
-        const uint32_t weight = HuffmanWeights[tableId * kzstdgpu_MaxCount_HuffmanWeights + i];
+        const uint32_t weight = ((HuffmanWeights[tableId * kzstdgpu_HuffmanWeightBytesPerTable + (i >> 1u)] >> ((i & 1u) * 4u)) & 0xfu);
 
         // weights are in range [0;16], so the maximim accumulated value is 0x8000
         const uint32_t weightSumPerWave = WaveActiveSum(weight > 0u ? (1u << (weight - 1u)) : 0u);
@@ -2704,7 +2716,7 @@ static void zstdgpu_PreInitHuffmanTableToLds(ZSTDGPU_RO_TYPED_BUFFER(uint32_t, u
     ZSTDGPU_FOR_WORK_ITEMS(weightId, weightCnt, threadId, threadCnt)
     {
         // TODO(pamartis): consider if we can avoid re-loading weights from memory (it's only 256 bytes worst case)
-        const uint32_t weight = HuffmanWeights[tableId * kzstdgpu_MaxCount_HuffmanWeights + weightId];
+        const uint32_t weight = ((HuffmanWeights[tableId * kzstdgpu_HuffmanWeightBytesPerTable + (weightId >> 1u)] >> ((weightId & 1u) * 4u)) & 0xfu);
 
         uint32_t bits = 0u;
         if (weightId < weightCntMinusOne)
@@ -3688,7 +3700,7 @@ static void zstdgpu_FseArena_BuildTable(ZSTDGPU_PARAM_INOUT(zstdgpu_DecompressSe
     const uint32_t info         = srt.inFseInfos[fseIdx].fseProbCountAndAccuracyLog2;
     const uint32_t accuracyLog2 = info >> 8u;
     const uint32_t frqCount     = zstdgpu_MinU32(info & 0xffu, kzstdgpu_MaxCount_FseProbs);
-    const uint32_t frqOffset    = (fseIdx - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t frqOffset    = zstdgpu_FseProbOffset(fseIdx, srt.inCounters[0].Blocks_CMP);
     const uint32_t tblCount     = zstdgpu_MinU32(1u << accuracyLog2, kzstdgpu_MaxCount_FseElems);
     const uint32_t step         = (tblCount >> 1) + (tblCount >> 3) + 3;
     const uint32_t mask         = tblCount - 1;
