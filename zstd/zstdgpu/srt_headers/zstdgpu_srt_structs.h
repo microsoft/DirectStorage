@@ -19,7 +19,7 @@ typedef struct zstdgpu_ParseFrames_SRT
 {
     ZSTDGPU_RO_BUFFER(uint32_t)                             inCompressedData;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inFramesRefs;
-    ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockWindowPerFrame;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPartialDecodeState;
     ZSTDGPU_RW_BUFFER(zstdgpu_Counters)                     inoutCounters;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerFrameBlockCountRAW;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPerFrameBlockCountRLE;
@@ -38,9 +38,9 @@ typedef struct zstdgpu_ParseFrames_SRT
     uint32_t                                                frameCount;
     uint32_t                                                compressedBufferSizeInBytes;
     uint32_t                                                countBlocksOnly;
-    uint32_t                                                blockStartPerFrame;
-    uint32_t                                                blockLimitPerFrame;
-    uint32_t                                                hasBlockWindowPerFrame;
+    uint32_t                                                partialFlags;
+    uint32_t                                                lastFrameLimit;
+    uint32_t                                                blockSlotCap;
 } zstdgpu_ParseFrames_SRT;
 
 typedef struct zstdgpu_Memset_SRT
@@ -238,6 +238,8 @@ typedef struct zstdgpu_ComputeDestBlockOffsets_SRT
     uint32_t                                                tgOffset;
     uint32_t                                                workItemCount;
     uint32_t                                                frameCount;
+    uint32_t                                                partialFrameIndex;
+    uint32_t                                                lastFrameLimit;
 } zstdgpu_ComputeDestBlockOffsets_SRT;
 
 typedef struct zstdgpu_WriteFrameResume_SRT
@@ -251,7 +253,16 @@ typedef struct zstdgpu_WriteFrameResume_SRT
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamFinalOffset2;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerSeqStreamFinalOffset3;
     ZSTDGPU_RO_BUFFER(zstdgpu_Counters)                     inCounters;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutPartialDecodeState;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inBlockTableDefs;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inGlobalBlockIndexPerCmpBlock;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inSeqStreamToBlockId;
+    ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountCMP;
+    ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inUnCompressedFramesRefs;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutFrameStatus;
     uint32_t                                                frameCount;
+    uint32_t                                                partialFlags;
+    uint32_t                                                lastFrameLimit;
 } zstdgpu_WriteFrameResume_SRT;
 
 typedef struct zstdgpu_ExecuteSequences_SRT
@@ -320,6 +331,7 @@ typedef struct zstdgpu_ParseCompressedBlocks_SRT
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHufLitIdToLitStreamId;
     ZSTDGPU_RW_BUFFER(uint32_t)                             inoutHufLitIdToHufWId_DBG;
     ZSTDGPU_RW_BUFFER_GLC(uint32_t)                         inoutHufLitCompactionLookback;
+    ZSTDGPU_RW_BUFFER(uint32_t)                             inoutBlockTableDefs;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inCompressedData;
     ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)                inBlocksCMPRefs;
     ZSTDGPU_RO_BUFFER(uint32_t)                             inPerFrameBlockCountCMP;

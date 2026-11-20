@@ -17,54 +17,83 @@
 
 #ifdef __hlsl_dx_compiler
 
-ZSTDGPU_RW_BUFFER(uint32_t)         ZstdInOutFrameResumeState       : register(u0);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInBlockSizePrefix           : register(t0);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameBlockCountAll     : register(t1);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMinIdx   : register(t2);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerFrameSeqStreamMaxIdx   : register(t3);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset1  : register(t4);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset2  : register(t5);
-ZSTDGPU_RO_BUFFER(uint32_t)         ZstdInPerSeqStreamFinalOffset3  : register(t6);
-ZSTDGPU_RO_BUFFER(zstdgpu_Counters) ZstdInCounters                  : register(t7);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameResumeState           : register(u0);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockSizePrefix               : register(t0);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameBlockCountAll         : register(t1);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameSeqStreamMinIdx       : register(t2);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameSeqStreamMaxIdx       : register(t3);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerSeqStreamFinalOffset1      : register(t4);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerSeqStreamFinalOffset2      : register(t5);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerSeqStreamFinalOffset3      : register(t6);
+ZSTDGPU_RO_BUFFER(zstdgpu_Counters)         ZstdInCounters                      : register(t7);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPartialDecodeState         : register(u1);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockTableDefs                : register(t8);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInGlobalBlockIndexPerCmpBlock   : register(t9);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInSeqStreamToBlockId            : register(t10);
+ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameBlockCountCMP         : register(t11);
+ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInUnCompressedFramesRefs        : register(t12);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameStatus                : register(u2);
 
 typedef struct zstdgpu_WriteFrameResume_Consts
 {
     uint32_t    frameCount;
+    uint32_t    partialFlags;
+    uint32_t    lastFrameLimit;
 } zstdgpu_WriteFrameResume_Consts;
 
 ConstantBuffer<zstdgpu_WriteFrameResume_Consts> ZstdConstants_WriteFrameResume : register(b0);
 
-#define ZSTDGPU_SRT_RS_WriteFrameResume "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", RootConstants(b0, num32BitConstants=1)"
+#define ZSTDGPU_SRT_RS_WriteFrameResume "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", UAV(u1)" ", SRV(t8)" ", SRV(t9)" ", SRV(t10)" ", SRV(t11)" ", SRV(t12)" ", UAV(u2)" ", RootConstants(b0, num32BitConstants=3)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_WriteFrameResume_SRT) srt)
 {
-    srt.inoutFrameResumeState       = ZstdInOutFrameResumeState;
-    srt.inBlockSizePrefix           = ZstdInBlockSizePrefix;
-    srt.inPerFrameBlockCountAll     = ZstdInPerFrameBlockCountAll;
-    srt.inPerFrameSeqStreamMinIdx   = ZstdInPerFrameSeqStreamMinIdx;
-    srt.inPerFrameSeqStreamMaxIdx   = ZstdInPerFrameSeqStreamMaxIdx;
-    srt.inPerSeqStreamFinalOffset1  = ZstdInPerSeqStreamFinalOffset1;
-    srt.inPerSeqStreamFinalOffset2  = ZstdInPerSeqStreamFinalOffset2;
-    srt.inPerSeqStreamFinalOffset3  = ZstdInPerSeqStreamFinalOffset3;
-    srt.inCounters                  = ZstdInCounters;
-    srt.frameCount                  = ZstdConstants_WriteFrameResume.frameCount;
+    srt.inoutFrameResumeState           = ZstdInOutFrameResumeState;
+    srt.inBlockSizePrefix               = ZstdInBlockSizePrefix;
+    srt.inPerFrameBlockCountAll         = ZstdInPerFrameBlockCountAll;
+    srt.inPerFrameSeqStreamMinIdx       = ZstdInPerFrameSeqStreamMinIdx;
+    srt.inPerFrameSeqStreamMaxIdx       = ZstdInPerFrameSeqStreamMaxIdx;
+    srt.inPerSeqStreamFinalOffset1      = ZstdInPerSeqStreamFinalOffset1;
+    srt.inPerSeqStreamFinalOffset2      = ZstdInPerSeqStreamFinalOffset2;
+    srt.inPerSeqStreamFinalOffset3      = ZstdInPerSeqStreamFinalOffset3;
+    srt.inCounters                      = ZstdInCounters;
+    srt.inoutPartialDecodeState         = ZstdInOutPartialDecodeState;
+    srt.inBlockTableDefs                = ZstdInBlockTableDefs;
+    srt.inGlobalBlockIndexPerCmpBlock   = ZstdInGlobalBlockIndexPerCmpBlock;
+    srt.inSeqStreamToBlockId            = ZstdInSeqStreamToBlockId;
+    srt.inPerFrameBlockCountCMP         = ZstdInPerFrameBlockCountCMP;
+    srt.inUnCompressedFramesRefs        = ZstdInUnCompressedFramesRefs;
+    srt.inoutFrameStatus                = ZstdInOutFrameStatus;
+    srt.frameCount                      = ZstdConstants_WriteFrameResume.frameCount;
+    srt.partialFlags                    = ZstdConstants_WriteFrameResume.partialFlags;
+    srt.lastFrameLimit                  = ZstdConstants_WriteFrameResume.lastFrameLimit;
 }
 
 #else
 
 static void zstdgpu_Srt_Fill(zstdgpu_WriteFrameResume_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
-                             uint32_t     frameCount)
+                             uint32_t     frameCount,
+                             uint32_t     partialFlags,
+                             uint32_t     lastFrameLimit)
 {
-    srt.inoutFrameResumeState       = cpuRes.FrameResumeState;
-    srt.inBlockSizePrefix           = cpuRes.BlockSizePrefix;
-    srt.inPerFrameBlockCountAll     = cpuRes.PerFrameBlockCountAll;
-    srt.inPerFrameSeqStreamMinIdx   = cpuRes.PerFrameSeqStreamMinIdx;
-    srt.inPerFrameSeqStreamMaxIdx   = cpuRes.PerFrameSeqStreamMaxIdx;
-    srt.inPerSeqStreamFinalOffset1  = cpuRes.PerSeqStreamFinalOffset1;
-    srt.inPerSeqStreamFinalOffset2  = cpuRes.PerSeqStreamFinalOffset2;
-    srt.inPerSeqStreamFinalOffset3  = cpuRes.PerSeqStreamFinalOffset3;
-    srt.inCounters                  = cpuRes.Counters;
-    srt.frameCount                  = frameCount;
+    srt.inoutFrameResumeState           = cpuRes.FrameResumeState;
+    srt.inBlockSizePrefix               = cpuRes.BlockSizePrefix;
+    srt.inPerFrameBlockCountAll         = cpuRes.PerFrameBlockCountAll;
+    srt.inPerFrameSeqStreamMinIdx       = cpuRes.PerFrameSeqStreamMinIdx;
+    srt.inPerFrameSeqStreamMaxIdx       = cpuRes.PerFrameSeqStreamMaxIdx;
+    srt.inPerSeqStreamFinalOffset1      = cpuRes.PerSeqStreamFinalOffset1;
+    srt.inPerSeqStreamFinalOffset2      = cpuRes.PerSeqStreamFinalOffset2;
+    srt.inPerSeqStreamFinalOffset3      = cpuRes.PerSeqStreamFinalOffset3;
+    srt.inCounters                      = cpuRes.Counters;
+    srt.inoutPartialDecodeState         = cpuRes.PartialDecodeState;
+    srt.inBlockTableDefs                = cpuRes.BlockTableDefs;
+    srt.inGlobalBlockIndexPerCmpBlock   = cpuRes.GlobalBlockIndexPerCmpBlock;
+    srt.inSeqStreamToBlockId            = cpuRes.SeqStreamToBlockId;
+    srt.inPerFrameBlockCountCMP         = cpuRes.PerFrameBlockCountCMP;
+    srt.inUnCompressedFramesRefs        = cpuRes.UnCompressedFramesRefs;
+    srt.inoutFrameStatus                = cpuRes.FrameStatus;
+    srt.frameCount                      = frameCount;
+    srt.partialFlags                    = partialFlags;
+    srt.lastFrameLimit                  = lastFrameLimit;
 }
 
 #endif

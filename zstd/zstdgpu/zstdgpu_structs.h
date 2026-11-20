@@ -1912,19 +1912,12 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
 }
 
 /**
- *  Per-frame state carried from one intra-frame slice to the next.
+ *  Per-frame decode start state: four consecutive dwords per frame in a plain `uint32_t` buffer, zeroed by the
+ *  memset pass at the start of stage 2. A partial decode's resumed frame (frame 0) is then seeded from the
+ *  resume record (`kzstdgpu_ResumeRecord_Offset1..Cursor`, in the same order).
  *
- *  Laid out as four consecutive dwords per frame in a plain `uint32_t` buffer rather than a struct,
- *  so the existing memset pass can zero it and a caller can supply it as an ordinary structured
- *  buffer. Index with the accessors below.
- *
- *  It may live in caller-supplied memory (see `zstdgpu_SetupResumeState`) precisely because it must
- *  survive between submissions: the library's scratch heaps do not. When the caller supplies
- *  nothing, the library allocates it internally and zeroes it, which reproduces the previous
- *  whole-frame behaviour exactly.
- *
- *  All-zero means "this frame has not been started", which is unambiguous because a valid `offset1`
- *  is at least `1 + 3` in the biased encoding and therefore never zero.
+ *  All-zero means "the frame starts at its beginning", which is unambiguous because a valid `offset1` is at
+ *  least `1 + 3` in the biased encoding and therefore never zero.
  *
  *  `offset1/2/3` are stored in the same biased-by-3 encoding that `PerSeqStreamFinalOffset*` uses,
  *  so they move between the two without conversion.
@@ -1937,33 +1930,11 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
 #define zstdgpu_FrameResumeOutputCursor(frameIdx)   ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 3u)
 
 /**
- *  Per-frame block window, the per-frame form of `zstdgpu_SetupBlockLimitPerFrame`'s scalars.
- *
- *  The scalar window is applied identically to every frame in the batch, so a batch cannot slice one
- *  frame while decoding its neighbours whole. That makes whole-frame packing alongside a slice piece
- *  inexpressible, which is why slicing otherwise forces one frame per batch. This buffer lifts that:
- *  each frame states its own window.
- *
- *  Laid out as two consecutive dwords per frame in a plain `uint32_t` buffer rather than a struct,
- *  for the same reason the resume state is: a caller can supply it as an ordinary structured buffer.
- *
- *  Semantics per frame match the scalar API exactly:
- *      - `blockStart` is the first block ordinal decoded,
- *      - `blockLimit` is the number of block ordinals decoded, and **0 means "to the end of the
- *        frame"** -- so `(0, 0)` is the whole frame and is what a frame that is not being sliced
- *        should carry.
- *
- *  `kzstdgpu_BlockWindowSkipFrame` in the `blockStart` slot means "decode nothing from this frame".
- *  It exists because a batch is a contiguous frame range while frames finish at different slice
- *  counts, so a frame that has already been fully decoded still sits inside the range. It is NOT the
- *  same as a start past the last block: that would still pay to parse every preceding compressed
- *  block as entropy-only, whereas a skipped frame emits nothing and builds no tables.
+ *  `kzstdgpu_BlockWindowSkipFrame` as a frame's first block ordinal means "decode nothing from this frame" -- a
+ *  partial decode's resumed frame that the previous request already finished. It is NOT the same as a start past
+ *  the last block, which would still re-parse table-defining blocks.
  */
-#define kzstdgpu_BlockWindowDwordCount      2u
 #define kzstdgpu_BlockWindowSkipFrame       0xffffffffu
-
-#define zstdgpu_BlockWindowStart(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 0u)
-#define zstdgpu_BlockWindowLimit(frameIdx)          ((frameIdx) * kzstdgpu_BlockWindowDwordCount + 1u)
 
 /**
  *  Whether `blockOrdinal` lies in the window `[blockStart, blockStart + blockLimit)`, with a
@@ -1975,6 +1946,55 @@ static inline uint32_t zstdgpu_BlockWindowContains(uint32_t blockOrdinal, uint32
 {
     return (blockOrdinal >= blockStart && (0u == blockLimit || blockOrdinal - blockStart < blockLimit)) ? 1u : 0u;
 }
+
+/**
+ *  Partial decode: a request may stop part-way through its LAST frame and resume it in its FIRST frame on the
+ *  next request (see `zstdgpu_SetupPartialDecode`). What carries between the two is one resume record, held by
+ *  the caller between requests and laid out as below. Block positions are frame-relative ORDINALS, so the
+ *  record stays valid wherever the frame's bytes sit in the next request's input buffer.
+ *
+ *   - `Valid`: the frame is incomplete and the next request resumes it.
+ *   - `NextOrdinal`: the first block the next request decodes.
+ *   - `Offset1..3`, `Cursor`: repeat offsets on entry to that block (biased by 3, as `PerSeqStreamFinalOffset*`)
+ *     and its output offset within the frame. They are consecutive and in the order of the per-frame resume
+ *     state (`zstdgpu_FrameResume*`), so a single copy seeds the resumed frame.
+ *   - `Def*`: ordinals of the last blocks before `NextOrdinal` that defined the Huffman table and the LL, OF
+ *     and ML FSE tables (`~0` for none). A resumed block may reuse those tables (`Treeless_Literals_Block`,
+ *     `Repeat_Mode`), so the next request re-parses just these blocks for their tables.
+ */
+#define kzstdgpu_ResumeRecordDwordCount     16u
+#define kzstdgpu_ResumeRecord_Valid         0u
+#define kzstdgpu_ResumeRecord_NextOrdinal   1u
+#define kzstdgpu_ResumeRecord_Offset1       2u
+#define kzstdgpu_ResumeRecord_Offset2       3u
+#define kzstdgpu_ResumeRecord_Offset3       4u
+#define kzstdgpu_ResumeRecord_Cursor        5u
+#define kzstdgpu_ResumeRecord_DefHuf        6u
+#define kzstdgpu_ResumeRecord_DefLLen       7u
+#define kzstdgpu_ResumeRecord_DefOffs       8u
+#define kzstdgpu_ResumeRecord_DefMLen       9u
+
+/**
+ *  The library's internal partial-decode state: a copy of the caller's record (copied in before stage 0 and
+ *  back out after stage 2, so no shader binds caller memory), followed by the last frame's block window as
+ *  chosen in stage 0 and reproduced in stage 1.
+ */
+#define kzstdgpu_PartialDecodeStateDwordCount   32u
+#define kzstdgpu_PartialDecode_WindowStart      16u     // first block ordinal of the last frame's window
+#define kzstdgpu_PartialDecode_WindowCount      17u     // block ordinals in the window (may be 0)
+#define kzstdgpu_PartialDecode_EntropyOnlyCount 18u     // table-defining blocks re-parsed ahead of the window
+#define kzstdgpu_PartialDecode_WindowReachesEnd 19u     // the window took the frame's last block
+
+// `partialFlags` root constant of the frame parser.
+#define kzstdgpu_PartialDecodeFlag_ResumeFirstFrame 1u  // frame 0 resumes from the record
+#define kzstdgpu_PartialDecodeFlag_LastFramePartial 2u  // the last frame stops at `lastFrameLimit`
+#define kzstdgpu_PartialDecodeFlag_PlanLastFrame    4u  // this dispatch chooses the last frame's window
+
+// Which entropy tables a compressed block defines rather than reuses (`BlockTableDefs`).
+#define kzstdgpu_BlockTableDef_Huf  1u
+#define kzstdgpu_BlockTableDef_LLen 2u
+#define kzstdgpu_BlockTableDef_Offs 4u
+#define kzstdgpu_BlockTableDef_MLen 8u
 
 typedef struct zstdgpu_LitStreamInfo
 {

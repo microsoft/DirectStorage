@@ -212,148 +212,55 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
- *  @brief      Supplies the per-frame resume state used to continue a frame across submissions.
+ *  @brief      Decodes the request's frames up to an output budget, so that a frame larger than the scratch
+ *              memory can afford is decoded over several requests.
  *
- *  `resumeState` must be a buffer of `4 * frameCount` `uint32_t`s in `D3D12_RESOURCE_STATE_UNORDERED_ACCESS`.
- *  Pass `clearResumeState` of 1 for the first slice of a sequence and 0 for every subsequent slice:
- *  the library reads the carried state at the start of a decode and rewrites it at the end, so
- *  clearing mid-sequence would silently restart every frame.
+ *  Scratch is sized from `outputBudgetBytes` (output bytes this request produces) and `blockSlotCount`
+ *  (an over-provisioned allowance of blocks), not from the frames' sizes or block counts, so the caller never
+ *  parses a frame. Within a request:
  *
- *  The clear is explicit rather than inferred from `blockStart == 0` because a batch mixes frames
- *  that are starting with frames that are continuing, and a wrong guess produces plausible-looking
- *  wrong output rather than a failure.
+ *      - frame 0 resumes from `resumeRecord` when `resumeFirstFrame` is non-zero;
+ *      - every frame between the first and the last is decoded whole;
+ *      - the last frame is decoded up to `lastFrameOutputLimit` bytes from its start (pass its full size to
+ *        decode it whole); a single-frame request can be both resumed and limited.
  *
- *  It must be caller-owned because the library's scratch heaps do not survive between submissions,
- *  and resuming is precisely a cross-submission operation. Passing NULL (the default) makes the
- *  library allocate and zero its own, which reproduces whole-frame behaviour exactly.
+ *  The caller plans requests from frame sizes alone: `outputBudgetBytes` is the sum, over the request's frames,
+ *  of the bytes the request takes each frame to -- from the previous request's limit for a resumed frame, and
+ *  to `lastFrameOutputLimit` for the last. Decoding stops at a block boundary, so the block that crosses the
+ *  limit is written whole: up to one block (at most 128 KiB) past the limit. The next request resumes after
+ *  that block, but the caller plans it as if the extra bytes had not been written; they were written to their
+ *  final place and are never written again.
  *
- *  The two pieces of state it carries are the ones a mid-frame slice cannot reconstruct:
+ *  Requirements:
+ *      - `resumeRecord` is a caller-owned buffer of at least `kzstdgpu_ResumeRecordDwordCount` (`zstdgpu_structs.h`) `uint32_t`s in
+ *        `D3D12_RESOURCE_STATE_UNORDERED_ACCESS`, kept unchanged between the requests of one frame. Its
+ *        contents need no initialisation for a request whose `resumeFirstFrame` is 0.
+ *      - A resumed frame's earlier output must still be in the destination at the same frame-relative
+ *        offsets (matches read it as history), and its compressed bytes must still be in the input.
+ *      - `blockSlotCount` covers every block the request takes: `zstdgpu_PartialDecodeBlockSlotCount` gives an
+ *        allowance that covers real content. A request that needs more fails loudly with
+ *        `kzstdgpu_FrameStatus_BlockCountExceeded`: on every frame, with nothing decoded, when the frames before
+ *        the last one alone exceed it, and otherwise on the last frame alone, whose window ran out of slots
+ *        before reaching its limit.
  *
- *      - the output cursor. The caller cannot compute this, because a compressed block's
- *        decompressed size is only discovered by decoding it.
- *      - the repeat offsets at the frame's last decoded sequence. zstd's `1/4/8` defaults apply only
- *        at the true start of a frame.
+ *  Submit each request's command list before recording the next request on the same context; recording
+ *  several requests into one command list is not supported (the library re-places its scratch resources in
+ *  the same heaps for every request and records no aliasing barriers between them).
  *
- *  Note this does NOT remove the requirement that preceding slices' output is still present in the
- *  destination buffer: matches read it as history.
- *
- *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
+ *  Pass a NULL `resumeRecord` to return to whole-frame decoding. Call before sizing or submitting.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SetupResumeState(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *resumeState, uint32_t clearResumeState);
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext inPerRequestContext,
+                                                      struct ID3D12Resource *resumeRecord,
+                                                      uint32_t resumeFirstFrame,
+                                                      uint32_t lastFrameOutputLimit,
+                                                      uint32_t outputBudgetBytes,
+                                                      uint32_t blockSlotCount);
 
 /**
- *  @brief      Decode only blocks `[blockStartPerFrame, blockStartPerFrame + blockLimitPerFrame)` of
- *              every frame. A limit of 0 means "to the end of the frame", so the default
- *              `(0, 0)` is the whole frame.
- *
- *  This is intra-frame slicing. A slice starting at block 0 needs no carried state, so it is correct
- *  as-is. A slice starting later requires both of the following:
- *
- *      - the output cursor and the repeat offsets, both carried on the GPU via
- *        `zstdgpu_SetupResumeState`. Neither can be supplied host-side: a compressed block's
- *        decompressed size is only discovered by decoding it, and zstd's `1/4/8` repeat-offset
- *        defaults apply only at the true start of a frame. (Advancing the frame's destination
- *        offset in `zstdgpu_SetupOutputs` is an alternative way to carry the cursor, but only for
- *        content whose decoded size the caller already knows, i.e. RAW and RLE blocks.)
- *      - the preceding slices' output still being present in the destination buffer, because
- *        matches read it as history through absolute destination addresses. A slice decoded into a
- *        fresh buffer sees zeros there.
- *
- *  EVERY BLOCK ORDINAL IS A LEGAL CUT -- no host-side legality scan is needed.
- *
- *  zstd reuses entropy tables across blocks within a frame: a sequences section may select FSE
- *  `Repeat_Mode`, and a `Treeless_Literals_Block` reuses the Huffman table of the last
- *  `Compressed_Literals_Block`. A slice beginning at such a block has none of those tables in its
- *  own dispatch.
- *
- *  The library resolves this itself. Compressed blocks *before* the window are carried through the
- *  parse as "entropy only": their section headers are parsed so their Huffman weights and FSE tables
- *  are built, and their literal payloads are skipped outright. They emit zero literals, zero
- *  sequences and zero output bytes, so they consume no arena scratch and contribute nothing to any
- *  destination offset -- they exist solely so in-window blocks can resolve `Repeat_Mode` and
- *  `Treeless` against them. Only blocks before the window need this, because table definitions flow
- *  forwards; blocks after the window are still skipped entirely.
- *
- *  The cost is bounded by table size (FSE <= 512 entries, Huffman <= 256), not by payload size, and
- *  grows with the slice's start ordinal within its frame.
- *
- *  Blocks beyond the limit are still walked -- zstd block boundaries are only discoverable
- *  sequentially -- but emit nothing, so the scratch consumed is that of the decoded prefix rather
- *  than of the whole frame. Memory requirements are unaffected and remain sized for the whole frame,
- *  so a sliced decode never needs more memory than an unsliced one.
- *
- *  With multiple frames each frame is truncated independently and its output still lands at that
- *  frame's own destination.
- *
- *  NB: this window is a single scalar applied uniformly to every frame in the batch. There is no
- *      way to slice one frame while decoding its neighbours whole -- use
- *      `zstdgpu_SetupBlockWindowPerFrame` for that.
- *
- *  NB: validating a partial decode requires a reference that truncates at the same block boundary.
- *      Comparing against a whole-frame reference is not meaningful, so callers that validate must
- *      leave this at 0.
- *
- *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
+ *  @brief      A block-slot allowance for `zstdgpu_SetupPartialDecode` covering real content: one slot per
+ *              frame plus one per 8 KiB of output budget, and a few for the resumed frame's carried tables.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockLimitPerFrame(zstdgpu_PerRequestContext inPerRequestContext, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame);
-
-/**
- *  @brief      Supplies a PER-FRAME block window, replacing the batch-uniform scalars set by
- *              `zstdgpu_SetupBlockLimitPerFrame`.
- *
- *  `blockWindowPerFrame` must be a buffer of `2 * frameCount` `uint32_t`s in
- *  `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`, holding `(blockStart, blockLimit)` per frame in
- *  frame order. Passing NULL (the default) restores the scalar window, so a caller that never slices
- *  sees no behaviour change.
- *
- *  Per-frame semantics match the scalar API exactly: `blockLimit == 0` means "to the end of the
- *  frame", so `(0, 0)` is the whole frame and is what a frame that is not being sliced carries.
- *
- *  `kzstdgpu_BlockWindowSkipFrame` as a frame's `blockStart` means "decode nothing from this frame".
- *  It is needed because a batch is a contiguous frame range while frames finish at different slice
- *  counts, so an already-completed frame still sits inside the range. It is NOT equivalent to a
- *  start past the frame's last block: that still pays to parse every compressed block for entropy
- *  tables no in-window block ever uses.
- *
- *  WHY THIS EXISTS. The scalar window is applied identically to every frame in a batch, so a batch
- *  cannot slice one frame while decoding its neighbours whole. That forces one frame per batch
- *  whenever anything is sliced, and makes packing whole frames alongside a slice piece impossible.
- *
- *  The window is consumed by the frame parse, which runs in both the counting and the collecting
- *  dispatch, and both receive the same buffer -- so the emitted records and the counts that size
- *  them cannot disagree.
- *
- *  NB: a host pre-scan that counts whole frames (`zstdgpu_CountFramesAndBlocks`) remains a valid
- *      upper bound for sizing, because windowing a frame can only ever emit fewer blocks than the
- *      frame contains.
- *
- *  Can be called before or after the `zstdgpu_SetupInputs*` functions.
- */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SetupBlockWindowPerFrame(zstdgpu_PerRequestContext inPerRequestContext, struct ID3D12Resource *blockWindowPerFrame);
-
-/**
- *  @brief      Converts a per-slice DECOMPRESSED byte budget into the number of block ordinals a
- *              slice may span, for use as `blockLimitPerFrame`.
- *
- *  The budget is in decompressed bytes because that is the axis the caller actually has: scratch is
- *  sized from decompressed size, so a caller with a scratch ceiling converts it to a decompressed
- *  budget and slices against that. It never has to count the frame's blocks, and no block header is
- *  read on the host.
- *
- *  THE IDENTITY THAT REMOVES THE HOST PARSE: a zstd block decodes to at most 128 KiB, so a slice
- *  spanning K block ordinals decodes at most `K * 128 KiB` -- whatever the content is. K is
- *  therefore derivable from the byte budget alone, and slice boundaries are plain arithmetic
- *  (`0, K, 2K, ...`). This is the same kind of provable bound the scratch sizing uses, and for the
- *  same reason: a compressed block's decompressed size is only discoverable by decoding it.
- *
- *  A budget below one block rounds up to one, since a block is the indivisible unit of slicing.
- *
- *  NB: the bound is on the SLICE, not on the frame. The number of slices a frame needs is
- *      `ceil(blockCount / K)`, and `zstdgpu_CountFramesAndBlocks` yields that block count exactly,
- *      so a caller that wants it never has to estimate. Alternatively just iterate until a slice
- *      reports it reached the end of the frame.
- */
-ZSTDGPU_API uint32_t zstdgpu_SliceBlockCountForDecompressedBudget(uint64_t decompressedByteBudget);
+ZSTDGPU_API uint32_t zstdgpu_PartialDecodeBlockSlotCount(uint32_t outputBudgetBytes, uint32_t frameCount);
 
 /**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.

@@ -51,7 +51,7 @@
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )   \
     ZSTDGPU_BUFFER(uint64_t                                 , Predicate                     )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , BlockWindowPerFrame           )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , PartialDecodeState            )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRAWLookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLELookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMPLookback )   \
@@ -65,9 +65,8 @@
     ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        ) \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
 
-// FrameResumeState is not read back: by the end of stage 2 it holds the state for the NEXT slice,
-// not the input this request decoded with, and a caller-supplied buffer stays in UNORDERED_ACCESS
-// and may be larger than the request, so a generic CopyResource from it would be invalid.
+// FrameResumeState is library-internal (zeroed, then seeded from a partial decode's resume record) and
+// is not read back.
 #define ZSTDGPU_BUFFERS_LIST_STAGE_2() \
     ZSTDGPU_BUFFER(uint32_t                                 , FrameResumeState              )
 
@@ -128,7 +127,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset1Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset2Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)  \
-    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )
+    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , BlockTableDefs                )
 
 #define ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()     \
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()      \
@@ -310,7 +310,7 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
      *  Sized for the whole batch even though it is read only when the caller supplies a per-frame
      *  window array, because the descriptor has to be valid either way. 8 bytes per frame.
      */
-    const uint32_t BlockWindowPerFrame_Count = frameCount * kzstdgpu_BlockWindowDwordCount;
+    const uint32_t PartialDecodeState_Count = kzstdgpu_PartialDecodeStateDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
@@ -380,6 +380,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t FseIndexLookbackOffs_Count = FseIndexLookbackLLen_Count;
     const uint32_t FseIndexLookbackMLen_Count = FseIndexLookbackLLen_Count;
     const uint32_t LitGroupEndPerHuffmanTable_Count = cmpBlockCount;
+    const uint32_t BlockTableDefs_Count = cmpBlockCount;
     const uint32_t LitGroupEndPerHuffmanTableLookback_Count = zstdgpu_GetLookbackBlockCount(cmpBlockCount);
     const uint32_t BlockSeqCountPrefixLookback_Count = FseIndexLookbackLLen_Count;
     const uint32_t SeqCountPrefixLookback_Count = FseIndexLookbackLLen_Count;
@@ -422,7 +423,8 @@ static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo,
      */
     const uint32_t DecompressedLiterals_Count       = zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(literalCount, sequencesCount, arenaByteCount);
 
-    // Library-owned unless the caller supplies its own through `zstdgpu_SetupResumeState`.
+    // Per-frame repeat offsets and output cursor. Library-owned; a partial decode seeds the resumed frame's
+    // entry from the caller's resume record.
     const uint32_t FrameResumeState_Count           = uncompressedFrameCount * kzstdgpu_FrameResumeDwordCount;
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
@@ -681,41 +683,6 @@ static void zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(zstdgpu_ResourceDa
 
         outResData->gpuOnly.FrameStatus = frameStatus;
         outResData->gpuOnly.FrameStatus->AddRef();
-    }
-}
-
-/**
- *  Replaces the internally allocated per-frame resume buffer with a caller-supplied one.
- *
- *  Unlike the output resources above this is optional: passing NULL leaves the internal allocation
- *  in place, which the library zeroes, so a caller that never slices sees no behaviour change.
- */
-static void zstdgpu_ResourceDataGpu_ReInitResumeExternal(zstdgpu_ResourceDataGpu *outResData, ID3D12Resource *frameResumeState)
-{
-    if (NULL != frameResumeState && frameResumeState != outResData->gpuOnly.FrameResumeState)
-    {
-        D3D12AID_SAFE_RELEASE(outResData->gpuOnly.FrameResumeState);
-
-        outResData->gpuOnly.FrameResumeState = frameResumeState;
-        outResData->gpuOnly.FrameResumeState->AddRef();
-    }
-}
-
-/**
- *  Replaces the internally allocated per-frame block window buffer with a caller-supplied one.
- *
- *  Optional in the same way the resume buffer is: passing NULL leaves the internal allocation in
- *  place. The internal one is never read -- `hasBlockWindowPerFrame` stays 0, so the shader takes
- *  the scalar window instead -- it exists only so the descriptor is always valid.
- */
-static void zstdgpu_ResourceDataGpu_ReInitBlockWindowExternal(zstdgpu_ResourceDataGpu *outResData, ID3D12Resource *blockWindowPerFrame)
-{
-    if (NULL != blockWindowPerFrame && blockWindowPerFrame != outResData->gpuOnly.BlockWindowPerFrame)
-    {
-        D3D12AID_SAFE_RELEASE(outResData->gpuOnly.BlockWindowPerFrame);
-
-        outResData->gpuOnly.BlockWindowPerFrame = blockWindowPerFrame;
-        outResData->gpuOnly.BlockWindowPerFrame->AddRef();
     }
 }
 

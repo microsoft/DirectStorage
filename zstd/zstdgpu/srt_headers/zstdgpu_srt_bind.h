@@ -20,7 +20,7 @@ enum
 {
     kzstdgpu_SrtRes_CompressedData                      = 0,
     kzstdgpu_SrtRes_FramesRefs                          = 1,
-    kzstdgpu_SrtRes_BlockWindowPerFrame                 = 2,
+    kzstdgpu_SrtRes_PartialDecodeState                  = 2,
     kzstdgpu_SrtRes_Counters                            = 3,
     kzstdgpu_SrtRes_PerFrameBlockCountRAW               = 4,
     kzstdgpu_SrtRes_PerFrameBlockCountRLE               = 5,
@@ -66,28 +66,29 @@ enum
     kzstdgpu_SrtRes_LitStreamCountPrefixLookback        = 45,
     kzstdgpu_SrtRes_HufLitIdToHufWId_DBG                = 46,
     kzstdgpu_SrtRes_HufLitCompactionLookback            = 47,
-    kzstdgpu_SrtRes_DispatchArgs                        = 48,
-    kzstdgpu_SrtRes_FrameResumeState                    = 49,
-    kzstdgpu_SrtRes_PerFrameBlockCountRAWLookback       = 50,
-    kzstdgpu_SrtRes_PerFrameBlockCountRLELookback       = 51,
-    kzstdgpu_SrtRes_PerFrameBlockCountCMPLookback       = 52,
-    kzstdgpu_SrtRes_PerFrameBlockCountAllLookback       = 53,
-    kzstdgpu_SrtRes_FseArena                            = 54,
-    kzstdgpu_SrtRes_RawBlockSizePrefixLookback          = 55,
-    kzstdgpu_SrtRes_RleBlockSizePrefixLookback          = 56,
-    kzstdgpu_SrtRes_LitGroupEndPerHuffmanTableLookback  = 57,
-    kzstdgpu_SrtRes_PerSeqStreamFinalOffset1Lookback    = 58,
-    kzstdgpu_SrtRes_PerSeqStreamFinalOffset2Lookback    = 59,
-    kzstdgpu_SrtRes_PerSeqStreamFinalOffset3Lookback    = 60,
-    kzstdgpu_SrtRes_FseIndexLookbackLLen                = 61,
-    kzstdgpu_SrtRes_FseIndexLookbackOffs                = 62,
-    kzstdgpu_SrtRes_FseIndexLookbackMLen                = 63,
-    kzstdgpu_SrtRes_BlockSizePrefixLookback             = 64,
-    kzstdgpu_SrtRes_BlockDestOffs                       = 65,
-    kzstdgpu_SrtRes_DispatchCnts                        = 66,
-    kzstdgpu_SrtRes_Predicate                           = 67,
-    kzstdgpu_SrtRes_UnCompressedFramesRefs              = 68,
-    kzstdgpu_SrtRes_Count                               = 69
+    kzstdgpu_SrtRes_BlockTableDefs                      = 48,
+    kzstdgpu_SrtRes_DispatchArgs                        = 49,
+    kzstdgpu_SrtRes_FrameResumeState                    = 50,
+    kzstdgpu_SrtRes_PerFrameBlockCountRAWLookback       = 51,
+    kzstdgpu_SrtRes_PerFrameBlockCountRLELookback       = 52,
+    kzstdgpu_SrtRes_PerFrameBlockCountCMPLookback       = 53,
+    kzstdgpu_SrtRes_PerFrameBlockCountAllLookback       = 54,
+    kzstdgpu_SrtRes_FseArena                            = 55,
+    kzstdgpu_SrtRes_RawBlockSizePrefixLookback          = 56,
+    kzstdgpu_SrtRes_RleBlockSizePrefixLookback          = 57,
+    kzstdgpu_SrtRes_LitGroupEndPerHuffmanTableLookback  = 58,
+    kzstdgpu_SrtRes_PerSeqStreamFinalOffset1Lookback    = 59,
+    kzstdgpu_SrtRes_PerSeqStreamFinalOffset2Lookback    = 60,
+    kzstdgpu_SrtRes_PerSeqStreamFinalOffset3Lookback    = 61,
+    kzstdgpu_SrtRes_FseIndexLookbackLLen                = 62,
+    kzstdgpu_SrtRes_FseIndexLookbackOffs                = 63,
+    kzstdgpu_SrtRes_FseIndexLookbackMLen                = 64,
+    kzstdgpu_SrtRes_BlockSizePrefixLookback             = 65,
+    kzstdgpu_SrtRes_BlockDestOffs                       = 66,
+    kzstdgpu_SrtRes_DispatchCnts                        = 67,
+    kzstdgpu_SrtRes_Predicate                           = 68,
+    kzstdgpu_SrtRes_UnCompressedFramesRefs              = 69,
+    kzstdgpu_SrtRes_Count                               = 70
 };
 
 /**
@@ -108,7 +109,7 @@ static const uint32_t kzstdgpu_SrtConstsRootSlot_DecompressSequences      = 14;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_FinaliseSequenceOffsets  = 11;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_InitFseTable             = 5;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_ComputeDestBlockOffsets  = 6;
-static const uint32_t kzstdgpu_SrtConstsRootSlot_WriteFrameResume         = 9;
+static const uint32_t kzstdgpu_SrtConstsRootSlot_WriteFrameResume         = 16;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_ExecuteSequences         = 10;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_MemsetMemcpy             = 8;
 static const uint32_t kzstdgpu_SrtConstsRootSlot_InitResources            = 2;
@@ -118,7 +119,7 @@ static const uint32_t kzstdgpu_SrtConstsRootSlot_ParseCompressedBlocks    = 6;
  * Descriptors each stage's bind groups occupy in the shader-visible heap.
  * Known at generation time; heap sizing needs it before any descriptor exists.
  */
-static const uint32_t zstdgpu_kSrtStageDescCount[] = { 22, 45, 21 };
+static const uint32_t zstdgpu_kSrtStageDescCount[] = { 22, 46, 21 };
 
 /** GPU descriptor table handles of the bind groups that live in stage 0. */
 struct zstdgpu_Srt_BindGroups_Stage0
@@ -299,7 +300,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE zstdgpu_Srt_InitBindGroup_ParseFrames(zstdgpu
 
     zstdgpu_Srt_PushStructBufferSrv(cpuDest, descSize, device, b.CompressedData, resInfo.CompressedData_ByteSize, sizeof(uint32_t));
     zstdgpu_Srt_PushStructBufferSrv(cpuDest, descSize, device, b.FramesRefs, resInfo.FramesRefs_ByteSize, sizeof(zstdgpu_OffsetAndSize));
-    zstdgpu_Srt_PushStructBufferSrv(cpuDest, descSize, device, b.BlockWindowPerFrame, resInfo.BlockWindowPerFrame_ByteSize, sizeof(uint32_t));
+    zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.PartialDecodeState, resInfo.PartialDecodeState_ByteSize, sizeof(uint32_t));
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.Counters, resInfo.Counters_ByteSize, sizeof(zstdgpu_Counters));
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.PerFrameBlockCountRAW, resInfo.PerFrameBlockCountRAW_ByteSize, sizeof(uint32_t));
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.PerFrameBlockCountRLE, resInfo.PerFrameBlockCountRLE_ByteSize, sizeof(uint32_t));
@@ -493,8 +494,9 @@ static D3D12_GPU_DESCRIPTOR_HANDLE zstdgpu_Srt_InitBindGroup_ParseBlocksWrite(zs
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.HufLitIdToLitStreamId, resInfo.HufLitIdToLitStreamId_ByteSize, sizeof(uint32_t));
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.HufLitIdToHufWId_DBG, resInfo.HufLitIdToHufWId_DBG_ByteSize, sizeof(uint32_t));
     zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.HufLitCompactionLookback, resInfo.HufLitCompactionLookback_ByteSize, sizeof(uint32_t));
+    zstdgpu_Srt_PushStructBufferUav(cpuDest, descSize, device, b.BlockTableDefs, resInfo.BlockTableDefs_ByteSize, sizeof(uint32_t));
 
-    srts.heapOffset += 23;
+    srts.heapOffset += 24;
     return gpuDest;
 }
 
@@ -859,7 +861,7 @@ static void zstdgpu_Bind_MemsetMemcpy_MemsetRLE_Stage2(ID3D12GraphicsCommandList
     cmdList->SetComputeRoot32BitConstant(8 /* Consts */, flags, 2 /* flags */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame, uint32_t hasBlockWindowPerFrame)
+static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -867,12 +869,12 @@ static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameCount, 0 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, compressedBufferSizeInBytes, 1 /* compressedBufferSizeInBytes */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, countBlocksOnly, 2 /* countBlocksOnly */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockStartPerFrame, 3 /* blockStartPerFrame */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockLimitPerFrame, 4 /* blockLimitPerFrame */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, hasBlockWindowPerFrame, 5 /* hasBlockWindowPerFrame */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, partialFlags, 3 /* partialFlags */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockSlotCap, 5 /* blockSlotCap */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t blockStartPerFrame, uint32_t blockLimitPerFrame, uint32_t hasBlockWindowPerFrame)
+static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -880,9 +882,9 @@ static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameCount, 0 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, compressedBufferSizeInBytes, 1 /* compressedBufferSizeInBytes */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, countBlocksOnly, 2 /* countBlocksOnly */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockStartPerFrame, 3 /* blockStartPerFrame */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockLimitPerFrame, 4 /* blockLimitPerFrame */);
-    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, hasBlockWindowPerFrame, 5 /* hasBlockWindowPerFrame */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, partialFlags, 3 /* partialFlags */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockSlotCap, 5 /* blockSlotCap */);
 }
 
 static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t streamsPerGroup)
@@ -1023,7 +1025,7 @@ static void zstdgpu_Bind_InitFseTable_Stage2(ID3D12GraphicsCommandList *cmdList,
     cmdList->SetComputeRoot32BitConstant(5 /* Consts */, tableType, 2 /* tableType */);
 }
 
-static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount)
+static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFrameIndex, uint32_t lastFrameLimit)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ComputeDestBlockOffsets, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* BlockDestOffs */, b.BlockDestOffs->GetGPUVirtualAddress());
@@ -1033,9 +1035,11 @@ static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdL
     cmdList->SetComputeRootUnorderedAccessView(4 /* FrameResumeState */, b.FrameResumeState->GetGPUVirtualAddress());
     cmdList->SetComputeRootShaderResourceView(5 /* DispatchArgs */, b.DispatchArgs->GetGPUVirtualAddress());
     cmdList->SetComputeRoot32BitConstant(6 /* Consts */, frameCount, 2 /* frameCount */);
+    cmdList->SetComputeRoot32BitConstant(6 /* Consts */, partialFrameIndex, 3 /* partialFrameIndex */);
+    cmdList->SetComputeRoot32BitConstant(6 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
 }
 
-static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount)
+static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFlags, uint32_t lastFrameLimit)
 {
     d3d12aid_ComputeRsPs_Set(&srts.WriteFrameResume, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* FrameResumeState */, b.FrameResumeState->GetGPUVirtualAddress());
@@ -1047,7 +1051,16 @@ static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, co
     cmdList->SetComputeRootShaderResourceView(6 /* PerSeqStreamFinalOffset2 */, b.PerSeqStreamFinalOffset2->GetGPUVirtualAddress());
     cmdList->SetComputeRootShaderResourceView(7 /* PerSeqStreamFinalOffset3 */, b.PerSeqStreamFinalOffset3->GetGPUVirtualAddress());
     cmdList->SetComputeRootShaderResourceView(8 /* Counters */, b.Counters->GetGPUVirtualAddress());
-    cmdList->SetComputeRoot32BitConstant(9 /* Consts */, frameCount, 0 /* frameCount */);
+    cmdList->SetComputeRootUnorderedAccessView(9 /* PartialDecodeState */, b.PartialDecodeState->GetGPUVirtualAddress());
+    cmdList->SetComputeRootShaderResourceView(10 /* BlockTableDefs */, b.BlockTableDefs->GetGPUVirtualAddress());
+    cmdList->SetComputeRootShaderResourceView(11 /* GlobalBlockIndexPerCmpBlock */, b.GlobalBlockIndexPerCmpBlock->GetGPUVirtualAddress());
+    cmdList->SetComputeRootShaderResourceView(12 /* SeqStreamToBlockId */, b.SeqStreamToBlockId->GetGPUVirtualAddress());
+    cmdList->SetComputeRootShaderResourceView(13 /* PerFrameBlockCountCMP */, b.PerFrameBlockCountCMP->GetGPUVirtualAddress());
+    cmdList->SetComputeRootShaderResourceView(14 /* UnCompressedFramesRefs */, b.UnCompressedFramesRefs->GetGPUVirtualAddress());
+    cmdList->SetComputeRootUnorderedAccessView(15 /* FrameStatus */, b.FrameStatus->GetGPUVirtualAddress());
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, frameCount, 0 /* frameCount */);
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, partialFlags, 1 /* partialFlags */);
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, lastFrameLimit, 2 /* lastFrameLimit */);
 }
 
 static void zstdgpu_Bind_ExecuteSequences_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t ArenaTopDwords)

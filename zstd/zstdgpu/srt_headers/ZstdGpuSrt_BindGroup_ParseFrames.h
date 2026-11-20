@@ -17,33 +17,33 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames "DescriptorTable(SRV(t0, space=1, numDescriptors=3), UAV(u0, space=1, numDescriptors=15))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames "DescriptorTable(SRV(t0, space=1, numDescriptors=2), UAV(u0, space=1, numDescriptors=16))"
 
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInCompressedData                    : register(t0, space1);
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInFramesRefs                        : register(t1, space1);
-ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockWindowPerFrame               : register(t2, space1);
-ZSTDGPU_RW_BUFFER(zstdgpu_Counters)         ZstdInOutCounters                       : register(u0, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountRAW          : register(u1, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountRLE          : register(u2, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountCMP          : register(u3, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountAll          : register(u4, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutRawBlockSizePrefix             : register(u5, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutRleBlockSizePrefix             : register(u6, space1);
-ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksRAWRefs                  : register(u7, space1);
-ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksRLERefs                  : register(u8, space1);
-ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksCMPRefs                  : register(u9, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutBlockSizePrefix                : register(u10, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRawBlock    : register(u11, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRleBlock    : register(u12, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerCmpBlock    : register(u13, space1);
-ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameStatus                    : register(u14, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPartialDecodeState             : register(u0, space1);
+ZSTDGPU_RW_BUFFER(zstdgpu_Counters)         ZstdInOutCounters                       : register(u1, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountRAW          : register(u2, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountRLE          : register(u3, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountCMP          : register(u4, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutPerFrameBlockCountAll          : register(u5, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutRawBlockSizePrefix             : register(u6, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutRleBlockSizePrefix             : register(u7, space1);
+ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksRAWRefs                  : register(u8, space1);
+ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksRLERefs                  : register(u9, space1);
+ZSTDGPU_RW_BUFFER(zstdgpu_OffsetAndSize)    ZstdInOutBlocksCMPRefs                  : register(u10, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutBlockSizePrefix                : register(u11, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRawBlock    : register(u12, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerRleBlock    : register(u13, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutGlobalBlockIndexPerCmpBlock    : register(u14, space1);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameStatus                    : register(u15, space1);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_ParseFrames(ZSTDGPU_PARAM_INOUT(T) srt)
 {
     srt.inCompressedData                    = ZstdInCompressedData;
     srt.inFramesRefs                        = ZstdInFramesRefs;
-    srt.inBlockWindowPerFrame               = ZstdInBlockWindowPerFrame;
+    srt.inoutPartialDecodeState             = ZstdInOutPartialDecodeState;
     srt.inoutCounters                       = ZstdInOutCounters;
     srt.inoutPerFrameBlockCountRAW          = ZstdInOutPerFrameBlockCountRAW;
     srt.inoutPerFrameBlockCountRLE          = ZstdInOutPerFrameBlockCountRLE;
@@ -68,7 +68,7 @@ static void zstdgpu_Srt_FillBindGroup_ParseFrames(T &srt, const zstdgpu_Resource
 {
     srt.inCompressedData                    = cpuRes.CompressedData;
     srt.inFramesRefs                        = cpuRes.FramesRefs;
-    srt.inBlockWindowPerFrame               = cpuRes.BlockWindowPerFrame;
+    srt.inoutPartialDecodeState             = cpuRes.PartialDecodeState;
     srt.inoutCounters                       = cpuRes.Counters;
     srt.inoutPerFrameBlockCountRAW          = cpuRes.PerFrameBlockCountRAW;
     srt.inoutPerFrameBlockCountRLE          = cpuRes.PerFrameBlockCountRLE;

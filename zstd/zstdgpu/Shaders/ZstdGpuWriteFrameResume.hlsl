@@ -1,10 +1,10 @@
 /**
  * ZstdGpuWriteFrameResume.hlsl
  *
- * Publishes the per-frame state a subsequent intra-frame slice needs in order to continue:
- * the output cursor and the repeat offsets left by the frame's last sequence stream.
+ * Writes a partial decode's resume record for the request's last frame: where the next request
+ * continues it, the repeat offsets on entry there and the blocks whose entropy tables it may reuse.
  *
- * The shader maps each frame to a thread.
+ * One thread does the work (see zstdgpu_ShaderEntry_WriteFrameResume).
  *
  * Copyright (c) Microsoft. All rights reserved.
  * This code is licensed under the MIT License (MIT).

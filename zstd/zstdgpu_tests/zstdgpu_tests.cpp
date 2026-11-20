@@ -9,6 +9,7 @@
 
 #include "adapters.h"
 #include "gpuwork.h"
+#include "zstdgpu_structs.h"
 
 #include <gtest/gtest.h>
 
@@ -623,16 +624,29 @@ public:
         return bytes;
     }
 
-    // Decodes one request on `req`, staged and with library-owned memory, with `resumeState`
-    // attached (or detached when NULL). Returns the per-frame statuses and decoded frames.
-    // `blockInfo`, when given, is passed to zstdgpu_SetupBlockInfoConstants as {literal bytes, sequences}.
+    // Arguments of zstdgpu_SetupPartialDecode.
+    struct PartialArgs
+    {
+        ID3D12Resource* record;
+        uint32_t resumeFirstFrame;
+        uint32_t lastFrameLimit;
+        uint32_t budget;
+        uint32_t slots;
+    };
+
+    // Decodes one request on `req`, staged and with library-owned memory, as a partial decode when
+    // `partial` is given (and a whole decode, with any previous resume record detached, otherwise).
+    // Returns the per-frame statuses and decoded frames. `blockInfo`, when given, is passed to
+    // zstdgpu_SetupBlockInfoConstants as {literal bytes, sequences}. `sharedOutput`, when given, is
+    // the destination instead of a fresh buffer, so a series of requests can fill it.
     Frames Decode(
         zstdgpu_PerRequestContext req,
         std::vector<uint8_t>& data,
         OffsetsAndSizes& offsetsAndSizes,
-        ID3D12Resource* resumeState,
+        const PartialArgs* partial,
         std::vector<uint32_t>& outFrameStatus,
-        const uint32_t* blockInfo = nullptr)
+        const uint32_t* blockInfo = nullptr,
+        ID3D12Resource* sharedOutput = nullptr)
     {
         const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
         const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
@@ -641,7 +655,11 @@ public:
         CopyToResource(input.get(), data.data(), data.size());
         auto inputRefs = CreateBuffer(refsBytes, L"Input Refs");
         CopyToResource(inputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.InputOffsets.data()), refsBytes);
-        auto output = CreateBuffer(offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, L"Output");
+        com_ptr<ID3D12Resource> output;
+        if (nullptr != sharedOutput)
+            output.copy_from(sharedOutput);
+        else
+            output = CreateBuffer(offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, L"Output");
         auto outputRefs = CreateBuffer(refsBytes, L"Output Refs");
         CopyToResource(outputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.OutputOffsets.data()), refsBytes);
         auto status = CreateBuffer(frameCount * sizeof(uint32_t), L"Frame Status");
@@ -649,7 +667,14 @@ public:
         uint32_t stageCount = 0;
         EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupInputsAsFramesInGpuMemory(&stageCount, req, input.get(), static_cast<uint32_t>(data.size()), inputRefs.get(), frameCount));
         EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupOutputs(req, output.get(), offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, outputRefs.get(), frameCount, status.get()));
-        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupResumeState(req, resumeState, /* clearResumeState */ 1));
+        if (nullptr != partial)
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupPartialDecode(req, partial->record, partial->resumeFirstFrame, partial->lastFrameLimit, partial->budget, partial->slots));
+        }
+        else
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupPartialDecode(req, nullptr, 0, 0, 0, 0));
+        }
         if (nullptr != blockInfo)
         {
             EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupBlockInfoConstants(req, blockInfo[0], blockInfo[1]));
@@ -678,19 +703,227 @@ public:
     }
 };
 
-// A caller that detaches its resume buffer (zstdgpu_SetupResumeState with NULL) must get
-// library-owned storage on the next request, even when that request reuses the context and its
-// buffers. Writing into the detached buffer would destroy whatever state the caller saved there.
-TEST_F(ZstdDecompressionTests, DetachedResumeStateIsNotWritten)
+// Builds a frame with `Single_Segment_flag` set and a 4-byte content size, made of RAW and RLE blocks of the
+// given sizes (RLE where `rle[i]`), and appends its expected decompressed bytes to `expected`.
+static void AppendRawRleFrame(
+    std::vector<uint8_t>& data,
+    OffsetsAndSizes& offsetsAndSizes,
+    Frames& expected,
+    const std::vector<uint32_t>& blockSizes,
+    const std::vector<bool>& rle,
+    uint8_t seed)
 {
-    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionDetachedResumeStateTest");
+    const uint32_t inputOffset = static_cast<uint32_t>(data.size());
+    uint32_t contentSize = 0;
+    for (uint32_t s : blockSizes)
+        contentSize += s;
 
-    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
-    std::vector<uint8_t> requestMemory(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+    const uint8_t magic[] = {0x28, 0xB5, 0x2F, 0xFD};
+    data.insert(data.end(), std::begin(magic), std::end(magic));
+    data.push_back(static_cast<uint8_t>((2u << 6) | 0x20u)); // 4-byte content size, single segment
+    for (uint32_t i = 0; i < 4u; ++i)
+        data.push_back(static_cast<uint8_t>(contentSize >> (8u * i)));
+
+    std::vector<uint8_t> content;
+    uint32_t state = seed * 2654435761u + 1u;
+    for (size_t b = 0; b < blockSizes.size(); ++b)
+    {
+        const uint32_t isLast = (b + 1 == blockSizes.size()) ? 1u : 0u;
+        const uint32_t type = rle[b] ? 1u : 0u;
+        const uint32_t header = (blockSizes[b] << 3) | (type << 1) | isLast;
+        data.push_back(static_cast<uint8_t>(header));
+        data.push_back(static_cast<uint8_t>(header >> 8));
+        data.push_back(static_cast<uint8_t>(header >> 16));
+        if (rle[b])
+        {
+            const uint8_t value = static_cast<uint8_t>(seed + b);
+            data.push_back(value);
+            content.insert(content.end(), blockSizes[b], value);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < blockSizes[b]; ++i)
+            {
+                state = state * 1664525u + 1013904223u;
+                const uint8_t value = static_cast<uint8_t>(state >> 24);
+                data.push_back(value);
+                content.push_back(value);
+            }
+        }
+    }
+
+    const uint32_t inputSize = static_cast<uint32_t>(data.size()) - inputOffset;
+    data.resize(DWORD_ALIGN(data.size()));
+
+    const uint32_t outputOffset = offsetsAndSizes.UnCompressedFramesMemorySizeInBytes;
+    offsetsAndSizes.InputOffsets.push_back({inputOffset, inputSize});
+    offsetsAndSizes.OutputOffsets.push_back({outputOffset, contentSize});
+    offsetsAndSizes.UnCompressedFramesMemorySizeInBytes = outputOffset + ((contentSize + 255u) & ~255u) + 256u;
+    expected.push_back(content);
+}
+
+class PartialDecodeTest
+{
+public:
+    explicit PartialDecodeTest(const wchar_t* name)
+        : work(FindDefaultAdapter().Device.get(), name)
+    {
+        persistentMemory.resize(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+        requestMemory.resize(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+        record = work.NewBuffer(kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t), L"Resume Record");
+    }
+
+    ~PartialDecodeTest()
+    {
+        void* memory = nullptr;
+        uint32_t memorySize = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+    }
+
+    /*
+     *  Decodes every frame as a series of partial-decode requests of at most `budget` output bytes, planned
+     *  from the frames' sizes alone exactly as a caller would: the first frame of a request resumes the
+     *  previous request's last frame, the frames in between decode whole and the last frame stops at the
+     *  budget. Every request shares one destination. Returns the decoded frames; `outRequests` receives the
+     *  number of requests and `outStatus` every request's frame statuses, in order.
+     */
+    Frames DecodeInRequests(std::vector<uint8_t>& data, const OffsetsAndSizes& all, uint32_t budget,
+                            uint32_t& outRequests, std::vector<uint32_t>& outStatus, uint32_t slotsOverride = 0)
+    {
+        const uint32_t frameCount = static_cast<uint32_t>(all.InputOffsets.size());
+        com_ptr<ID3D12Resource> output = work.NewBuffer(all.UnCompressedFramesMemorySizeInBytes, L"Shared Output");
+
+        uint32_t nextFrame = 0;
+        uint32_t nextOffs = 0;
+        outRequests = 0;
+        outStatus.clear();
+        while (nextFrame < frameCount)
+        {
+            const uint32_t lo = nextFrame;
+            const uint32_t resume = (0 != nextOffs) ? 1u : 0u;
+            uint32_t budgetLeft = budget;
+            uint32_t hi = lo;
+            uint32_t limit = 0;
+            uint32_t newFrame = frameCount;
+            uint32_t newOffs = 0;
+            for (uint32_t j = lo; j < frameCount; ++j)
+            {
+                hi = j;
+                const uint32_t size = all.OutputOffsets[j].size;
+                const uint32_t start = (j == lo) ? nextOffs : 0u;
+                if (size - start > budgetLeft)
+                {
+                    limit = start + budgetLeft;
+                    budgetLeft = 0;
+                    newFrame = j;
+                    newOffs = limit;
+                    break;
+                }
+                budgetLeft -= size - start;
+                limit = size;
+                if (0 == budgetLeft)
+                {
+                    newFrame = j + 1u;
+                    break;
+                }
+            }
+
+            OffsetsAndSizes sub{};
+            sub.InputOffsets.assign(all.InputOffsets.begin() + lo, all.InputOffsets.begin() + hi + 1);
+            sub.OutputOffsets.assign(all.OutputOffsets.begin() + lo, all.OutputOffsets.begin() + hi + 1);
+            sub.UnCompressedFramesMemorySizeInBytes = all.UnCompressedFramesMemorySizeInBytes;
+
+            const uint32_t used = (std::max)(budget - budgetLeft, 1u);
+            const uint32_t requestFrames = hi - lo + 1u;
+            ReusedContextWork::PartialArgs args{record.get(), resume, limit, used,
+                                                0 != slotsOverride ? slotsOverride : zstdgpu_PartialDecodeBlockSlotCount(used, requestFrames)};
+            std::vector<uint32_t> status;
+            work.Decode(req, data, sub, &args, status, nullptr, output.get());
+            outStatus.insert(outStatus.end(), status.begin(), status.end());
+
+            nextFrame = newFrame;
+            nextOffs = newOffs;
+            ++outRequests;
+        }
+
+        const std::vector<uint8_t> decoded = work.Read(output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : all.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+
+    ReusedContextWork work;
+    std::vector<uint8_t> persistentMemory;
+    std::vector<uint8_t> requestMemory;
     zstdgpu_PersistentContext persistent = nullptr;
     zstdgpu_PerRequestContext req = nullptr;
-    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
-    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+    com_ptr<ID3D12Resource> record;
+};
+
+// Several frames of RAW and RLE blocks, decoded in requests of many sizes -- including ones that end mid-block,
+// on a block boundary, on a frame boundary, and one request for everything -- must reproduce every frame.
+TEST_F(ZstdDecompressionTests, PartialDecodeMatchesWholeDecode)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes all{};
+    Frames expected;
+    AppendRawRleFrame(data, all, expected, {1000, 1000, 1000, 1000, 1000}, {false, true, false, true, false}, 0x10);
+    AppendRawRleFrame(data, all, expected, {300}, {false}, 0x20);
+    AppendRawRleFrame(data, all, expected, {700, 700, 700, 700, 700, 700, 700}, {true, false, false, true, false, true, false}, 0x30);
+    AppendRawRleFrame(data, all, expected, {1}, {true}, 0x40);
+    AppendRawRleFrame(data, all, expected, {4000, 17, 2500}, {false, true, false}, 0x50);
+
+    for (uint32_t budget : {600u, 1000u, 1500u, 2500u, 5000u, 5300u, 100000u})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        uint32_t requests = 0;
+        std::vector<uint32_t> status;
+        const Frames frames = test.DecodeInRequests(data, all, budget, requests, status);
+        EXPECT_EQ(status, std::vector<uint32_t>(status.size(), kzstdgpu_FrameStatus_Success));
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+        if (100000u == budget)
+        {
+            EXPECT_EQ(requests, 1u);
+        }
+    }
+}
+
+// A frame with more blocks than the request has slots for stops short of its planned limit; that must be
+// reported rather than leaving the caller to resume from a position it did not plan for.
+TEST_F(ZstdDecompressionTests, PartialDecodeOutOfSlotsReportsBlockCountExceeded)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeSlotsTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes all{};
+    Frames expected;
+    AppendRawRleFrame(data, all, expected, std::vector<uint32_t>(64, 1u), std::vector<bool>(64, true), 0x60);
+
+    uint32_t requests = 0;
+    std::vector<uint32_t> status;
+    test.DecodeInRequests(data, all, 32u, requests, status, /* slots */ 4u);
+    ASSERT_FALSE(status.empty());
+    EXPECT_EQ(status[0], kzstdgpu_FrameStatus_BlockCountExceeded);
+}
+
+// A caller that detaches its resume record (zstdgpu_SetupPartialDecode with NULL) gets a whole decode on the
+// next request, even when that request reuses the context, and the detached record is not written: it may
+// hold another frame's state.
+TEST_F(ZstdDecompressionTests, DetachedResumeRecordIsNotWritten)
+{
+    PartialDecodeTest test(L"ZstdDecompressionDetachedResumeRecordTest");
 
     std::vector<uint8_t> data;
     OffsetsAndSizes offsetsAndSizes{};
@@ -698,30 +931,23 @@ TEST_F(ZstdDecompressionTests, DetachedResumeStateIsNotWritten)
     AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x42);
     const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
 
-    // zstdgpu_SetupResumeState documents the buffer as 4 uint32_t per frame.
-    com_ptr<ID3D12Resource> callerResume = work.NewBuffer(frameCount * 4u * sizeof(uint32_t), L"Caller Resume State");
-
     std::vector<uint32_t> frameStatus;
-    work.Decode(req, data, offsetsAndSizes, callerResume.get(), frameStatus);
+    ReusedContextWork::PartialArgs args{test.record.get(), 0u, 1u, 2u, zstdgpu_PartialDecodeBlockSlotCount(2u, frameCount)};
+    test.work.Decode(test.req, data, offsetsAndSizes, &args, frameStatus);
     EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
 
-    // The caller saves something of its own in the buffer, then detaches it.
+    // The caller saves something of its own in the record, then detaches it.
     const uint8_t kSentinel = 0xA5;
-    work.Fill(callerResume.get(), kSentinel);
+    test.work.Fill(test.record.get(), kSentinel);
 
-    Frames frames = work.Decode(req, data, offsetsAndSizes, nullptr, frameStatus);
+    Frames frames = test.work.Decode(test.req, data, offsetsAndSizes, nullptr, frameStatus);
     EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
     ASSERT_EQ(frames.size(), 2u);
     EXPECT_EQ(frames[0], std::vector<uint8_t>{0x41});
     EXPECT_EQ(frames[1], std::vector<uint8_t>{0x42});
 
-    const std::vector<uint8_t> after = work.Read(callerResume.get());
-    EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume buffer was written";
-
-    void* memory = nullptr;
-    uint32_t memorySize = 0;
-    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
-    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+    const std::vector<uint8_t> after = test.work.Read(test.record.get());
+    EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume record was written";
 }
 
 // Block constants without frame constants: stage 0 needs a readback (block-count maxima are not

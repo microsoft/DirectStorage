@@ -62,9 +62,9 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
     const bool isFirstSequenceStreamInFrame = seqStreamIdxFirstInFrame != ~0u && seqStreamIdxFirstInFrame == i;
     if (isFirstSequenceStreamInFrame)
     {
-        // The frame's starting repeat offsets. For a whole-frame decode these are zstd's defaults;
-        // for a resumed slice they are whatever the previous slice ended with, which is why a
-        // resume record is needed at all -- the chain cannot be restarted mid-frame.
+        // The frame's starting repeat offsets. For a frame decoded from its start these are zstd's
+        // defaults; for a partial decode's resumed frame they come from the resume record, because
+        // the chain cannot be restarted mid-frame.
         uint32_t3 b = uint32_t3(1, 4, 8) + 3;
 
         const uint32_t resume1 = srt.inoutFrameResumeState[zstdgpu_FrameResumeOffset1(frameId)];

@@ -24,9 +24,9 @@ typedef struct zstdgpu_ParseFrames_Consts
     uint32_t    frameCount;
     uint32_t    compressedBufferSizeInBytes;
     uint32_t    countBlocksOnly;
-    uint32_t    blockStartPerFrame;
-    uint32_t    blockLimitPerFrame;
-    uint32_t    hasBlockWindowPerFrame;
+    uint32_t    partialFlags;
+    uint32_t    lastFrameLimit;
+    uint32_t    blockSlotCap;
 } zstdgpu_ParseFrames_Consts;
 
 ConstantBuffer<zstdgpu_ParseFrames_Consts> ZstdConstants_ParseFrames : register(b0);
@@ -40,9 +40,9 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt)
     srt.frameCount                  = ZstdConstants_ParseFrames.frameCount;
     srt.compressedBufferSizeInBytes = ZstdConstants_ParseFrames.compressedBufferSizeInBytes;
     srt.countBlocksOnly             = ZstdConstants_ParseFrames.countBlocksOnly;
-    srt.blockStartPerFrame          = ZstdConstants_ParseFrames.blockStartPerFrame;
-    srt.blockLimitPerFrame          = ZstdConstants_ParseFrames.blockLimitPerFrame;
-    srt.hasBlockWindowPerFrame      = ZstdConstants_ParseFrames.hasBlockWindowPerFrame;
+    srt.partialFlags                = ZstdConstants_ParseFrames.partialFlags;
+    srt.lastFrameLimit              = ZstdConstants_ParseFrames.lastFrameLimit;
+    srt.blockSlotCap                = ZstdConstants_ParseFrames.blockSlotCap;
 }
 
 #else
@@ -51,17 +51,17 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseFrames_SRT &srt, const zstdgpu_Resourc
                              uint32_t     frameCount,
                              uint32_t     compressedBufferSizeInBytes,
                              uint32_t     countBlocksOnly,
-                             uint32_t     blockStartPerFrame,
-                             uint32_t     blockLimitPerFrame,
-                             uint32_t     hasBlockWindowPerFrame)
+                             uint32_t     partialFlags,
+                             uint32_t     lastFrameLimit,
+                             uint32_t     blockSlotCap)
 {
     zstdgpu_Srt_FillBindGroup_ParseFrames(srt, cpuRes);
     srt.frameCount                  = frameCount;
     srt.compressedBufferSizeInBytes = compressedBufferSizeInBytes;
     srt.countBlocksOnly             = countBlocksOnly;
-    srt.blockStartPerFrame          = blockStartPerFrame;
-    srt.blockLimitPerFrame          = blockLimitPerFrame;
-    srt.hasBlockWindowPerFrame      = hasBlockWindowPerFrame;
+    srt.partialFlags                = partialFlags;
+    srt.lastFrameLimit              = lastFrameLimit;
+    srt.blockSlotCap                = blockSlotCap;
 }
 
 #endif

@@ -17,7 +17,7 @@
 
 #ifdef __hlsl_dx_compiler
 
-#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite "DescriptorTable(UAV(u0, space=11, numDescriptors=23))"
+#define ZSTDGPU_SRT_RS_BIND_GROUP_ParseBlocksWrite "DescriptorTable(UAV(u0, space=11, numDescriptors=24))"
 
 ZSTDGPU_RW_BUFFER(zstdgpu_Counters)             ZstdInOutCounters                       : register(u0, space11);
 ZSTDGPU_RW_BUFFER(zstdgpu_FseInfo)              ZstdInOutFseInfos                       : register(u1, space11);
@@ -42,6 +42,7 @@ ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufWIdToHufLitId       
 ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToLitStreamId          : register(u20, space11);
 ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutHufLitIdToHufWId_DBG           : register(u21, space11);
 ZSTDGPU_RW_BUFFER_GLC(uint32_t)                 ZstdInOutHufLitCompactionLookback       : register(u22, space11);
+ZSTDGPU_RW_BUFFER(uint32_t)                     ZstdInOutBlockTableDefs                 : register(u23, space11);
 
 template<typename T>
 static void zstdgpu_Srt_FillBindGroup_ParseBlocksWrite(ZSTDGPU_PARAM_INOUT(T) srt)
@@ -69,6 +70,7 @@ static void zstdgpu_Srt_FillBindGroup_ParseBlocksWrite(ZSTDGPU_PARAM_INOUT(T) sr
     srt.inoutHufLitIdToLitStreamId          = ZstdInOutHufLitIdToLitStreamId;
     srt.inoutHufLitIdToHufWId_DBG           = ZstdInOutHufLitIdToHufWId_DBG;
     srt.inoutHufLitCompactionLookback       = ZstdInOutHufLitCompactionLookback;
+    srt.inoutBlockTableDefs                 = ZstdInOutBlockTableDefs;
 }
 
 #else
@@ -99,6 +101,7 @@ static void zstdgpu_Srt_FillBindGroup_ParseBlocksWrite(T &srt, const zstdgpu_Res
     srt.inoutHufLitIdToLitStreamId          = cpuRes.HufLitIdToLitStreamId;
     srt.inoutHufLitIdToHufWId_DBG           = cpuRes.HufLitIdToHufWId_DBG;
     srt.inoutHufLitCompactionLookback       = cpuRes.HufLitCompactionLookback;
+    srt.inoutBlockTableDefs                 = cpuRes.BlockTableDefs;
 }
 
 #endif /* #ifdef __hlsl_dx_compiler */
