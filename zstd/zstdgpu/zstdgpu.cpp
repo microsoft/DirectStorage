@@ -991,7 +991,25 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePersistentContext(zstdgpu_PersistentContext *
             ZSTDGPU_KERNEL_MAP(DecompressSequencesFseArena, DecompressSequences_MultiStream_4_LdsOutCache_32);
             context->DecompressSequencesFseArena_StreamsPerGroup = kzstdgpu_TgSizeX_DecompressSequences / 4u;
             context->DecompressSequences_FseArenaStreamCapacity = zstdgpu_ComputeFseArenaStreamCapacity(featureOptions1.TotalLaneCount, context->DecompressSequencesFseArena_StreamsPerGroup);
-            ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
+
+            if (featureOptions1.WaveLaneCountMin >= 64)
+            {
+                ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences64);
+            }
+            else
+            {
+                // Avoid a threadgroup of two waves since one wave will return immediately but still retain
+                // its wave slot until the whole threadgroup exits; effectively halving wave occupancy.
+                // Most notable when a batches frame count is high relative to the GPUs compute unit count.
+                //
+                // The driver for RDNA1 and RDNA2 will pick wave32 for ExecuteSequences64.
+                // The current driver for RDNA3 will too due to WaveReadLaneAt with a non-uniform lane index usage.
+                // The current driver for RDNA4 would use wave64.
+                //
+                // Don't try to detect RDNA4 now. When the threadgroup is a single wave,
+                // the choice of size doesn't seem to matter much as literal lengths and match lengths are often small.
+                ZSTDGPU_KERNEL_MAP(ExecuteSequences, ExecuteSequences32);
+            }
         }
         else if (desc.VendorId == 0x10de)
         {
