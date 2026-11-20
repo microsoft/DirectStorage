@@ -247,6 +247,11 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestCon
  *  several requests into one command list is not supported (the library re-places its scratch resources in
  *  the same heaps for every request and records no aliasing barriers between them).
  *
+ *  Limitation: the request-size limit (`kzstdgpu_MaxRequestUncompressedByteSize`, see `zstdgpu_SetupOutputs`)
+ *  counts each accepted frame's full declared size, including the resumed and the last frame. A frame larger
+ *  than that limit therefore reports `kzstdgpu_FrameStatus_RequestTooLarge` in every request and cannot be
+ *  decoded in pieces.
+ *
  *  Pass a NULL `resumeRecord` to return to whole-frame decoding. Call before sizing or submitting.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext inPerRequestContext,
