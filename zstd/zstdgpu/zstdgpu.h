@@ -91,6 +91,12 @@ ZSTDGPU_API void zstdgpu_CollectFrames(zstdgpu_OffsetAndSize *outFrames, zstdgpu
  *
  *  NB2: For RLE block `zstdgpu_OffsetAndSize::offs` stores the actual 8-bit symbol. At the same time `zstdgpu_OffsetAndSize::size`
  *       stores the number of times the symbol has to be repeated in the decompressed stream.
+ *
+ *  NB3: This function is a standalone host-side convenience. The decode pipeline does NOT consume
+ *       its output -- blocks are discovered on the GPU by `ParseFrames`, and block ordinals are
+ *       GPU-derived. Nothing in the library, the demo or the tests calls this to decode; it exists
+ *       for a caller that wants to enumerate blocks itself. Do not read its presence as evidence
+ *       that block collection happens on the host.
  */
 ZSTDGPU_API void zstdgpu_CollectBlocks(zstdgpu_OffsetAndSize *outBlocksRaw, zstdgpu_OffsetAndSize *outBlocksRLE, zstdgpu_OffsetAndSize *outBlocksCmp, const zstdgpu_OffsetAndSize *frames, const zstdgpu_FrameInfo *frameInfos, uint32_t frameIndex, uint32_t frameCount, const void *memoryBlock, uint32_t memoryBlockSizeInBytes, uint32_t contentSizeInBytes);
 
@@ -119,11 +125,13 @@ typedef enum zstdgpu_Status
     kzstdgpu_StatusSuccess                  = 0,
     kzstdgpu_StatusInvalidArgument          = 1,
     kzstdgpu_StatusResourceCreationFailed   = 2, /**< A D3D12 heap, resource or descriptor heap could not be created, or a resource could not be mapped (for example, after device removal). */
+    kzstdgpu_StatusBusy                     = 3, /**< A session already has `maxBatchesInFlight` batches the caller has not retired (`zstdgpu_RetireSessionBatches`). Nothing was recorded. */
     kzstdgpu_StatusForceInt                 = 0x7fffffff
 } zstdgpu_Status;
 
 typedef struct zstdgpu_PersistentContextImpl *zstdgpu_PersistentContext;
 typedef struct zstdgpu_PerRequestContextImpl *zstdgpu_PerRequestContext;
+typedef struct zstdgpu_SessionContextImpl *zstdgpu_SessionContext;
 
 ZSTDGPU_API uint32_t zstdgpu_GetPersistentContextRequiredMemorySizeInBytes(void);
 ZSTDGPU_API uint32_t zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes(void);
@@ -206,13 +214,99 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SetupOutputs(zstdgpu_PerRequestContext inPerR
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllStageSubmission(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
+ *  @brief      Decodes the request's frames up to an output budget, so that a frame larger than the scratch
+ *              memory can afford is decoded over several requests.
+ *
+ *  Scratch is sized from `outputBudgetBytes` (output bytes this request produces) and `blockSlotCount`
+ *  (an over-provisioned allowance of blocks), not from the frames' sizes or block counts, so the caller never
+ *  parses a frame. Within a request:
+ *
+ *      - frame 0 resumes from `resumeRecord` when `resumeFirstFrame` is non-zero;
+ *      - every frame between the first and the last is decoded whole;
+ *      - the last frame is decoded up to `lastFrameOutputLimit` bytes from its start (pass its full size to
+ *        decode it whole); a single-frame request can be both resumed and limited.
+ *
+ *  The caller plans requests from frame sizes alone: `outputBudgetBytes` is the sum, over the request's frames,
+ *  of the bytes the request takes each frame to -- from the previous request's limit for a resumed frame, and
+ *  to `lastFrameOutputLimit` for the last. Decoding stops at a block boundary, so the block that crosses the
+ *  limit is written whole: up to one block (at most 128 KiB) past the limit. The next request resumes after
+ *  that block, but the caller plans it as if the extra bytes had not been written; they were written to their
+ *  final place and are never written again.
+ *
+ *  Requirements:
+ *      - `resumeRecord` is a caller-owned buffer of at least `kzstdgpu_ResumeRecordDwordCount` (`zstdgpu_structs.h`) `uint32_t`s in
+ *        `D3D12_RESOURCE_STATE_UNORDERED_ACCESS`, kept unchanged between the requests of one frame. Its
+ *        contents need no initialisation for a request whose `resumeFirstFrame` is 0.
+ *      - A resumed frame's earlier output must still be in the destination at the same frame-relative
+ *        offsets (matches read it as history), and its compressed bytes must still be in the input.
+ *      - `blockSlotCount` covers every block the request takes: `zstdgpu_PartialDecodeBlockSlotCount` gives an
+ *        allowance that covers real content. A request that needs more fails loudly with
+ *        `kzstdgpu_FrameStatus_BlockCountExceeded`: on every frame, with nothing decoded, when the frames before
+ *        the last one alone exceed it, and otherwise on the last frame alone, whose window ran out of slots
+ *        before reaching its limit.
+ *
+ *  Wait for the GPU to finish a request before recording the next request on the same context or into the same
+ *  memory: the library re-places its scratch resources in the same heaps for every request and records no
+ *  aliasing barriers between them. To record many partial requests into one command list, use a session
+ *  (`zstdgpu_CreateSessionContext`), which plans and records them itself.
+ *
+ *  The request-size limit (`kzstdgpu_MaxRequestUncompressedByteSize`, see `zstdgpu_SetupOutputs`) counts only the
+ *  part of the resumed and the last frame that the request decodes, so a frame larger than the limit can be decoded
+ *  in pieces.
+ *
+ *  Pass a NULL `resumeRecord` to return to whole-frame decoding. Call before sizing or submitting.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupPartialDecode(zstdgpu_PerRequestContext inPerRequestContext,
+                                                      struct ID3D12Resource *resumeRecord,
+                                                      uint32_t resumeFirstFrame,
+                                                      uint32_t lastFrameOutputLimit,
+                                                      uint32_t outputBudgetBytes,
+                                                      uint32_t blockSlotCount);
+
+/**
+ *  @brief      A block-slot allowance for `zstdgpu_SetupPartialDecode` covering real content: one slot per
+ *              frame plus one per 8 KiB of output budget, and a few for the resumed frame's carried tables.
+ */
+ZSTDGPU_API uint32_t zstdgpu_PartialDecodeBlockSlotCount(uint32_t outputBudgetBytes, uint32_t frameCount);
+
+/**
  *  @brief      Specifies the number of blocks of each type from a CPU pre-scan.
  *              When set, `zstdgpu_GetGpuMemoryRequirement` for stage 1 uses these counts instead of
  *              reading from GPU counter readback, enabling stages 0 and 1 to be recorded into
  *              the same command list without a CPU fence.
  *              Can be called before or after `zstdgpu_SetupInputs*` functions.
+ *
+ *  NB: under single submission (`zstdgpu_SetupAllStageSubmission`) this is effectively REQUIRED.
+ *      Block count cannot be bounded by the decompressed size -- a block may regenerate as little
+ *      as zero bytes -- so without these counts the library has only an estimate, and when content
+ *      exceeds it every frame of the batch fails with `kzstdgpu_FrameStatus_BlockCountExceeded`.
+ *      The sizing entry points therefore refuse that combination unless the caller opts in with
+ *      `zstdgpu_SetupAllowEstimatedBlockCounts`.
+ *
+ *      Supplying them is cheap: `zstdgpu_CountFramesAndBlocks` is a block-header hop that does not
+ *      descend into literal or sequence sections.
  */
 ZSTDGPU_API zstdgpu_Status zstdgpu_SetupFrameInfoConstants(zstdgpu_PerRequestContext inPerRequestContext, uint32_t rawBlockCount, uint32_t rleBlockCount, uint32_t cmpBlockCount);
+
+/**
+ *  @brief      Permits single submission to size per-block metadata from an ESTIMATED block count
+ *              when no exact count is available.
+ *
+ *  Only call this if the compressed bytes are unreachable from the CPU -- the
+ *  `zstdgpu_SetupInputsAsFramesInGpuMemory` case, where a host pre-scan is impossible. Any caller
+ *  that can reach the bytes should call `zstdgpu_CountFramesAndBlocks` and
+ *  `zstdgpu_SetupFrameInfoConstants` instead, which is both sound and nearly free.
+ *
+ *  WHAT THIS OPTS INTO: the estimate is `(decompressedBytes + 4095) / 4096`, which is NOT a bound.
+ *  Real content can exceed it by a wide margin. When it is exceeded the stage count checks fire,
+ *  the predicated work is skipped, and every frame of the batch reports
+ *  `kzstdgpu_FrameStatus_BlockCountExceeded` -- nothing in the batch is decoded.
+ *
+ *  Callers must therefore check the frame status buffer and be prepared to retry a failed batch,
+ *  for example with staged submission, which sizes from counts read back from the GPU. Adversarial
+ *  input can force this failure.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SetupAllowEstimatedBlockCounts(zstdgpu_PerRequestContext inPerRequestContext);
 
 /**
  *  @brief      Specifies the total decoded literal byte count and sequence count.
@@ -278,26 +372,153 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
                                                             uint32_t shaderVisibileHeapOffsetInDescriptors);
 
 /**
- *  @brief      Submits all required decompression commands into a command list for all stages (single-submission mode)
- *              with externally supplied memory.
+ *  Sessions: single-submission decompression into caller-owned memory.
  *
- *  @note       It's valid to call this function only when `zstdgpu_IsAnyStageReadbackRequired` returns `0`
+ *  A session binds, for its lifetime, one command list and the memory the library needs: a range of a DEFAULT heap
+ *  (scratch), a range of an UPLOAD heap (constant tables, written once at creation) and a range of a shader-visible
+ *  descriptor heap. All of it is sized up front from the arguments below, never from content, so the caller never
+ *  parses a frame:
  *
- *  @note       The caller must compute required memory via `zstdgpu_GetAllStageGpuMemoryRequirement`
+ *      - `outputBudgetBytes`: the decompressed bytes one dispatch produces. A batch with more output is split into
+ *        several dispatches, all recorded by one `zstdgpu_SubmitAllStagesWithExternalMemory` call; a frame larger
+ *        than the budget is decoded over several of them. Scratch grows with the budget: 8/3 bytes per byte for
+ *        literals and sequences, plus per-block metadata for the block slots.
+ *      - `maxFramesPerBatch`: the most frames one batch may hold (at most 2^20).
+ *      - `blockSlotsPerMiB`: per-block metadata allowance per MiB of budget (0 = default, one slot per 8 KiB of
+ *        output). Content with smaller blocks than that fails loudly with `kzstdgpu_FrameStatus_BlockCountExceeded`.
+ *        The resulting block slots per dispatch (frames + budget-derived slots) are capped at 2^19.
+ *      - `maxBatchesInFlight`: how many batches may be recorded before the caller retires the oldest
+ *        (`zstdgpu_RetireSessionBatches`). Only the descriptor ring grows with it.
  *
- *  @note       Returns `kzstdgpu_StatusResourceCreationFailed` without recording any commands if a resource could not be
- *              created in the supplied heaps or mapped (for example, after device removal).
+ *  One persistent context may serve many sessions (for example one per DirectStorage queue). Sessions never share
+ *  memory or command lists, so batches on different sessions may run concurrently.
  */
-ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext inPerRequestContext,
-                                                                     struct ID3D12GraphicsCommandList *cmdList,
-                                                                     struct ID3D12Heap *defaultHeap,
-                                                                     uint64_t defaultHeapOffsetInBytes,
-                                                                     struct ID3D12Heap *uploadHeap,
-                                                                     uint64_t uploadHeapOffsetInBytes,
-                                                                     struct ID3D12Heap *readbackHeap,
-                                                                     uint64_t readbackHeap_OffsetInBytes,
-                                                                     struct ID3D12DescriptorHeap *shaderVisibleHeap,
-                                                                     uint32_t shaderVisibileHeapOffsetInDescriptors);
+
+/**
+ *  @brief      The memory a session needs for the given footprint.
+ *
+ *  @param[out] outDefaultHeapByteCount         Bytes of the DEFAULT heap range passed to `zstdgpu_CreateSessionContext`.
+ *  @param[out] outUploadHeapByteCount          Bytes of the UPLOAD heap range.
+ *  @param[out] outShaderVisibleDescriptorCount Descriptors of the shader-visible CBV/SRV/UAV heap range.
+ *  @param[out] outSessionMemorySizeInBytes     Bytes of the CPU memory block for the session context (may be NULL).
+ *  @param[in]  outputBudgetBytes               At most `kzstdgpu_MaxRequestUncompressedByteSize`.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_GetSessionRequirement(uint64_t *outDefaultHeapByteCount,
+                                                         uint64_t *outUploadHeapByteCount,
+                                                         uint32_t *outShaderVisibleDescriptorCount,
+                                                         uint32_t *outSessionMemorySizeInBytes,
+                                                         zstdgpu_PersistentContext inPersistentContext,
+                                                         uint32_t outputBudgetBytes,
+                                                         uint32_t maxFramesPerBatch,
+                                                         uint32_t blockSlotsPerMiB,
+                                                         uint32_t maxBatchesInFlight);
+
+/**
+ *  @brief      The inverse of `zstdgpu_GetSessionRequirement`: the largest `outputBudgetBytes` whose DEFAULT heap
+ *              requirement fits in `defaultHeapByteCount`. The other requirements do not depend on the budget.
+ *
+ *  @return     `kzstdgpu_StatusInvalidArgument` if not even a one-byte budget fits.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_GetSessionBudgetForScratch(uint32_t *outOutputBudgetBytes,
+                                                              zstdgpu_PersistentContext inPersistentContext,
+                                                              uint64_t defaultHeapByteCount,
+                                                              uint32_t maxFramesPerBatch,
+                                                              uint32_t blockSlotsPerMiB);
+
+ZSTDGPU_API uint32_t zstdgpu_GetSessionContextRequiredMemorySizeInBytes(void);
+
+/**
+ *  @brief      Creates a session (see above). Its scratch resources are created in the supplied heap ranges here,
+ *              once, and the constant tables are written to the upload range.
+ *
+ *  @param[in]  cmdList                 The command list every batch is recorded into (DIRECT or COMPUTE). It is
+ *                                      AddRef'd; the caller resets and executes it as usual. A different command
+ *                                      list needs a different session.
+ *  @param[in]  defaultHeap, defaultHeapOffsetInBytes  A DEFAULT heap range of `outDefaultHeapByteCount` bytes that
+ *                                      allows buffers; the offset must be 64 KiB aligned. Owned by the session until
+ *                                      it is destroyed.
+ *  @param[in]  uploadHeap, uploadHeapOffsetInBytes    Likewise, an UPLOAD heap range of `outUploadHeapByteCount` bytes.
+ *  @param[in]  shaderVisibleHeap, shaderVisibleHeapOffsetInDescriptors  A shader-visible CBV/SRV/UAV descriptor
+ *                                      range of `outShaderVisibleDescriptorCount` descriptors.
+ *  @param[in]  memoryBlock             CPU memory of `zstdgpu_GetSessionContextRequiredMemorySizeInBytes` bytes, returned
+ *                                      by `zstdgpu_DestroySessionContext`.
+ *
+ *  @return     `kzstdgpu_StatusResourceCreationFailed` if a resource could not be created in the supplied heaps.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_CreateSessionContext(zstdgpu_SessionContext *outSession,
+                                                        zstdgpu_PersistentContext inPersistentContext,
+                                                        struct ID3D12GraphicsCommandList *cmdList,
+                                                        struct ID3D12Heap *defaultHeap,
+                                                        uint64_t defaultHeapOffsetInBytes,
+                                                        struct ID3D12Heap *uploadHeap,
+                                                        uint64_t uploadHeapOffsetInBytes,
+                                                        struct ID3D12DescriptorHeap *shaderVisibleHeap,
+                                                        uint32_t shaderVisibleHeapOffsetInDescriptors,
+                                                        uint32_t outputBudgetBytes,
+                                                        uint32_t maxFramesPerBatch,
+                                                        uint32_t blockSlotsPerMiB,
+                                                        uint32_t maxBatchesInFlight,
+                                                        void *memoryBlock,
+                                                        uint32_t memoryBlockSizeInBytes);
+
+/**
+ *  @brief      Destroys a session. The GPU must have finished every batch recorded on it.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_DestroySessionContext(void **outMemoryBlock, uint32_t *outMemoryBlockSizeInBytes, zstdgpu_SessionContext inSession);
+
+/**
+ *  @brief      Tells the session that the GPU has finished every batch up to and including `completedBatchId` (as
+ *              returned by `zstdgpu_SubmitAllStagesWithExternalMemory`), so their descriptor ring slots can be reused.
+ *              Typically called with the batch id the caller associated with its last completed fence value.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_RetireSessionBatches(zstdgpu_SessionContext inSession, uint64_t completedBatchId);
+
+/**
+ *  @brief      Records the decompression of one batch of frames into the session's command list.
+ *
+ *  The batch is split into dispatches of at most the session's `outputBudgetBytes` of output, planned from
+ *  `outFramesCpu` alone: whole frames while they fit, then part of the next frame, which the next dispatch resumes.
+ *  All dispatches are recorded by this call, separated by UAV barriers, so the GPU never waits on the CPU. A dispatch
+ *  stops at a block boundary, so it may write up to one block (128 KiB) past its planned end; that output is final
+ *  and the next dispatch continues after it.
+ *
+ *  @param[out] outBatchId              The batch's id, increasing by one per batch, for `zstdgpu_RetireSessionBatches`.
+ *  @param[in]  inFramesMemory          Compressed frames, GPU-resident (DEFAULT or GPU_UPLOAD heap).
+ *  @param[in]  inFramesMemorySizeInBytes
+ *  @param[in]  inFrames                `frameCount` `zstdgpu_OffsetAndSize` records into `inFramesMemory`.
+ *  @param[in]  frameCount              At most the session's `maxFramesPerBatch`.
+ *  @param[in]  outFramesMemory         Destination; holds the batch's entire decompressed output.
+ *  @param[in]  outFramesMemorySizeInBytes
+ *  @param[in]  outFrames               `frameCount` `zstdgpu_OffsetAndSize` records into `outFramesMemory`; the size is the
+ *                                      frame's decompressed size.
+ *  @param[in]  outFramesCpu            A CPU copy of the same records. Read only during this call.
+ *  @param[in]  frameStatus             `frameCount` status codes (see zstdgpu_shared_structs.h), written by the GPU.
+ *
+ *  Resource states. On entry (the caller guarantees) and on exit (the library guarantees):
+ *      - `inFramesMemory`, `inFrames`, `outFrames`: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+ *      - `outFramesMemory`, `frameStatus`: D3D12_RESOURCE_STATE_UNORDERED_ACCESS.
+ *  On exit, every write to `outFramesMemory` and `frameStatus` is complete (a global UAV barrier is recorded last),
+ *  predication is off, the session's descriptor heap is bound, and the root signature and pipeline state are undefined.
+ *  The session's own scratch is ordered by a UAV barrier at the start of every dispatch, so consecutive batches need no
+ *  CPU synchronisation.
+ *
+ *  Every resource passed here must stay valid and unchanged until the GPU has finished the batch.
+ *
+ *  @return     `kzstdgpu_StatusBusy` when `maxBatchesInFlight` batches are not yet retired (nothing is recorded);
+ *              `kzstdgpu_StatusInvalidArgument` for invalid arguments. Decode failures are reported per frame in
+ *              `frameStatus`, never silently.
+ */
+ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitAllStagesWithExternalMemory(uint64_t *outBatchId,
+                                                                     zstdgpu_SessionContext inSession,
+                                                                     struct ID3D12Resource *inFramesMemory,
+                                                                     uint32_t inFramesMemorySizeInBytes,
+                                                                     struct ID3D12Resource *inFrames,
+                                                                     uint32_t frameCount,
+                                                                     struct ID3D12Resource *outFramesMemory,
+                                                                     uint32_t outFramesMemorySizeInBytes,
+                                                                     struct ID3D12Resource *outFrames,
+                                                                     const zstdgpu_OffsetAndSize *outFramesCpu,
+                                                                     struct ID3D12Resource *frameStatus);
 
 /**
  *  @brief      Submits all required decompression commands into a command list for a given `stageIndex` with internally

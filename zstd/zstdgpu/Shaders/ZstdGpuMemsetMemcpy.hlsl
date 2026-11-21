@@ -45,7 +45,8 @@ void main(uint2 groupId : SV_GroupId, uint i : SV_GroupThreadId)
 
     const uint32_t dstBlockOffset = ZstdInBlockDestOffs[globalBlockIdx];
 
-    if (byteIdx >= blockRef.size)
+    // `~0` marks a block past a partial decode's limit (see ZstdGpuComputeDestBlockOffsets.hlsl).
+    if (byteIdx >= blockRef.size || ~0u == dstBlockOffset)
     {
         return;
     }

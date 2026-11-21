@@ -233,6 +233,9 @@ static const uint32_t kzstdgpu_MaxCount_BlockSizeBits   = 17u;
 static const uint32_t kzstdgpu_MaxCount_LiteralBytes    = 1u << kzstdgpu_MaxCount_BlockSizeBits;
 
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeights              = 256;
+// Decoded Huffman weights are stored two per byte: a weight never exceeds 12, so it fits in 4 bits. Weight `i`
+// of a table is the low nibble of byte `i / 2` when `i` is even and the high nibble when it is odd.
+static const uint32_t kzstdgpu_HuffmanWeightBytesPerTable           = kzstdgpu_MaxCount_HuffmanWeights / 2;
 #if 1 // ASSUME_11BIT_HUFFMAN_CODES
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightBits           = 11;
 #else
@@ -243,6 +246,14 @@ static const uint32_t kzstdgpu_MaxCount_HuffmanWeightRanks          = kzstdgpu_M
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits  = kzstdgpu_MaxCount_HuffmanWeights / 32;
 static const uint32_t kzstdgpu_MaxCount_HuffmanWeightsAllDigitBits  = kzstdgpu_MaxCount_HuffmanWeightsOneDigitBits * 5;
 
+// The largest FSE-probability count of any table type: the size of the
+// CompactedPositiveFrqPrefixSumAndSymbols LDS region and of the FSE-arena build
+// scratch, and the clamp readers apply to a table's count. The FSE-probability
+// buffer itself is laid out with per-type strides (`zstdgpu_FseProbStride`), each
+// at most this value, and the FSE-header parser stops a table at its type's stride.
+//
+// The largest legal zstd FSE alphabet is ML with maxSymbolValue 52 => 53 entries
+// (LL 36, OF 32, Huffman-weights <=13), so 64 accepts every legal table.
 static const uint32_t kzstdgpu_MaxCount_FseProbs = 64;
 
 static const uint32_t kzstdgpu_MaxCount_FseElems = 512;
@@ -253,7 +264,189 @@ static const uint32_t kzstdgpu_MinCount_Blocks = 1;
 static const uint32_t kzstdgpu_MinCount_UncompressedLitBytes = 16;
 static const uint32_t kzstdgpu_MinCount_UncompressedSeqElems = 4;
 
-static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 7;
+/**
+ *  The zstd minimum match length. Every sequence emits at least this many output bytes, which is
+ *  what makes `sequenceCount <= decompressedBytes / kzstdgpu_MinMatchLength` a provable bound
+ *  rather than an estimate. See `zstdgpu_OutputSizeToSequenceCount`.
+ */
+static const uint32_t kzstdgpu_MinMatchLength = 3;
+
+/**
+ *  Layout of one decoded sequence record inside the merged literal/sequence arena.
+ *
+ *  Sequences are stored as interleaved records (AoS) rather than as three parallel arrays (SoA),
+ *  and they grow *downwards* from the top of the arena while literals grow upwards from its base.
+ *  Both ends are pure functions of indices fixed before either dispatch starts (literal offsets and
+ *  the global sequence index both come from prefix sums), so there is no shared allocation cursor
+ *  and therefore no ordering dependency between the deliberately-overlapping literal and sequence
+ *  dispatches. Safety reduces to the whole-batch bound
+ *
+ *      litBytes + kzstdgpu_ArenaGuardBytes + sequenceCount * 8  <=  arenaBytes
+ *
+ *  Growing sequences downwards (rather than literals downwards) is what keeps this cheap: it needs
+ *  only the arena top, a constant known at sizing time, whereas the mirror image would need the
+ *  total literal size, which is not known when the addresses are computed.
+ *
+ *  A record is two dwords. The three fields fit in exactly 64 bits, with nothing to spare:
+ *
+ *      llen  0..131071      17 bits   RFC 8878 maximum literals length
+ *      mlen  3..131074      17 bits   biased by -3; the minimum match is 3, so 0..131071
+ *      offs  0..0x3fffffff  30 bits   see below -- this is the *encoded* offset, not the resolved one
+ *
+ *  The offset field is 30 bits rather than the 29 a resolved offset needs (`windowSize <= 2^29 - 1`)
+ *  because records first hold the intermediate *encoded* repeat-offset form produced by
+ *  `zstdgpu_EncodeSeqRepeatOffset`: bit 29 marks "encoded", bits [28:27] carry the repeat type, and
+ *  bits [26:0] are deliberately all ones. `[Finalise Sequence Offsets]` later rewrites the field in
+ *  place with the resolved value.
+ *
+ *  `llen` and `mlen` together need 34 bits, so they cannot share one dword; `mlen` is split. `offs`
+ *  is kept wholly within dword 1's low 30 bits so that the in-place offset rewrite stays a
+ *  single-dword masked read-modify-write.
+ *
+ *      dword 0 : [16:0] llen, [31:17] biased mlen bits [14:0]
+ *      dword 1 : [29:0] offs, [31:30] biased mlen bits [16:15]
+ */
+static const uint32_t kzstdgpu_SeqRecordDwordCount = 2;
+static const uint32_t kzstdgpu_SeqRecordDword_0    = 0;
+static const uint32_t kzstdgpu_SeqRecordDword_1    = 1;
+
+/**
+ *  Bias applied to the match length before packing. Every sequence matches at least
+ *  `kzstdgpu_MinMatchLength` bytes, so subtracting it brings the 18-bit raw range 3..131074 into the
+ *  17 bits actually available. Bias on pack and unbias on unpack, never anywhere else -- consumers
+ *  that accumulate match lengths (block-size accounting) must see the true value.
+ */
+#define kzstdgpu_SeqMLenBias kzstdgpu_MinMatchLength
+
+#define kzstdgpu_SeqMaskLLen 0x0001ffffu
+#define kzstdgpu_SeqMaskOffs 0x3fffffffu
+
+/** Pack the two record dwords. `mlen` is the true (unbiased) match length. */
+#define zstdgpu_SeqPackDword0(llen, mlen)                                                    \
+    (((llen) & kzstdgpu_SeqMaskLLen)                                                         \
+     | ((((mlen) - kzstdgpu_SeqMLenBias) & 0x7fffu) << 17u))
+
+#define zstdgpu_SeqPackDword1(mlen, offs)                                                    \
+    (((offs) & kzstdgpu_SeqMaskOffs)                                                         \
+     | (((((mlen) - kzstdgpu_SeqMLenBias) >> 15u) & 0x3u) << 30u))
+
+/** Unpack. `zstdgpu_SeqUnpackMLen` returns the true (unbiased) match length. */
+#define zstdgpu_SeqUnpackLLen(d0)      ((d0) & kzstdgpu_SeqMaskLLen)
+#define zstdgpu_SeqUnpackMLen(d0, d1)  (((((d0) >> 17u) & 0x7fffu) | ((((d1) >> 30u) & 0x3u) << 15u)) + kzstdgpu_SeqMLenBias)
+#define zstdgpu_SeqUnpackOffs(d1)      ((d1) & kzstdgpu_SeqMaskOffs)
+
+/**
+ *  Replace the offset within an already-packed dword 1, preserving the match-length bits that share
+ *  it. `[Finalise Sequence Offsets]` resolves offsets by read-modify-writing this field, and plain
+ *  whole-dword arithmetic there would silently corrupt `mlen`'s high bits.
+ */
+#define zstdgpu_SeqReplaceOffs(d1, offs)                                                     \
+    (((d1) & ~kzstdgpu_SeqMaskOffs) | ((offs) & kzstdgpu_SeqMaskOffs))
+
+/**
+ *  Slack between the top of the literal region and the lowest sequence record.
+ *
+ *  The wide literal store path writes whole dwords and so overshoots the exact literal byte count.
+ *  With separate buffers that overshoot was harmless; in a merged arena it would land on sequence
+ *  records, so the arena must always be sized with this guard band included.
+ */
+static const uint32_t kzstdgpu_ArenaGuardBytes = 64;
+
+/**
+ *  Arena bytes needed to hold `litByteCount` literal bytes and `seqElemCount` sequence records.
+ *
+ *  This is THE definition of arena occupancy. It is used in three places that must agree exactly:
+ *  host-side sizing (`zstdgpu_ResourceInfo_Stage_2_InitSize`), the derived arena top
+ *  (`zstdgpu_ArenaTopDwords`), and the GPU-side overflow check in `ZstdGpuUpdateDispatchArgs.hlsl`.
+ *  Hand-rolling the expression in any one of them is a silent-corruption risk, so all three call
+ *  this instead.
+ *
+ *  The dword alignment of the literal region matters because the same memory is also addressed
+ *  through a dword view.
+ *
+ *  Computed in 64 bits and saturated to UINT32_MAX: exact counts (caller-supplied, or read back
+ *  from the GPU) are not bounded by the decompressed size, and a wrapped value would size the
+ *  arena far too small on the host and hide the overflow from the GPU-side check. A saturated size
+ *  is rejected by the heap ceiling once rounded up to the heap alignment.
+ */
+static inline uint32_t zstdgpu_ArenaBytesForCounts(uint32_t litByteCount, uint32_t seqElemCount)
+{
+    const uint64_t litBytes = ((uint64_t)litByteCount + (uint64_t)(sizeof(uint32_t) - 1u)) & ~(uint64_t)(sizeof(uint32_t) - 1u);
+    const uint64_t seqBytes = (uint64_t)seqElemCount * (uint64_t)kzstdgpu_SeqRecordDwordCount * (uint64_t)sizeof(uint32_t);
+    const uint64_t bytes    = litBytes + (uint64_t)kzstdgpu_ArenaGuardBytes + seqBytes;
+    return (bytes > (uint64_t)0xffffffffu) ? 0xffffffffu : (uint32_t)bytes;
+}
+
+/**
+ *  Dword index of sequence `seqIdx`'s record, measured down from the arena top `arenaTopDwords`.
+ *
+ *  Both the GPU arena and the CPU reference store use this accessor, each passing its own top. A
+ *  run of sequences is therefore still contiguous (record `i` sits directly above record `i + 1`),
+ *  which is what lets the validator compare a whole sequence stream with a single `memcmp`.
+ */
+#define zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) ((arenaTopDwords) - ((seqIdx) + 1u) * kzstdgpu_SeqRecordDwordCount)
+
+#define zstdgpu_SeqRecordDword0(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_0)
+#define zstdgpu_SeqRecordDword1(arenaTopDwords, seqIdx) (zstdgpu_SeqRecordBase(arenaTopDwords, seqIdx) + kzstdgpu_SeqRecordDword_1)
+
+/**
+ *  Ceiling on a single stage's scratch allocation. A request above this is reported as an invalid
+ *  argument at sizing time -- where the cause is still known -- instead of failing later inside
+ *  ID3D12Device::CreateHeap with an uninformative E_INVALIDARG.
+ *
+ *  The comparison against this is INCLUSIVE, deliberately. `zstdgpu_DecompressedSizeToArenaByteCount`
+ *  saturates to 0xffffffff, and a saturated arena rounded up to the 64 KiB heap alignment lands on
+ *  exactly this value -- so an exclusive test would let saturation through on the strength of the
+ *  other stage buffers happening to push the total over, rather than on the check itself. A stage
+ *  genuinely needing the full 4 GiB is already at the documented limit, so rejecting equality costs
+ *  nothing real and makes saturation unconditionally rejectable.
+ */
+static const uint64_t kzstdgpu_MaxScratchHeapByteCount = 4ull * 1024ull * 1024ull * 1024ull;
+
+/**
+ *  Arena bytes that provably suffice for ANY content decompressing to `size` bytes.
+ *
+ *  Per block `litRegen + 3 * nseq <= S`, so over the whole batch `lit + 3 * nseq <= size`. With a
+ *  record of `R` bytes, multiplying by `R/3` gives `(R/3) * lit + R * nseq <= (R/3) * size`, and
+ *  since `lit >= 0` and `R/3 >= 1` that implies
+ *
+ *      lit + R * nseq  <=  (R / 3) * size
+ *
+ *  which is exactly the arena occupancy less the guard band and the literal region's dword
+ *  rounding. Those add at most `kzstdgpu_ArenaGuardBytes + 3`, so one extra dword covers them.
+ *
+ *  This is the whole point of merging literals and sequences into one allocation: sizing the two
+ *  regions separately has to assume `lit = size` AND `nseq = size / 3` simultaneously, which the
+ *  inequality forbids, and costs `1 + R/3` instead of `R/3`.
+ *
+ *  `R` is derived from `kzstdgpu_SeqRecordDwordCount` rather than hard-coded, so narrowing the
+ *  record cannot leave this bound stale. At the current 8-byte record the factor is 8/3 = 2.67x.
+ *
+ *  Computed in 64 bits and saturated: `(R/3) * size` overflows a uint32 well below the 4 GiB
+ *  decompressed limit, and a wrapped value would produce an arena far too small rather than a
+ *  rejected request. The caller's `kzstdgpu_MaxScratchHeapByteCount` check then reports it as an
+ *  unsatisfiable requirement.
+ */
+static uint32_t zstdgpu_DecompressedSizeToArenaByteCount(uint32_t size)
+{
+    const uint64_t recordBytes = (uint64_t)kzstdgpu_SeqRecordDwordCount * (uint64_t)sizeof(uint32_t);
+
+    // Ceiling division: the bound must never round down. The result is then aligned up to a dword
+    // because the arena is also addressed through a dword (structured) view, whose size must be a
+    // whole number of elements.
+    const uint64_t bound = (recordBytes * (uint64_t)size + (uint64_t)(kzstdgpu_MinMatchLength - 1u))
+                             / (uint64_t)kzstdgpu_MinMatchLength;
+
+    const uint64_t bytes = ((bound + (uint64_t)(sizeof(uint32_t) - 1u)) & ~(uint64_t)(sizeof(uint32_t) - 1u))
+                         + (uint64_t)kzstdgpu_ArenaGuardBytes
+                         + (uint64_t)sizeof(uint32_t);
+
+    return (bytes > (uint64_t)0xffffffffu) ? 0xffffffffu : (uint32_t)bytes;
+}
+
+// Maximum FSE accuracy logs, as in the zstd format specification and the reference decoder. The Huffman
+// weight table's is 6 (some early drafts of the specification said 7).
+static const uint32_t kzstdgpu_FseProbMaxAccuracy_HufW = 6;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_LLen = 9;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_Offs = 8;
 static const uint32_t kzstdgpu_FseProbMaxAccuracy_MLen = 9;
@@ -512,8 +705,9 @@ static const uint32_t kzstdgpu_TgSizeX_ComputeDestBlockOffset = 64;
 static const uint32_t kzstdgpu_TgSizeX_ComputeDestBlockOffset = 128;
 #endif
 
-#define ZSTDGPU_TG_COUNT(elemCount, tgSize) (((elemCount) + (tgSize) - 1) / (tgSize))
+static const uint32_t kzstdgpu_TgSizeX_WriteFrameResume = 64;
 
+#define ZSTDGPU_TG_COUNT(elemCount, tgSize) (((elemCount) + (tgSize) - 1) / (tgSize))
 static inline uint32_t zstdgpu_AlignUp(uint32_t offset, uint32_t alignment)
 {
     ZSTDGPU_ASSERT(0 == (alignment & (alignment - 1)));
@@ -817,6 +1011,33 @@ static inline uint32_t zstdgpu_EncodeCmpLitTypeIntoLitSize(uint32_t x)
 {
     ZSTDGPU_ASSERT(x <= ~0xc0000000u);
     return (x & ~0xc0000000u) | 0xc0000000u;
+}
+
+/**
+ *  An "entropy-only" compressed block sits BEFORE the decoded window (`blockOrdinal < blockStart`).
+ *  It is parsed solely so that the entropy tables it defines exist for the in-window blocks that
+ *  reuse them via `Treeless_Literals_Block` or FSE `Repeat_Mode`; it emits no literals, no
+ *  sequences, and no output bytes.
+ *
+ *  The flag rides in the top bit of the block-reference `size` field, which is free because a zstd
+ *  block header carries `Block_Size` in 21 bits and the payload can never exceed
+ *  `kzstdgpu_MaxCount_LiteralBytes` (128 KiB). Same trick, and same justification, as the literal
+ *  type packing above.
+ */
+static inline uint32_t zstdgpu_EncodeEntropyOnlyIntoBlockSize(uint32_t x, uint32_t entropyOnly)
+{
+    ZSTDGPU_ASSERT(x <= ~0x80000000u);
+    return (x & ~0x80000000u) | (0 != entropyOnly ? 0x80000000u : 0u);
+}
+
+static inline uint32_t zstdgpu_DecodeBlockIsEntropyOnly(uint32_t x)
+{
+    return (0 != (x & 0x80000000u)) ? 1u : 0u;
+}
+
+static inline uint32_t zstdgpu_DecodeBlockSize(uint32_t x)
+{
+    return x & ~0x80000000u;
 }
 
 static inline uint32_t zstdgpu_DecodeLitType(uint32_t x)
@@ -1582,6 +1803,55 @@ static uint32_t zstdgpu_ComputeFseIndexMLen(uint32_t indexMLen, uint32_t cmpBloc
     return kzstdgpu_FseRleTableCount + (3 * cmpBlockCount + 2) + indexMLen;
 }
 
+/*
+ *  Per-table strides of the FSE probability buffer. Each is the largest symbol count a table of that type
+ *  can legally carry, rounded up: Huffman weights <= 13, LL 36, OF 32 (offset codes up to 31) and ML 53.
+ *  The header parser stops a table at its stride, so a corrupt one cannot spill into the next table.
+ *  Sizing every table to `kzstdgpu_MaxCount_FseProbs` instead cost 512 bytes per compressed block.
+ */
+static const uint32_t kzstdgpu_FseProbStride_HufW = 16;
+static const uint32_t kzstdgpu_FseProbStride_LLen = 40;
+static const uint32_t kzstdgpu_FseProbStride_Offs = 40;
+static const uint32_t kzstdgpu_FseProbStride_MLen = 56;
+
+// Total probability entries for a batch: one table of each type per compressed block, plus the default LL, OF
+// and ML tables (Huffman weights have no default).
+static uint32_t zstdgpu_FseProbCount(uint32_t cmpBlockCount)
+{
+    return cmpBlockCount * kzstdgpu_FseProbStride_HufW
+         + (cmpBlockCount + 1u) * (kzstdgpu_FseProbStride_LLen + kzstdgpu_FseProbStride_Offs + kzstdgpu_FseProbStride_MLen);
+}
+
+// Offset of a table's probabilities. `fseIndex` is a non-RLE table index from `zstdgpu_ComputeFseIndex*`; the
+// probability tables follow the same type-major order.
+static uint32_t zstdgpu_FseProbOffset(uint32_t fseIndex, uint32_t cmpBlockCount)
+{
+    const uint32_t j = fseIndex - kzstdgpu_FseRleTableCount;
+    if (j < cmpBlockCount)
+        return j * kzstdgpu_FseProbStride_HufW;
+
+    uint32_t base = cmpBlockCount * kzstdgpu_FseProbStride_HufW;
+    if (j < 2u * cmpBlockCount + 1u)
+        return base + (j - cmpBlockCount) * kzstdgpu_FseProbStride_LLen;
+
+    base += (cmpBlockCount + 1u) * kzstdgpu_FseProbStride_LLen;
+    if (j < 3u * cmpBlockCount + 2u)
+        return base + (j - (2u * cmpBlockCount + 1u)) * kzstdgpu_FseProbStride_Offs;
+
+    base += (cmpBlockCount + 1u) * kzstdgpu_FseProbStride_Offs;
+    return base + (j - (3u * cmpBlockCount + 2u)) * kzstdgpu_FseProbStride_MLen;
+}
+
+// The symbol capacity of a table's probabilities, i.e. its stride.
+static uint32_t zstdgpu_FseProbStride(uint32_t fseIndex, uint32_t cmpBlockCount)
+{
+    const uint32_t j = fseIndex - kzstdgpu_FseRleTableCount;
+    return j < cmpBlockCount               ? kzstdgpu_FseProbStride_HufW
+         : j < 2u * cmpBlockCount + 1u     ? kzstdgpu_FseProbStride_LLen
+         : j < 3u * cmpBlockCount + 2u     ? kzstdgpu_FseProbStride_Offs
+                                           : kzstdgpu_FseProbStride_MLen;
+}
+
 static uint32_t zstdgpu_ComputeFseDataStartHufW(uint32_t indexHufW, uint32_t /* cmpBlockCount */)
 {
     return kzstdgpu_FseRleTableCount + indexHufW * kzstdgpu_FseElemMaxCount_HufW;
@@ -1637,6 +1907,93 @@ static inline void zstdgpu_Init_CompressedBlockData(ZSTDGPU_PARAM_INOUT(zstdgpu_
     outBlockData.litStreamIndex = ~0u;
     outBlockData.seqStreamIndex = ~0u;
 }
+
+/**
+ *  Per-frame decode start state: four consecutive dwords per frame in a plain `uint32_t` buffer, zeroed by the
+ *  memset pass at the start of stage 2. A partial decode's resumed frame (frame 0) is then seeded from the
+ *  resume record (`kzstdgpu_ResumeRecord_Offset1..Cursor`, in the same order).
+ *
+ *  All-zero means "the frame starts at its beginning", which is unambiguous because a valid `offset1` is at
+ *  least `1 + 3` in the biased encoding and therefore never zero.
+ *
+ *  `offset1/2/3` are stored in the same biased-by-3 encoding that `PerSeqStreamFinalOffset*` uses,
+ *  so they move between the two without conversion.
+ */
+#define kzstdgpu_FrameResumeDwordCount      4u
+
+#define zstdgpu_FrameResumeOffset1(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 0u)
+#define zstdgpu_FrameResumeOffset2(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 1u)
+#define zstdgpu_FrameResumeOffset3(frameIdx)        ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 2u)
+#define zstdgpu_FrameResumeOutputCursor(frameIdx)   ((frameIdx) * kzstdgpu_FrameResumeDwordCount + 3u)
+
+/**
+ *  `kzstdgpu_BlockWindowSkipFrame` as a frame's first block ordinal means "decode nothing from this frame" -- a
+ *  partial decode's resumed frame that the previous request already finished. It is NOT the same as a start past
+ *  the last block, which would still re-parse table-defining blocks.
+ */
+#define kzstdgpu_BlockWindowSkipFrame       0xffffffffu
+
+/**
+ *  Whether `blockOrdinal` lies in the window `[blockStart, blockStart + blockLimit)`, with a
+ *  `blockLimit` of 0 meaning "to the end of the frame". The end is never formed as
+ *  `blockStart + blockLimit`, which wraps in 32 bits for a large limit and would make the window
+ *  empty. The skip sentinel is handled by the caller.
+ */
+static inline uint32_t zstdgpu_BlockWindowContains(uint32_t blockOrdinal, uint32_t blockStart, uint32_t blockLimit)
+{
+    return (blockOrdinal >= blockStart && (0u == blockLimit || blockOrdinal - blockStart < blockLimit)) ? 1u : 0u;
+}
+
+/**
+ *  Partial decode: a request may stop part-way through its LAST frame and resume it in its FIRST frame on the
+ *  next request (see `zstdgpu_SetupPartialDecode`). What carries between the two is one resume record, held by
+ *  the caller between requests and laid out as below. Block positions are frame-relative ORDINALS, so the
+ *  record stays valid wherever the frame's bytes sit in the next request's input buffer.
+ *
+ *   - `Valid`: the frame is incomplete and the next request resumes it. Holds the tag the next request expects
+ *     (`resumeTag`), or 0; a record whose tag does not match is treated as invalid.
+ *   - `NextOrdinal`: the first block the next request decodes.
+ *   - `Offset1..3`, `Cursor`: repeat offsets on entry to that block (biased by 3, as `PerSeqStreamFinalOffset*`)
+ *     and its output offset within the frame. They are consecutive and in the order of the per-frame resume
+ *     state (`zstdgpu_FrameResume*`), so a single copy seeds the resumed frame.
+ *   - `Def*`: ordinals of the last blocks before `NextOrdinal` that defined the Huffman table and the LL, OF
+ *     and ML FSE tables (`~0` for none). A resumed block may reuse those tables (`Treeless_Literals_Block`,
+ *     `Repeat_Mode`), so the next request re-parses just these blocks for their tables.
+ */
+#define kzstdgpu_ResumeRecordDwordCount     16u
+#define kzstdgpu_ResumeRecord_Valid         0u
+#define kzstdgpu_ResumeRecord_NextOrdinal   1u
+#define kzstdgpu_ResumeRecord_Offset1       2u
+#define kzstdgpu_ResumeRecord_Offset2       3u
+#define kzstdgpu_ResumeRecord_Offset3       4u
+#define kzstdgpu_ResumeRecord_Cursor        5u
+#define kzstdgpu_ResumeRecord_DefHuf        6u
+#define kzstdgpu_ResumeRecord_DefLLen       7u
+#define kzstdgpu_ResumeRecord_DefOffs       8u
+#define kzstdgpu_ResumeRecord_DefMLen       9u
+
+/**
+ *  The library's internal partial-decode state: a copy of the caller's record (copied in before stage 0 and
+ *  back out after stage 2, so no shader binds caller memory), followed by the last frame's block window as
+ *  chosen in stage 0 and reproduced in stage 1.
+ */
+#define kzstdgpu_PartialDecodeStateDwordCount   32u
+#define kzstdgpu_PartialDecode_WindowStart      16u     // first block ordinal of the last frame's window
+#define kzstdgpu_PartialDecode_WindowCount      17u     // block ordinals in the window (may be 0)
+#define kzstdgpu_PartialDecode_EntropyOnlyCount 18u     // table-defining blocks re-parsed ahead of the window
+#define kzstdgpu_PartialDecode_WindowReachesEnd 19u     // the window took the frame's last block
+
+// `partialFlags` root constant of the frame parser.
+#define kzstdgpu_PartialDecodeFlag_ResumeFirstFrame 1u  // frame 0 resumes from the record
+#define kzstdgpu_PartialDecodeFlag_LastFramePartial 2u  // the last frame stops at `lastFrameLimit`
+#define kzstdgpu_PartialDecodeFlag_PlanLastFrame    4u  // this dispatch chooses the last frame's window
+#define kzstdgpu_PartialDecodeFlag_KeepResumedStatus 8u // frame status spans the batch: a resumed frame keeps an earlier failure
+
+// Which entropy tables a compressed block defines rather than reuses (`BlockTableDefs`).
+#define kzstdgpu_BlockTableDef_Huf  1u
+#define kzstdgpu_BlockTableDef_LLen 2u
+#define kzstdgpu_BlockTableDef_Offs 4u
+#define kzstdgpu_BlockTableDef_MLen 8u
 
 typedef struct zstdgpu_LitStreamInfo
 {

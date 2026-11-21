@@ -44,12 +44,14 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMP         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountAll         )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMinIdx       )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , FrameStatus                   )
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameStatus                   )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , PerFrameSeqStreamMaxIdx       )
 
 #define ZSTDGPU_BUFFERS_LIST_STAGE_0() \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchArgs                  )   \
     ZSTDGPU_BUFFER(uint32_t                                 , DispatchCnts                  )   \
     ZSTDGPU_BUFFER(uint64_t                                 , Predicate                     )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , PartialDecodeState            )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRAWLookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountRLELookback )   \
     ZSTDGPU_BUFFER(uint32_t                                 , PerFrameBlockCountCMPLookback )   \
@@ -58,16 +60,15 @@
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_2() /* empty so far*/
 
 #define ZSTDGPU_BUFFERS_LIST_READBACK_STAGE_2()                                                 \
-    ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          )   \
+    ZSTDGPU_BUFFER(uint8_t                                  , DecompressedLiterals          ) \
     \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceLLen      )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceMLen      )   \
-    ZSTDGPU_BUFFER(uint32_t                                 , DecompressedSequenceOffs      )   \
-    \
-    ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        )   \
+    ZSTDGPU_BUFFER(uint8_t                                  , UnCompressedFramesData        ) \
     ZSTDGPU_BUFFER(zstdgpu_OffsetAndSize                    , UnCompressedFramesRefs        )
 
-#define ZSTDGPU_BUFFERS_LIST_STAGE_2() /* empty so far*/
+// FrameResumeState is library-internal (zeroed, then seeded from a partial decode's resume record) and
+// is not read back.
+#define ZSTDGPU_BUFFERS_LIST_STAGE_2() \
+    ZSTDGPU_BUFFER(uint32_t                                 , FrameResumeState              )
 
 #define ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_1() /* empty so far*/
 
@@ -126,7 +127,8 @@
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset1Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset2Lookback)  \
     ZSTDGPU_BUFFER(uint32_t                                 , PerSeqStreamFinalOffset3Lookback)  \
-    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )
+    ZSTDGPU_BUFFER(uint32_t                                 , FseArena                      )   \
+    ZSTDGPU_BUFFER(uint32_t                                 , BlockTableDefs                )
 
 #define ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()     \
     ZSTDGPU_BUFFERS_LIST_UPLOAD_STAGE_0()      \
@@ -182,6 +184,9 @@ typedef struct zstdgpu_ResourceInfo
 
     // The number of sequence streams the FSE arena holds tables for (0 when the arena is unused).
     uint32_t FseArena_StreamCount;
+
+    // Non-zero when no read-back buffers are allocated at all (a session never reads GPU results back).
+    uint32_t gpu2CpuDisabled;
 
     // declare byte offsets
     #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpuOnlyByteOffset;
@@ -262,6 +267,8 @@ typedef struct zstdgpu_ResourceDataCpu
 
 static void zstdgpu_ResourceInfo_InitZero(zstdgpu_ResourceInfo *outInfo)
 {
+    outInfo->gpu2CpuDisabled = 0;
+
     #define ZSTDGPU_BUFFER(type, name)  \
         outInfo->name##_Count = 0;      \
         outInfo->name##_ByteSize = 0;   \
@@ -299,9 +306,17 @@ static void zstdgpu_ResourceInfo_Stage_0_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t PerFrameBlockCountAllLookback_Count = PerFrameBlockCountRAWLookback_Count;
     const uint32_t PerFrameSeqStreamMinIdx_Count = frameCount;
     const uint32_t FrameStatus_Count = frameCount;
+    const uint32_t PerFrameSeqStreamMaxIdx_Count = frameCount;
     const uint32_t DispatchArgs_Count = kzstdgpu_DispatchSlot_Count * kzstdgpu_DispatchSlot_StrideInUInt32;
     const uint32_t DispatchCnts_Count = kzstdgpu_DispatchSlot_Count;
     const uint32_t Predicate_Count = 2;
+
+    /*
+     *  Fixed size: a copy of the caller's resume record followed by the last frame's planned window
+     *  (see `kzstdgpu_PartialDecodeStateDwordCount`). Allocated even when partial decode is off, because the
+     *  descriptor has to be valid either way.
+     */
+    const uint32_t PartialDecodeState_Count = kzstdgpu_PartialDecodeStateDwordCount;
 
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_0()
 }
@@ -337,7 +352,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t SeqFseElemMaxCount = kzstdgpu_FseElemMaxCount_LLen + kzstdgpu_FseElemMaxCount_Offs + kzstdgpu_FseElemMaxCount_MLen;
     const uint32_t NonRLE_FseTableCount = cmpBlockCount * 4 + 3; // 4 FSE tables per compressed block (Huff, LLen, Offs, MLen) + 3 default tables for (LLen, Offs, MLen);
     const uint32_t FseTable_Count = kzstdgpu_FseRleTableCount + NonRLE_FseTableCount;
-    const uint32_t FseProbs_Count = NonRLE_FseTableCount * kzstdgpu_MaxCount_FseProbs;
+    const uint32_t FseProbs_Count = zstdgpu_FseProbCount(cmpBlockCount);
     // With the FSE arena (non-zero capacity), [Decompress Sequences] builds the sequence tables itself,
     // so only the RLE and Huffman weight tables (which lead the layout) are persisted.
     const bool usesFseArena = 0 != fseArenaStreamCapacity;
@@ -351,7 +366,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t FseArena_Count = zstdgpu_MaxU32(1u, zstdgpu_FseArena_HeaderDwCount(outInfo->FseArena_StreamCount)
                                                      + outInfo->FseArena_StreamCount * kzstdgpu_FseArena_StreamDwCount);
 
-    const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_MaxCount_HuffmanWeights;
+    const uint32_t DecompressedHuffmanWeights_Count = cmpBlockCount * kzstdgpu_HuffmanWeightBytesPerTable;
     const uint32_t DecompressedHuffmanWeightCount_Count = cmpBlockCount;
 
     const uint32_t FseInfos_Count = FseTable_Count;
@@ -371,6 +386,7 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     const uint32_t FseIndexLookbackOffs_Count = FseIndexLookbackLLen_Count;
     const uint32_t FseIndexLookbackMLen_Count = FseIndexLookbackLLen_Count;
     const uint32_t LitGroupEndPerHuffmanTable_Count = cmpBlockCount;
+    const uint32_t BlockTableDefs_Count = cmpBlockCount;
     const uint32_t LitGroupEndPerHuffmanTableLookback_Count = zstdgpu_GetLookbackBlockCount(cmpBlockCount);
     const uint32_t BlockSeqCountPrefixLookback_Count = FseIndexLookbackLLen_Count;
     const uint32_t SeqCountPrefixLookback_Count = FseIndexLookbackLLen_Count;
@@ -380,19 +396,61 @@ static void zstdgpu_ResourceInfo_Stage_1_InitSize(zstdgpu_ResourceInfo *outInfo,
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_1()
 }
 
-static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
+/**
+ *  Byte size of the merged literal/sequence arena that stage 2 allocates for these inputs.
+ *
+ *  `arenaByteCount` of 0 means "size exactly to `literalCount` and `sequencesCount`", which is
+ *  what a caller that has read the real counters back from the GPU wants. A non-zero value is a
+ *  *jointly* sized arena, used when only the decompressed size is known; it is still floored at
+ *  the per-count minimums so the allocation is never empty.
+ *
+ *  This is the single definition used both by stage-2 sizing and by the stage-1 occupancy check,
+ *  which on the per-stage submission path is recorded before stage 2 has been sized.
+ */
+static uint32_t zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount)
 {
-    const uint32_t DecompressedLiterals_Count       = zstdgpu_AlignUp(literalCount, sizeof(uint32_t)); // align to a dword because this buffer is aliased with a view that access dwords
+    return (0 == arenaByteCount)
+         ? zstdgpu_ArenaBytesForCounts(literalCount, sequencesCount)
+         : zstdgpu_MaxU32(arenaByteCount,
+                          zstdgpu_ArenaBytesForCounts(kzstdgpu_MinCount_UncompressedLitBytes,
+                                                      kzstdgpu_MinCount_UncompressedSeqElems));
+}
+
+static void zstdgpu_ResourceInfo_Stage_2_InitSize(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
+{
+    /*
+     *  Literals and sequence records share one allocation: literals occupy the base, sequence
+     *  records are addressed downwards from the top, and `kzstdgpu_ArenaGuardBytes` of slack
+     *  separates them so the wide (whole-dword) literal store path cannot reach the records.
+     *
+     *  A jointly sized arena exploits `litBytes + 3 * seqCount <= decompressedBytes`: literals and
+     *  sequences cannot both be maximal, so the arena needs `R/3` times the decompressed size for
+     *  an R-byte sequence record, where sizing the two maxima independently would need `1 + R/3`.
+     */
+    const uint32_t DecompressedLiterals_Count       = zstdgpu_ResourceInfo_Stage_2_ArenaByteCount(literalCount, sequencesCount, arenaByteCount);
+
+    // Per-frame repeat offsets and output cursor. Library-owned; a partial decode seeds the resumed frame's
+    // entry from the caller's resume record.
+    const uint32_t FrameResumeState_Count           = uncompressedFrameCount * kzstdgpu_FrameResumeDwordCount;
 
     // NOTE(pamartis): we never allocate memory for these because they are always external resources
     const uint32_t UnCompressedFramesData_Count     = uncompressedFramesByteCount;
     const uint32_t UnCompressedFramesRefs_Count     = uncompressedFrameCount;
 
-    const uint32_t DecompressedSequenceLLen_Count   = sequencesCount;
-    const uint32_t DecompressedSequenceMLen_Count   = DecompressedSequenceLLen_Count;
-    const uint32_t DecompressedSequenceOffs_Count   = DecompressedSequenceLLen_Count;
-
     ZSTDGPU_ALL_BUFFERS_LIST_STAGE_2()
+}
+
+/**
+ *  Dword index one past the top of the merged literal/sequence arena.
+ *
+ *  Sequence records are addressed downwards from here, so this must agree exactly with the size
+ *  computed in `zstdgpu_ResourceInfo_Stage_2_InitSize`. Deriving it from the recorded byte size
+ *  keeps the two in step: there is one definition of the arena top rather than a host copy and a
+ *  shader copy that can drift apart.
+ */
+static uint32_t zstdgpu_ArenaTopDwords(const zstdgpu_ResourceInfo *info)
+{
+    return info->DecompressedLiterals_ByteSize / (uint32_t)sizeof(uint32_t);
 }
 
 #undef  ZSTDGPU_BUFFER
@@ -453,11 +511,12 @@ static void zstdgpu_ResourceInfo_Stage_2_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo 
 
 // Byte size of one read-back buffer; zero when it is skipped (only Counters is kept when read-backs are disabled).
 #if ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
-#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name) ((info)->name##_ByteSizeInternal)
+#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name) ((0 != (info)->gpu2CpuDisabled) ? 0u : (info)->name##_ByteSizeInternal)
 #else
 #define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name)                                                            \
-    (offsetof(zstdgpu_ResourceInfo, name##_gpu2CpuByteOffset) ==                                         \
-     offsetof(zstdgpu_ResourceInfo, Counters_gpu2CpuByteOffset) ? (info)->name##_ByteSizeInternal : 0u)
+    ((0 == (info)->gpu2CpuDisabled &&                                                                    \
+      offsetof(zstdgpu_ResourceInfo, name##_gpu2CpuByteOffset) ==                                        \
+      offsetof(zstdgpu_ResourceInfo, Counters_gpu2CpuByteOffset)) ? (info)->name##_ByteSizeInternal : 0u)
 #endif
 
 // A skipped read-back buffer takes no memory.
@@ -498,8 +557,11 @@ static void zstdgpu_ResourceInfo_Stage_0_Init(zstdgpu_ResourceInfo *outInfo, uin
         outInfo->FramesRefs_ByteSizeInternal     = 0;
     }
 
-    // NOTE: FrameStatus is always a caller-supplied (external) resource, so it never
-    // gets internal storage; only its element count / byte size are used for the UAV view.
+    // NOTE: FrameStatus is always a caller-supplied (external) resource -- `zstdgpu_SetupOutputs`
+    // rejects a NULL one -- so it never gets internal storage. It is substituted at stage 0, before
+    // either of its bindings (the ParseFrames bind group and the UpdateDispatchArgs root UAV) is
+    // recorded. Internal storage would also enable its generic readback, which copies the caller's
+    // buffer into a request-sized one and is invalid whenever the two sizes differ.
     outInfo->FrameStatus_ByteSizeInternal = 0;
 
     zstdgpu_ResourceInfo_Stage_0_InitOffsetGpuOnly(outInfo);
@@ -516,9 +578,9 @@ static void zstdgpu_ResourceInfo_Stage_1_Init(zstdgpu_ResourceInfo *outInfo, uin
 }
 
 
-static void zstdgpu_ResourceInfo_Stage_2_Init(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
+static void zstdgpu_ResourceInfo_Stage_2_Init(zstdgpu_ResourceInfo *outInfo, uint32_t literalCount, uint32_t sequencesCount, uint32_t arenaByteCount, uint32_t uncompressedFramesByteCount, uint32_t uncompressedFrameCount)
 {
-    zstdgpu_ResourceInfo_Stage_2_InitSize(outInfo, literalCount, sequencesCount, uncompressedFramesByteCount, uncompressedFrameCount);
+    zstdgpu_ResourceInfo_Stage_2_InitSize(outInfo, literalCount, sequencesCount, arenaByteCount, uncompressedFramesByteCount, uncompressedFrameCount);
     outInfo->UnCompressedFramesData_ByteSizeInternal = 0;
     outInfo->UnCompressedFramesRefs_ByteSizeInternal = 0;
     zstdgpu_ResourceInfo_Stage_2_InitOffsetGpuOnly(outInfo);
@@ -1014,6 +1076,17 @@ static void zstdgpu_ResourceDataCpu_InitFromHeap(zstdgpu_ResourceDataCpu *outRes
     #define ZSTDGPU_BUFFER(type, name) if (outResData->name == NULL && info->name##_ByteSizeInternal != 0) outResData->name = (type *)alloc(info->name##_ByteSizeInternal);
         ZSTDGPU_ALL_BUFFERS_LIST()
     #undef  ZSTDGPU_BUFFER
+
+    /*
+     *  The GPU path zeroes the resume state with a memset dispatch. The CPU simulation runs no such
+     *  pass, and `alloc` is a plain `malloc`, so without this the carried output cursor starts as
+     *  garbage -- and that cursor is added to every block's destination address, so the result is a
+     *  fault rather than merely wrong output.
+     */
+    if (NULL != outResData->FrameResumeState)
+    {
+        memset(outResData->FrameResumeState, 0, info->FrameResumeState_ByteSizeInternal);
+    }
 }
 
 #ifndef ZSTDGPU_DISABLE_RESOURCE_DATA_GPU

@@ -39,4 +39,20 @@ namespace zstdframe
     // Reads the file at `path` and returns its largest single frame's
     // decompressed size. Returns 0 and sets *error (if non-null) on failure.
     uint64_t GetLargestFrameDecompressedSizeFromFile(const std::string& path, std::string* error);
+
+    // Returns the SUM of the decompressed (content) sizes of every zstd frame in
+    // [src, src+srcSize) -- i.e. the total bytes the file decodes to.
+    //
+    // This is the quantity GPU scratch scales with. The largest-frame variants
+    // above answer a different question (per-dispatch output size) and must not
+    // be substituted for this one when budgeting a whole batch.
+    //
+    // Returns 0 and sets *error (if non-null) on malformed/truncated input, or
+    // when any frame omits its content size (in which case the total is
+    // genuinely unknowable rather than zero).
+    uint64_t GetTotalDecompressedSize(const uint8_t* src, size_t srcSize, std::string* error);
+
+    // Reads the file at `path` and returns its total decompressed size.
+    // Returns 0 and sets *error (if non-null) on failure.
+    uint64_t GetTotalDecompressedSizeFromFile(const std::string& path, std::string* error);
 }

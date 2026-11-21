@@ -96,7 +96,7 @@ void zstdgpu_ReferenceStore_AllocateMemory(void)
 {
     zstdgpu_ResourceInfo_Stage_0_Init(&GZstdInfo, GFrameCount, GZstdDataSize, 0);
     zstdgpu_ResourceInfo_Stage_1_Init(&GZstdInfo, GBlockCountRAW, GBlockCountRLE, GBlockCountCMP, /* fseArenaStreamCapacity */ 0);
-    zstdgpu_ResourceInfo_Stage_2_Init(&GZstdInfo, 4 * 1024 * 1024 /*literal count*/, 4 * 1024 * 1024 /*sequence count*/, 0, 0);
+    zstdgpu_ResourceInfo_Stage_2_Init(&GZstdInfo, 4 * 1024 * 1024 /*literal count*/, 4 * 1024 * 1024 /*sequence count*/, 0 /*arena bytes: size exactly to the counts above*/, 0, 0);
 
     zstdgpu_ResourceDataCpu_InitZero(&GZstd);
     zstdgpu_ResourceDataCpu_InitFromHeap(&GZstd, &GZstdInfo);
@@ -346,7 +346,7 @@ void zstdgpu_ReferenceStore_Report_FseTable(const int16_t *probs, uint32_t symCo
         const uint32_t localIdx = GFseProbTableIndex##name++;                                               \
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(localIdx, GBlockCountCMP);                  \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(localIdx, GBlockCountCMP);          \
-        const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
+        const uint32_t fseProbStart = zstdgpu_FseProbOffset(fseIndex, GBlockCountCMP);     \
         GLastTableIndex_Fse##name = storeExpr;                                                              \
         GZstd.FseInfos[fseIndex] = zstdgpu_CreateFseInfo(symCount, accuracyLog2);                           \
         memcpy(&GZstd.FseProbs[fseProbStart], probs, sizeof(probs[0]) * symCount);                          \
@@ -378,7 +378,7 @@ void zstdgpu_ReferenceStore_Report_FseDefaultTable(const int16_t *probs, uint32_
     {                                                                                                       \
         const uint32_t fseIndex = zstdgpu_ComputeFseIndex##name(0, GBlockCountCMP);                         \
         const uint32_t fseElemStart = zstdgpu_ComputeFseDataStart##name(0, GBlockCountCMP);                 \
-        const uint32_t fseProbStart = (fseIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;  \
+        const uint32_t fseProbStart = zstdgpu_FseProbOffset(fseIndex, GBlockCountCMP);     \
         GLastTableIndex_Fse##name = fseIndex;                                                               \
         if (GFseProbDefaultTable##name##Stored == 0)                                                        \
         {                                                                                                   \
@@ -471,11 +471,29 @@ void zstdgpu_ReferenceStore_Report_HuffmanWeightSubBlock(const void *base, uint3
     GZstd.HufLitIdToHufWId_DBG[GHufLitIndex ++] = GLastTableIndex_FseHufW = index;
 }
 
+// Stores weights two per byte, in the layout the GPU uses (see `kzstdgpu_HuffmanWeightBytesPerTable`).
+static void zstdgpu_ReferenceStore_PackHuffmanWeights(uint8_t *dst, const uint8_t *weights, uint32_t weightCount)
+{
+    for (uint32_t i = 0; i < weightCount; i += 2)
+    {
+        const uint32_t hi = (i + 1 < weightCount) ? weights[i + 1] : 0u;
+        dst[i >> 1] = (uint8_t)((weights[i] & 0xfu) | ((hi & 0xfu) << 4));
+    }
+}
+
+// Compares the first `weightCount` packed weights; the unused nibble of an odd count is ignored.
+static int zstdgpu_ReferenceStore_HuffmanWeightsEqual(const uint8_t *a, const uint8_t *b, uint32_t weightCount)
+{
+    if (0 != memcmp(a, b, weightCount >> 1))
+        return 0;
+    return (weightCount & 1) ? ((a[weightCount >> 1] & 0xf) == (b[weightCount >> 1] & 0xf)) : 1;
+}
+
 void zstdgpu_ReferenceStore_Report_DecompressedHuffmanWeights(const uint8_t *weights, uint32_t weightCount)
 {
     uint32_t index = GFseCompressedHuffmanWeightCount - 1;
 
-    memcpy(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_MaxCount_HuffmanWeights], weights, weightCount);
+    zstdgpu_ReferenceStore_PackHuffmanWeights(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_HuffmanWeightBytesPerTable], weights, weightCount);
 
     ZSTDGPU_ASSERT(GZstd.DecompressedHuffmanWeightCount[index] == 0);
     ZSTDGPU_ASSERT(weightCount < kzstdgpu_MaxCount_HuffmanWeights);
@@ -487,7 +505,7 @@ void zstdgpu_ReferenceStore_Report_UncompressedHuffmanWeights(const uint8_t *wei
     uint32_t index = GUnCompressedHuffmanWeightCount - 1;
     index = GBlockCountCMP - 1u - index;
 
-    memcpy(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_MaxCount_HuffmanWeights], weights, weightCount);
+    zstdgpu_ReferenceStore_PackHuffmanWeights(&GZstd.DecompressedHuffmanWeights[index * kzstdgpu_HuffmanWeightBytesPerTable], weights, weightCount);
 
     ZSTDGPU_ASSERT(GZstd.DecompressedHuffmanWeightCount[index] == weightCount);
     ZSTDGPU_ASSERT(weightCount < kzstdgpu_MaxCount_HuffmanWeights);
@@ -518,6 +536,18 @@ static uint32_t GRecentOffset1 = 0u; // initialize to "invalid" offset that can'
 static uint32_t GRecentOffset2 = 0u; // initialize to "invalid" offset that can't happen
 static uint32_t GRecentOffset3 = 0u; // initialize to "invalid" offset that can't happen
 
+/*
+ *  The reference store keeps its own sequence-record array rather than a merged arena.
+ *
+ *  On the GPU side records live at the top of the shared literal/sequence arena; here they are a
+ *  standalone allocation that grows on demand. The two "tops" are therefore unrelated magnitudes -
+ *  one bounds a whole arena, the other just this array. What makes the two sides comparable is only
+ *  that both address record `i` as `top - (i + 1) * kzstdgpu_SeqRecordDwordCount`, so a run of
+ *  sequences is contiguous and identically ordered relative to whichever top it belongs to.
+ */
+static uint32_t *GRefSeqRecords = NULL;
+static uint32_t  GRefSeqRecordsTopDwords = 0;
+
 void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequences, uint32_t sequenceCount)
 {
     const uint32_t i = GSequenceStreamCount - 1u;
@@ -542,28 +572,30 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
     }
 #endif
 
-    if (seqOffs + sequenceCount > GZstdInfo.DecompressedSequenceLLen_Count)
+    if ((seqOffs + sequenceCount) * kzstdgpu_SeqRecordDwordCount > GRefSeqRecordsTopDwords)
     {
-        const uint32_t DecompressedSequence_Count_New = (seqOffs + sequenceCount) << 1u;
-        uint32_t *DecompressedSequenceLLen_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceLLen[0]));
-        uint32_t *DecompressedSequenceOffs_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceOffs[0]));
-        uint32_t *DecompressedSequenceMLen_New = (uint32_t *)alloc(DecompressedSequence_Count_New * sizeof(GZstd.DecompressedSequenceMLen[0]));
+        const uint32_t seqCapacityNew   = (seqOffs + sequenceCount) << 1u;
+        const uint32_t topDwordsNew     = seqCapacityNew * kzstdgpu_SeqRecordDwordCount;
+        uint32_t      *recordsNew       = (uint32_t *)alloc(topDwordsNew * sizeof(GRefSeqRecords[0]));
 
-        memcpy(DecompressedSequenceLLen_New, GZstd.DecompressedSequenceLLen, seqOffs * sizeof(GZstd.DecompressedSequenceLLen[0]));
-        memcpy(DecompressedSequenceOffs_New, GZstd.DecompressedSequenceOffs, seqOffs * sizeof(GZstd.DecompressedSequenceOffs[0]));
-        memcpy(DecompressedSequenceMLen_New, GZstd.DecompressedSequenceMLen, seqOffs * sizeof(GZstd.DecompressedSequenceMLen[0]));
+        /*
+         *  Records are addressed downwards from the top, so growing moves every live record: the
+         *  live span is the *upper* `seqOffs` records, and it has to land against the new top. A
+         *  copy from the base (as a base-relative layout would do) would silently relocate the
+         *  records and corrupt the reference.
+         */
+        const uint32_t liveDwords = seqOffs * kzstdgpu_SeqRecordDwordCount;
+        if (liveDwords != 0)
+        {
+            memcpy(recordsNew + (topDwordsNew - liveDwords),
+                   GRefSeqRecords + (GRefSeqRecordsTopDwords - liveDwords),
+                   liveDwords * sizeof(GRefSeqRecords[0]));
+        }
 
-        dealloc(GZstd.DecompressedSequenceLLen);
-        dealloc(GZstd.DecompressedSequenceOffs);
-        dealloc(GZstd.DecompressedSequenceMLen);
+        dealloc(GRefSeqRecords);
 
-        GZstd.DecompressedSequenceLLen = DecompressedSequenceLLen_New;
-        GZstd.DecompressedSequenceOffs = DecompressedSequenceOffs_New;
-        GZstd.DecompressedSequenceMLen = DecompressedSequenceMLen_New;
-
-        GZstdInfo.DecompressedSequenceLLen_Count = DecompressedSequence_Count_New;
-        GZstdInfo.DecompressedSequenceOffs_Count = DecompressedSequence_Count_New;
-        GZstdInfo.DecompressedSequenceMLen_Count = DecompressedSequence_Count_New;
+        GRefSeqRecords          = recordsNew;
+        GRefSeqRecordsTopDwords = topDwordsNew;
     }
 
     uint32_t mlenSum = 0;
@@ -575,13 +607,13 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 
         mlenSum += mlen;
 
-        GZstd.DecompressedSequenceLLen[seqOffs + seqId] = llen;
-        GZstd.DecompressedSequenceMLen[seqOffs + seqId] = mlen;
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = offs;
-
+        uint32_t offsStored = offs;
 #if ENABLE_OFFSET_PROPAGATION
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
+        offsStored = zstdgpu_UpdatePreviousAndRecomputeIncoming(recent1, recent2, recent3, offs, llen);
 #endif
+
+        GRefSeqRecords[zstdgpu_SeqRecordDword0(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_SeqPackDword0(llen, mlen);
+        GRefSeqRecords[zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + seqId)] = zstdgpu_SeqPackDword1(mlen, offsStored);
     }
     // NOTE(pamartis): accumulated match length are used to update the uncompressed size of compressed block
     zstdgpu_AppendLastBlockSize(mlenSum);
@@ -603,12 +635,16 @@ void zstdgpu_ReferenceStore_Report_DecompressedSequences(const uint32_t *sequenc
 #if ENABLE_OFFSET_PROPAGATION
     for (uint32_t seqId = 0; seqId < sequenceCount; ++seqId)
     {
-        uint32_t offset = GZstd.DecompressedSequenceOffs[seqOffs + seqId];
+        const uint32_t offsDword = zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + seqId);
+        const uint32_t packed = GRefSeqRecords[offsDword];
+        uint32_t offset = zstdgpu_SeqUnpackOffs(packed);
         if (zstdgpu_DecodeSeqRepeatOffsetEncoded(offset))
         {
-            GZstd.DecompressedSequenceOffs[seqOffs + seqId] = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
+            offset = zstdgpu_DecodeSeqRepeatOffsetAndApplyPreviousOffsets(offset, GRecentOffset1, GRecentOffset2, GRecentOffset3);
         }
-        GZstd.DecompressedSequenceOffs[seqOffs + seqId] -= 3u;
+        offset -= 3u;
+        // Masked write-back: this dword also carries the match length's high bits.
+        GRefSeqRecords[offsDword] = zstdgpu_SeqReplaceOffs(packed, offset);
     }
 #endif
     GRecentOffset1 = recent1;
@@ -634,7 +670,7 @@ void zstdgpu_ReferenceStore_Report_ResolvedOffset(size_t offset)
     const uint32_t i = GSequenceStreamCount - 1u;
     const uint32_t seqOffs = GZstd.PerSeqStreamSeqStart[i];
 #if ENABLE_OFFSET_PROPAGATION
-    ZSTDGPU_ASSERT(GZstd.DecompressedSequenceOffs[seqOffs + GResolvedOffsetIndex] == offset);
+    ZSTDGPU_ASSERT(zstdgpu_SeqUnpackOffs(GRefSeqRecords[zstdgpu_SeqRecordDword1(GRefSeqRecordsTopDwords, seqOffs + GResolvedOffsetIndex)]) == offset);
 #else
     (void)offset;
 #endif
@@ -719,12 +755,12 @@ static ZSTDGPU_ENUM(Validate_Result) izstdgpu_ReferenceStore_Validate_FseTable(u
         const uint32_t probCount = refFseInfos[refFseInfoIndex].fseProbCountAndAccuracyLog2 & 0xff;
         const uint32_t symbolCount = 1u << (refFseInfos[refFseInfoIndex].fseProbCountAndAccuracyLog2 >> 8u);
 
-        // FseProbs are indexed at (fseInfoIndex - 256) * MaxCount_FseProbs
+        // FseProbs are indexed by zstdgpu_FseProbOffset
         // For RLE (fseInfoIndex < 256), probCount is 0 so no comparison is needed
         if (probCount > 0)
         {
-            const uint32_t refProbStart = (refFseInfoIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
-            const uint32_t tstProbStart = (tstFseInfoIndex - kzstdgpu_FseRleTableCount) * kzstdgpu_MaxCount_FseProbs;
+            const uint32_t refProbStart = zstdgpu_FseProbOffset(refFseInfoIndex, cmpBlockCount);
+            const uint32_t tstProbStart = zstdgpu_FseProbOffset(tstFseInfoIndex, cmpBlockCount);
 
             if (0 != memcmp(&refFseProbs[refProbStart], &tstFseProbs[tstProbStart], probCount * sizeof(refFseProbs[0])))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -971,8 +1007,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
             uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
             uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
 
-            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-            const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
+            const uint8_t *refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
 
             if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -980,7 +1016,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedHuffma
             if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (0 != memcmp(refStart, tstStart, refCount))
+            if (!zstdgpu_ReferenceStore_HuffmanWeightsEqual(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }
@@ -1015,8 +1051,8 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeig
             uint32_t tstCount = tst->DecompressedHuffmanWeightCount[tstHuffmanWeightStreamIndex];
             uint32_t refCount = ref->DecompressedHuffmanWeightCount[refHuffmanWeightStreamIndex];
 
-            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
-            const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_MaxCount_HuffmanWeights];
+            const uint8_t *tstStart = &tst->DecompressedHuffmanWeights[tstHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
+            const uint8_t* refStart = &ref->DecompressedHuffmanWeights[refHuffmanWeightStreamIndex * kzstdgpu_HuffmanWeightBytesPerTable];
 
             if (refCount != tstCount)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
@@ -1024,7 +1060,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecodedHuffmanWeig
             if (tstCount >= kzstdgpu_MaxCount_HuffmanWeights)
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-            if (0 != memcmp(refStart, tstStart, refCount))
+            if (!zstdgpu_ReferenceStore_HuffmanWeightsEqual(refStart, tstStart, refCount))
                 return ZSTDGPU_ENUM_CONST(Validate_Failed);
         }
     }
@@ -1070,7 +1106,7 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedLitera
     return ZSTDGPU_ENUM_CONST(Validate_Success);
 }
 
-ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequences(const struct zstdgpu_ResourceDataCpu *resourceDataCpu)
+ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequences(const struct zstdgpu_ResourceDataCpu *resourceDataCpu, uint32_t tstArenaTopDwords)
 {
     const zstdgpu_ResourceDataCpu *tstData = resourceDataCpu;
     const zstdgpu_ResourceDataCpu *refData = &GZstd;
@@ -1124,13 +1160,23 @@ ZSTDGPU_ENUM(Validate_Result) zstdgpu_ReferenceStore_Validate_DecompressedSequen
                 if (refSeqCount != tstSeqCount)
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
 
-                if (0 != memcmp(&refData->DecompressedSequenceLLen[refSeqOffs], &tstData->DecompressedSequenceLLen[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceLLen[0])))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
+                /*
+                 *  One contiguous compare covers literal length, match length and offset, since
+                 *  the three fields are interleaved into a single record per sequence.
+                 *
+                 *  Records descend from each side's own top, so the span for a run of sequences
+                 *  starts at the *last* record in the run - the lowest address - and the two tops
+                 *  are different magnitudes (a whole arena on the test side, a sequence-only array
+                 *  on the reference side). Only the shared downward mapping makes this comparable.
+                 */
+                const uint32_t *tstSeqRecords = (const uint32_t *)tstData->DecompressedLiterals;
 
-                if (0 != memcmp(&refData->DecompressedSequenceMLen[refSeqOffs], &tstData->DecompressedSequenceMLen[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceMLen[0])))
-                    return ZSTDGPU_ENUM_CONST(Validate_Failed);
-
-                if (0 != memcmp(&refData->DecompressedSequenceOffs[refSeqOffs], &tstData->DecompressedSequenceOffs[tstSeqOffs], refSeqCount * sizeof(refData->DecompressedSequenceOffs[0])))
+                // A stream with no sequences has no span to compare, and computing the lowest
+                // record address for an empty run would underflow.
+                if (refSeqCount != 0u &&
+                    0 != memcmp(&GRefSeqRecords[zstdgpu_SeqRecordBase(GRefSeqRecordsTopDwords, refSeqOffs + refSeqCount - 1u)],
+                                &tstSeqRecords[zstdgpu_SeqRecordBase(tstArenaTopDwords, tstSeqOffs + tstSeqCount - 1u)],
+                                refSeqCount * kzstdgpu_SeqRecordDwordCount * sizeof(GRefSeqRecords[0])))
                     return ZSTDGPU_ENUM_CONST(Validate_Failed);
             }
 

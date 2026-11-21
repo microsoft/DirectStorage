@@ -9,6 +9,7 @@
 
 #include "adapters.h"
 #include "gpuwork.h"
+#include "zstdgpu_structs.h"
 
 #include <gtest/gtest.h>
 
@@ -590,4 +591,810 @@ TEST_F(ZstdDecompressionTests, RequestTooLargeStatusTest)
             }
         }
     }
+}
+
+// Decodes through the C API on a caller-owned per-request context, so a test can reuse one context
+// across requests -- which ZstdDecompressionWork::Decompress never does. It deliberately never calls
+// zstdgpu_ReadbackTimestamps: a reused context must not depend on it to stay within its query slots.
+class ReusedContextWork : public ZstdDecompressionWork
+{
+public:
+    using ZstdDecompressionWork::ZstdDecompressionWork;
+
+    ID3D12Device* GetDevice() const
+    {
+        return m_device.get();
+    }
+
+    com_ptr<ID3D12Resource> NewBuffer(size_t size, const wchar_t* name)
+    {
+        return CreateBuffer(size, name);
+    }
+
+    void Fill(ID3D12Resource* buffer, uint8_t value)
+    {
+        std::vector<uint8_t> bytes(static_cast<size_t>(buffer->GetDesc().Width), value);
+        CopyToResource(buffer, bytes.data(), bytes.size());
+    }
+
+    std::vector<uint8_t> Read(ID3D12Resource* buffer)
+    {
+        std::vector<uint8_t> bytes;
+        CopyFromResource(bytes, buffer);
+        return bytes;
+    }
+
+    void Upload(ID3D12Resource* buffer, uint8_t* bytes, size_t size)
+    {
+        CopyToResource(buffer, bytes, size);
+    }
+
+    ID3D12GraphicsCommandList* CommandList()
+    {
+        return m_commandList.get();
+    }
+
+    void OpenCommandList()
+    {
+        m_commandList->Reset(m_commandAllocator.get(), nullptr);
+    }
+
+    void ExecuteAndWait()
+    {
+        m_commandList->Close();
+        ExecuteCommandListsSynchronously(m_commandList.get());
+    }
+
+    com_ptr<ID3D12Heap> NewHeap(uint64_t size, D3D12_HEAP_TYPE type)
+    {
+        D3D12_HEAP_DESC desc = {};
+        desc.SizeInBytes = size;
+        desc.Properties.Type = type;
+        desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        com_ptr<ID3D12Heap> heap;
+        check_hresult(m_device->CreateHeap(&desc, IID_PPV_ARGS(heap.put())));
+        return heap;
+    }
+
+    com_ptr<ID3D12DescriptorHeap> NewShaderVisibleHeap(uint32_t count)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        desc.NumDescriptors = count;
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        com_ptr<ID3D12DescriptorHeap> heap;
+        check_hresult(m_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(heap.put())));
+        return heap;
+    }
+
+    // Arguments of zstdgpu_SetupPartialDecode.
+    struct PartialArgs
+    {
+        ID3D12Resource* record;
+        uint32_t resumeFirstFrame;
+        uint32_t lastFrameLimit;
+        uint32_t budget;
+        uint32_t slots;
+    };
+
+    // Decodes one request on `req`, staged and with library-owned memory, as a partial decode when
+    // `partial` is given (and a whole decode, with any previous resume record detached, otherwise).
+    // Returns the per-frame statuses and decoded frames. `blockInfo`, when given, is passed to
+    // zstdgpu_SetupBlockInfoConstants as {literal bytes, sequences}. `sharedOutput`, when given, is
+    // the destination instead of a fresh buffer, so a series of requests can fill it.
+    Frames Decode(
+        zstdgpu_PerRequestContext req,
+        std::vector<uint8_t>& data,
+        OffsetsAndSizes& offsetsAndSizes,
+        const PartialArgs* partial,
+        std::vector<uint32_t>& outFrameStatus,
+        const uint32_t* blockInfo = nullptr,
+        ID3D12Resource* sharedOutput = nullptr)
+    {
+        const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+        const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
+
+        auto input = CreateBuffer(data.size(), L"Input");
+        CopyToResource(input.get(), data.data(), data.size());
+        auto inputRefs = CreateBuffer(refsBytes, L"Input Refs");
+        CopyToResource(inputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.InputOffsets.data()), refsBytes);
+        com_ptr<ID3D12Resource> output;
+        if (nullptr != sharedOutput)
+            output.copy_from(sharedOutput);
+        else
+            output = CreateBuffer(offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, L"Output");
+        auto outputRefs = CreateBuffer(refsBytes, L"Output Refs");
+        CopyToResource(outputRefs.get(), reinterpret_cast<uint8_t*>(offsetsAndSizes.OutputOffsets.data()), refsBytes);
+        auto status = CreateBuffer(frameCount * sizeof(uint32_t), L"Frame Status");
+
+        uint32_t stageCount = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupInputsAsFramesInGpuMemory(&stageCount, req, input.get(), static_cast<uint32_t>(data.size()), inputRefs.get(), frameCount));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupOutputs(req, output.get(), offsetsAndSizes.UnCompressedFramesMemorySizeInBytes, outputRefs.get(), frameCount, status.get()));
+        if (nullptr != partial)
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupPartialDecode(req, partial->record, partial->resumeFirstFrame, partial->lastFrameLimit, partial->budget, partial->slots));
+        }
+        else
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupPartialDecode(req, nullptr, 0, 0, 0, 0));
+        }
+        if (nullptr != blockInfo)
+        {
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupBlockInfoConstants(req, blockInfo[0], blockInfo[1]));
+        }
+
+        for (uint32_t stage = 0; stage < stageCount; ++stage)
+        {
+            m_commandList->Reset(m_commandAllocator.get(), nullptr);
+            EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SubmitWithInternalMemory(req, stage, m_commandList.get()));
+            m_commandList->Close();
+            ExecuteCommandListsSynchronously(m_commandList.get());
+        }
+
+        const std::vector<uint8_t> statusBytes = Read(status.get());
+        outFrameStatus.assign(
+            reinterpret_cast<const uint32_t*>(statusBytes.data()),
+            reinterpret_cast<const uint32_t*>(statusBytes.data()) + frameCount);
+
+        const std::vector<uint8_t> decoded = Read(output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : offsetsAndSizes.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+};
+
+// Builds a frame with `Single_Segment_flag` set and a 4-byte content size, made of RAW and RLE blocks of the
+// given sizes (RLE where `rle[i]`), and appends its expected decompressed bytes to `expected`.
+static void AppendRawRleFrame(
+    std::vector<uint8_t>& data,
+    OffsetsAndSizes& offsetsAndSizes,
+    Frames& expected,
+    const std::vector<uint32_t>& blockSizes,
+    const std::vector<bool>& rle,
+    uint8_t seed)
+{
+    const uint32_t inputOffset = static_cast<uint32_t>(data.size());
+    uint32_t contentSize = 0;
+    for (uint32_t s : blockSizes)
+        contentSize += s;
+
+    const uint8_t magic[] = {0x28, 0xB5, 0x2F, 0xFD};
+    data.insert(data.end(), std::begin(magic), std::end(magic));
+    data.push_back(static_cast<uint8_t>((2u << 6) | 0x20u)); // 4-byte content size, single segment
+    for (uint32_t i = 0; i < 4u; ++i)
+        data.push_back(static_cast<uint8_t>(contentSize >> (8u * i)));
+
+    std::vector<uint8_t> content;
+    uint32_t state = seed * 2654435761u + 1u;
+    for (size_t b = 0; b < blockSizes.size(); ++b)
+    {
+        const uint32_t isLast = (b + 1 == blockSizes.size()) ? 1u : 0u;
+        const uint32_t type = rle[b] ? 1u : 0u;
+        const uint32_t header = (blockSizes[b] << 3) | (type << 1) | isLast;
+        data.push_back(static_cast<uint8_t>(header));
+        data.push_back(static_cast<uint8_t>(header >> 8));
+        data.push_back(static_cast<uint8_t>(header >> 16));
+        if (rle[b])
+        {
+            const uint8_t value = static_cast<uint8_t>(seed + b);
+            data.push_back(value);
+            content.insert(content.end(), blockSizes[b], value);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < blockSizes[b]; ++i)
+            {
+                state = state * 1664525u + 1013904223u;
+                const uint8_t value = static_cast<uint8_t>(state >> 24);
+                data.push_back(value);
+                content.push_back(value);
+            }
+        }
+    }
+
+    const uint32_t inputSize = static_cast<uint32_t>(data.size()) - inputOffset;
+    data.resize(DWORD_ALIGN(data.size()));
+
+    const uint32_t outputOffset = offsetsAndSizes.UnCompressedFramesMemorySizeInBytes;
+    offsetsAndSizes.InputOffsets.push_back({inputOffset, inputSize});
+    offsetsAndSizes.OutputOffsets.push_back({outputOffset, contentSize});
+    offsetsAndSizes.UnCompressedFramesMemorySizeInBytes = outputOffset + ((contentSize + 255u) & ~255u) + 256u;
+    expected.push_back(content);
+}
+
+class PartialDecodeTest
+{
+public:
+    explicit PartialDecodeTest(const wchar_t* name)
+        : work(FindDefaultAdapter().Device.get(), name)
+    {
+        persistentMemory.resize(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+        requestMemory.resize(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+        record = work.NewBuffer(kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t), L"Resume Record");
+    }
+
+    ~PartialDecodeTest()
+    {
+        void* memory = nullptr;
+        uint32_t memorySize = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+    }
+
+    /*
+     *  Decodes every frame as a series of partial-decode requests of at most `budget` output bytes, planned
+     *  from the frames' sizes alone exactly as a caller would: the first frame of a request resumes the
+     *  previous request's last frame, the frames in between decode whole and the last frame stops at the
+     *  budget. Every request shares one destination. Returns the decoded frames; `outRequests` receives the
+     *  number of requests and `outStatus` every request's frame statuses, in order.
+     */
+    Frames DecodeInRequests(std::vector<uint8_t>& data, const OffsetsAndSizes& all, uint32_t budget,
+                            uint32_t& outRequests, std::vector<uint32_t>& outStatus, uint32_t slotsOverride = 0)
+    {
+        const uint32_t frameCount = static_cast<uint32_t>(all.InputOffsets.size());
+        com_ptr<ID3D12Resource> output = work.NewBuffer(all.UnCompressedFramesMemorySizeInBytes, L"Shared Output");
+
+        uint32_t nextFrame = 0;
+        uint32_t nextOffs = 0;
+        outRequests = 0;
+        outStatus.clear();
+        while (nextFrame < frameCount)
+        {
+            const uint32_t lo = nextFrame;
+            const uint32_t resume = (0 != nextOffs) ? 1u : 0u;
+            uint32_t budgetLeft = budget;
+            uint32_t hi = lo;
+            uint32_t limit = 0;
+            uint32_t newFrame = frameCount;
+            uint32_t newOffs = 0;
+            for (uint32_t j = lo; j < frameCount; ++j)
+            {
+                hi = j;
+                const uint32_t size = all.OutputOffsets[j].size;
+                const uint32_t start = (j == lo) ? nextOffs : 0u;
+                if (size - start > budgetLeft)
+                {
+                    limit = start + budgetLeft;
+                    budgetLeft = 0;
+                    newFrame = j;
+                    newOffs = limit;
+                    break;
+                }
+                budgetLeft -= size - start;
+                limit = size;
+                if (0 == budgetLeft)
+                {
+                    newFrame = j + 1u;
+                    break;
+                }
+            }
+
+            OffsetsAndSizes sub{};
+            sub.InputOffsets.assign(all.InputOffsets.begin() + lo, all.InputOffsets.begin() + hi + 1);
+            sub.OutputOffsets.assign(all.OutputOffsets.begin() + lo, all.OutputOffsets.begin() + hi + 1);
+            sub.UnCompressedFramesMemorySizeInBytes = all.UnCompressedFramesMemorySizeInBytes;
+
+            const uint32_t used = (std::max)(budget - budgetLeft, 1u);
+            const uint32_t requestFrames = hi - lo + 1u;
+            ReusedContextWork::PartialArgs args{record.get(), resume, limit, used,
+                                                0 != slotsOverride ? slotsOverride : zstdgpu_PartialDecodeBlockSlotCount(used, requestFrames)};
+            std::vector<uint32_t> status;
+            work.Decode(req, data, sub, &args, status, nullptr, output.get());
+            outStatus.insert(outStatus.end(), status.begin(), status.end());
+
+            nextFrame = newFrame;
+            nextOffs = newOffs;
+            ++outRequests;
+        }
+
+        const std::vector<uint8_t> decoded = work.Read(output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : all.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+
+    ReusedContextWork work;
+    std::vector<uint8_t> persistentMemory;
+    std::vector<uint8_t> requestMemory;
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_PerRequestContext req = nullptr;
+    com_ptr<ID3D12Resource> record;
+};
+
+// Several frames of RAW and RLE blocks, decoded in requests of many sizes -- including ones that end mid-block,
+// on a block boundary, on a frame boundary, and one request for everything -- must reproduce every frame.
+TEST_F(ZstdDecompressionTests, PartialDecodeMatchesWholeDecode)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes all{};
+    Frames expected;
+    AppendRawRleFrame(data, all, expected, {1000, 1000, 1000, 1000, 1000}, {false, true, false, true, false}, 0x10);
+    AppendRawRleFrame(data, all, expected, {300}, {false}, 0x20);
+    AppendRawRleFrame(data, all, expected, {700, 700, 700, 700, 700, 700, 700}, {true, false, false, true, false, true, false}, 0x30);
+    AppendRawRleFrame(data, all, expected, {1}, {true}, 0x40);
+    AppendRawRleFrame(data, all, expected, {4000, 17, 2500}, {false, true, false}, 0x50);
+
+    for (uint32_t budget : {600u, 1000u, 1500u, 2500u, 5000u, 5300u, 100000u})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        uint32_t requests = 0;
+        std::vector<uint32_t> status;
+        const Frames frames = test.DecodeInRequests(data, all, budget, requests, status);
+        EXPECT_EQ(status, std::vector<uint32_t>(status.size(), kzstdgpu_FrameStatus_Success));
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+        if (100000u == budget)
+        {
+            EXPECT_EQ(requests, 1u);
+        }
+    }
+}
+
+// A frame with more blocks than the request has slots for stops short of its planned limit; that must be
+// reported rather than leaving the caller to resume from a position it did not plan for.
+TEST_F(ZstdDecompressionTests, PartialDecodeOutOfSlotsReportsBlockCountExceeded)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeSlotsTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes all{};
+    Frames expected;
+    AppendRawRleFrame(data, all, expected, std::vector<uint32_t>(64, 1u), std::vector<bool>(64, true), 0x60);
+
+    uint32_t requests = 0;
+    std::vector<uint32_t> status;
+    test.DecodeInRequests(data, all, 32u, requests, status, /* slots */ 4u);
+    ASSERT_FALSE(status.empty());
+    EXPECT_EQ(status[0], kzstdgpu_FrameStatus_BlockCountExceeded);
+}
+
+// A partial decode uses its own block limits. Block constants the caller set for whole-frame requests on the
+// same context must still apply once partial decode is detached, not the partial request's (smaller) slot count.
+TEST_F(ZstdDecompressionTests, PartialDecodeKeepsCallerFrameConstants)
+{
+    PartialDecodeTest test(L"ZstdDecompressionPartialDecodeConstantsTest");
+
+    std::vector<uint8_t> oneBlock;
+    OffsetsAndSizes oneBlockRefs{};
+    Frames oneBlockExpected;
+    AppendRawRleFrame(oneBlock, oneBlockRefs, oneBlockExpected, {1u}, {true}, 0x70);
+
+    std::vector<uint8_t> dense;
+    OffsetsAndSizes denseRefs{};
+    Frames denseExpected;
+    AppendRawRleFrame(dense, denseRefs, denseExpected, std::vector<uint32_t>(32, 3u), std::vector<bool>(32, true), 0x71);
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupFrameInfoConstants(test.req, 64u, 64u, 64u));
+
+    std::vector<uint32_t> status;
+    ReusedContextWork::PartialArgs args{test.record.get(), 0u, 1u, 1u, /* slots */ 8u};
+    const Frames partial = test.work.Decode(test.req, oneBlock, oneBlockRefs, &args, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(1, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(partial.size(), 1u);
+    EXPECT_EQ(partial[0], oneBlockExpected[0]);
+
+    const Frames whole = test.work.Decode(test.req, dense, denseRefs, nullptr, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(1, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(whole.size(), 1u);
+    EXPECT_EQ(whole[0], denseExpected[0]);
+}
+
+// A caller that detaches its resume record (zstdgpu_SetupPartialDecode with NULL) gets a whole decode on the
+// next request, even when that request reuses the context, and the detached record is not written: it may
+// hold another frame's state.
+TEST_F(ZstdDecompressionTests, DetachedResumeRecordIsNotWritten)
+{
+    PartialDecodeTest test(L"ZstdDecompressionDetachedResumeRecordTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x41);
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x42);
+    const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+
+    std::vector<uint32_t> frameStatus;
+    ReusedContextWork::PartialArgs args{test.record.get(), 0u, 1u, 2u, zstdgpu_PartialDecodeBlockSlotCount(2u, frameCount)};
+    test.work.Decode(test.req, data, offsetsAndSizes, &args, frameStatus);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+
+    // The caller saves something of its own in the record, then detaches it.
+    const uint8_t kSentinel = 0xA5;
+    test.work.Fill(test.record.get(), kSentinel);
+
+    Frames frames = test.work.Decode(test.req, data, offsetsAndSizes, nullptr, frameStatus);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0], std::vector<uint8_t>{0x41});
+    EXPECT_EQ(frames[1], std::vector<uint8_t>{0x42});
+
+    const std::vector<uint8_t> after = test.work.Read(test.record.get());
+    EXPECT_EQ(after, std::vector<uint8_t>(after.size(), kSentinel)) << "the detached resume record was written";
+}
+
+// A request set up for single submission may still be recorded one stage at a time. Stage 0 then reports block-count
+// overflow before stage 1 has been sized, so it must compare against the limits stage 1 will be sized with rather
+// than against limits that were never set (which reported every frame as BlockCountExceeded).
+TEST_F(ZstdDecompressionTests, SingleSubmissionRecordedPerStageDecodes)
+{
+    PartialDecodeTest test(L"ZstdDecompressionSingleSubmissionPerStageTest");
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    Frames expected;
+    // One block of each type in a few KiB of output stays within the estimate (one block per type per 4 KiB).
+    AppendRawRleFrame(data, offsetsAndSizes, expected, {300u}, {false}, 0x30);
+    AppendRawRleFrame(data, offsetsAndSizes, expected, {40u}, {true}, 0x31);
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupAllStageSubmission(test.req));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_SetupAllowEstimatedBlockCounts(test.req));
+
+    std::vector<uint32_t> status;
+    const Frames frames = test.work.Decode(test.req, data, offsetsAndSizes, nullptr, status);
+    EXPECT_EQ(status, std::vector<uint32_t>(expected.size(), kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), expected.size());
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+    }
+}
+
+// Block constants without frame constants: stage 0 needs a readback (block-count maxima are not
+// known yet), while stage 1 does not, so stage 2 IS predicated. Stage 0's comparison against the
+// unknown (zero) block maxima must not leak into that predicate, or stage 2 -- which copies the
+// raw blocks -- is skipped silently and the request reports success with no output.
+TEST_F(ZstdDecompressionTests, BlockConstantsWithoutFrameConstantsDecode)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionBlockConstantsOnlyTest");
+
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    std::vector<uint8_t> requestMemory(zstdgpu_GetPerRequestContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_PerRequestContext req = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePerRequestContext(&req, persistent, requestMemory.data(), static_cast<uint32_t>(requestMemory.size())));
+
+    std::vector<uint8_t> data;
+    OffsetsAndSizes offsetsAndSizes{};
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x41);
+    AppendSizeDeclaringFrame(data, offsetsAndSizes, 1u, 0x42);
+    const uint32_t frameCount = static_cast<uint32_t>(offsetsAndSizes.InputOffsets.size());
+
+    // RAW blocks only: no literals and no sequences.
+    const uint32_t blockInfo[2] = {0u, 0u};
+
+    std::vector<uint32_t> frameStatus;
+    Frames frames = work.Decode(req, data, offsetsAndSizes, nullptr, frameStatus, blockInfo);
+    EXPECT_EQ(frameStatus, std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0], std::vector<uint8_t>{0x41});
+    EXPECT_EQ(frames[1], std::vector<uint8_t>{0x42});
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}
+
+// A session (zstdgpu_CreateSessionContext) over one command list, with its memory in test-owned heaps.
+class SessionTest
+{
+public:
+    // One batch's caller-owned buffers, uploaded before any command list is opened for the session.
+    struct Batch
+    {
+        com_ptr<ID3D12Resource> input;
+        com_ptr<ID3D12Resource> inputRefs;
+        com_ptr<ID3D12Resource> output;
+        com_ptr<ID3D12Resource> outputRefs;
+        com_ptr<ID3D12Resource> status;
+        std::vector<uint8_t> data;
+        OffsetsAndSizes refs;
+    };
+
+    SessionTest(const wchar_t* name, uint32_t budget, uint32_t maxFrames, uint32_t maxBatchesInFlight, uint32_t slotsPerMiB = 0)
+        : work(FindDefaultAdapter().Device.get(), name)
+    {
+        persistentMemory.resize(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+        uint64_t defaultBytes = 0, uploadBytes = 0;
+        uint32_t descriptors = 0, memoryBytes = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&defaultBytes, &uploadBytes, &descriptors, &memoryBytes, persistent, budget, maxFrames, slotsPerMiB, maxBatchesInFlight));
+        defaultHeap = work.NewHeap(defaultBytes, D3D12_HEAP_TYPE_DEFAULT);
+        uploadHeap = work.NewHeap(uploadBytes, D3D12_HEAP_TYPE_UPLOAD);
+        descriptorHeap = work.NewShaderVisibleHeap(descriptors);
+        sessionMemory.resize(memoryBytes);
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreateSessionContext(&session, persistent, work.CommandList(), defaultHeap.get(), 0, uploadHeap.get(), 0,
+                                                                     descriptorHeap.get(), 0, budget, maxFrames, slotsPerMiB, maxBatchesInFlight,
+                                                                     sessionMemory.data(), static_cast<uint32_t>(sessionMemory.size())));
+    }
+
+    ~SessionTest()
+    {
+        void* memory = nullptr;
+        uint32_t memorySize = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroySessionContext(&memory, &memorySize, session));
+        EXPECT_EQ(memory, static_cast<void*>(sessionMemory.data()));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+    }
+
+    Batch Prepare(const std::vector<uint8_t>& data, const OffsetsAndSizes& refs)
+    {
+        Batch batch;
+        batch.data = data;
+        batch.refs = refs;
+        const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+        const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
+        batch.input = work.NewBuffer(batch.data.size(), L"Session Input");
+        work.Upload(batch.input.get(), batch.data.data(), batch.data.size());
+        batch.inputRefs = work.NewBuffer(refsBytes, L"Session Input Refs");
+        work.Upload(batch.inputRefs.get(), reinterpret_cast<uint8_t*>(batch.refs.InputOffsets.data()), refsBytes);
+        batch.output = work.NewBuffer(refs.UnCompressedFramesMemorySizeInBytes, L"Session Output");
+        batch.outputRefs = work.NewBuffer(refsBytes, L"Session Output Refs");
+        work.Upload(batch.outputRefs.get(), reinterpret_cast<uint8_t*>(batch.refs.OutputOffsets.data()), refsBytes);
+        batch.status = work.NewBuffer(frameCount * sizeof(uint32_t), L"Session Frame Status");
+        return batch;
+    }
+
+    zstdgpu_Status Submit(Batch& batch, uint64_t& outBatchId)
+    {
+        return zstdgpu_SubmitAllStagesWithExternalMemory(&outBatchId, session,
+            batch.input.get(), static_cast<uint32_t>(batch.data.size()), batch.inputRefs.get(), static_cast<uint32_t>(batch.refs.InputOffsets.size()),
+            batch.output.get(), batch.refs.UnCompressedFramesMemorySizeInBytes, batch.outputRefs.get(), batch.refs.OutputOffsets.data(),
+            batch.status.get());
+    }
+
+    Frames ReadFrames(Batch& batch)
+    {
+        const std::vector<uint8_t> decoded = work.Read(batch.output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : batch.refs.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+
+    std::vector<uint32_t> ReadStatus(Batch& batch)
+    {
+        const std::vector<uint8_t> bytes = work.Read(batch.status.get());
+        return std::vector<uint32_t>(reinterpret_cast<const uint32_t*>(bytes.data()),
+                                     reinterpret_cast<const uint32_t*>(bytes.data()) + batch.refs.InputOffsets.size());
+    }
+
+    ReusedContextWork work;
+    std::vector<uint8_t> persistentMemory;
+    std::vector<uint8_t> sessionMemory;
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_SessionContext session = nullptr;
+    com_ptr<ID3D12Heap> defaultHeap;
+    com_ptr<ID3D12Heap> uploadHeap;
+    com_ptr<ID3D12DescriptorHeap> descriptorHeap;
+};
+
+static void BuildMixedFrames(std::vector<uint8_t>& data, OffsetsAndSizes& refs, Frames& expected, uint8_t seed)
+{
+    AppendRawRleFrame(data, refs, expected, {1000, 1000, 1000, 1000, 1000}, {false, true, false, true, false}, seed);
+    AppendRawRleFrame(data, refs, expected, {300}, {false}, static_cast<uint8_t>(seed + 0x10));
+    AppendRawRleFrame(data, refs, expected, {700, 700, 700, 700, 700, 700, 700}, {true, false, false, true, false, true, false}, static_cast<uint8_t>(seed + 0x20));
+    AppendRawRleFrame(data, refs, expected, {1}, {true}, static_cast<uint8_t>(seed + 0x30));
+    AppendRawRleFrame(data, refs, expected, {4000, 17, 2500}, {false, true, false}, static_cast<uint8_t>(seed + 0x40));
+}
+
+// One call decodes a whole batch, split by the library into dispatches of at most the session's output budget --
+// ending mid-block, on block and frame boundaries, and in one dispatch -- and must reproduce every frame.
+TEST_F(ZstdDecompressionTests, SessionDecodeMatchesWholeDecode)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    BuildMixedFrames(data, refs, expected, 0x10);
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    for (uint32_t budget : {600u, 1000u, 1500u, 2500u, 5000u, 5300u, 100000u})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        SessionTest test(L"ZstdDecompressionSessionTest", budget, frameCount, 1);
+        SessionTest::Batch batch = test.Prepare(data, refs);
+
+        test.work.OpenCommandList();
+        uint64_t batchId = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(batch, batchId));
+        EXPECT_EQ(batchId, 1u);
+        test.work.ExecuteAndWait();
+
+        EXPECT_EQ(test.ReadStatus(batch), std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(batch);
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+    }
+}
+
+// Batches recorded back to back into one command list share the session's scratch with no CPU synchronisation, and a
+// later command list continues on the same session.
+TEST_F(ZstdDecompressionTests, SessionRecordsBatchesBackToBack)
+{
+    std::vector<uint8_t> dataA, dataB;
+    OffsetsAndSizes refsA{}, refsB{};
+    Frames expectedA, expectedB;
+    BuildMixedFrames(dataA, refsA, expectedA, 0x10);
+    BuildMixedFrames(dataB, refsB, expectedB, 0x80);
+    AppendRawRleFrame(dataB, refsB, expectedB, {2000, 2000}, {true, false}, 0xC0);
+    const uint32_t maxFrames = static_cast<uint32_t>(refsB.InputOffsets.size());
+
+    SessionTest test(L"ZstdDecompressionSessionBackToBackTest", 1500u, maxFrames, 3);
+    SessionTest::Batch a = test.Prepare(dataA, refsA);
+    SessionTest::Batch b = test.Prepare(dataB, refsB);
+    SessionTest::Batch c = test.Prepare(dataA, refsA);
+
+    test.work.OpenCommandList();
+    uint64_t idA = 0, idB = 0, idC = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(a, idA));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(b, idB));
+    test.work.ExecuteAndWait();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_RetireSessionBatches(test.session, idB));
+
+    test.work.OpenCommandList();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(c, idC));
+    test.work.ExecuteAndWait();
+    EXPECT_EQ(idA, 1u);
+    EXPECT_EQ(idB, 2u);
+    EXPECT_EQ(idC, 3u);
+
+    struct Check { SessionTest::Batch* batch; const Frames* expected; } checks[] = {{&a, &expectedA}, {&b, &expectedB}, {&c, &expectedA}};
+    for (const Check& check : checks)
+    {
+        EXPECT_EQ(test.ReadStatus(*check.batch), std::vector<uint32_t>(check.expected->size(), kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(*check.batch);
+        ASSERT_EQ(frames.size(), check.expected->size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], (*check.expected)[i]) << "frame " << i;
+        }
+    }
+}
+
+// With every descriptor ring slot holding a batch the caller has not retired, a submit records nothing and says so.
+TEST_F(ZstdDecompressionTests, SessionBusyUntilRetired)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    BuildMixedFrames(data, refs, expected, 0x10);
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    SessionTest test(L"ZstdDecompressionSessionBusyTest", 2500u, frameCount, 1);
+    SessionTest::Batch first = test.Prepare(data, refs);
+    SessionTest::Batch second = test.Prepare(data, refs);
+
+    test.work.OpenCommandList();
+    uint64_t id = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(first, id));
+    EXPECT_EQ(kzstdgpu_StatusBusy, test.Submit(second, id));
+    test.work.ExecuteAndWait();
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_RetireSessionBatches(test.session, 1u));
+    test.work.OpenCommandList();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(second, id));
+    EXPECT_EQ(id, 2u);
+    test.work.ExecuteAndWait();
+
+    for (SessionTest::Batch* batch : {&first, &second})
+    {
+        EXPECT_EQ(test.ReadStatus(*batch), std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(*batch);
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+    }
+}
+
+// A dispatch whose frames exceed the block slots is skipped as a whole. A frame it started and a later dispatch resumes
+// must stay reported as failed -- the resuming dispatch has nothing to resume from -- while frames entirely in later
+// dispatches still decode.
+TEST_F(ZstdDecompressionTests, SessionFailedDispatchKeepsResumedFrameFailed)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    AppendRawRleFrame(data, refs, expected, {25, 25, 25, 25}, {false, false, false, false}, 0x10);  // split by dispatches 1 and 2
+    AppendRawRleFrame(data, refs, expected, std::vector<uint32_t>(16, 1u), std::vector<bool>(16, true), 0x20);  // more blocks than slots
+    AppendRawRleFrame(data, refs, expected, {25, 25, 25, 25}, {false, false, false, false}, 0x30);  // starts in failed dispatch 2
+    AppendRawRleFrame(data, refs, expected, {30}, {false}, 0x40);  // entirely in dispatch 4
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    // 64-byte dispatches: [f0 0..64) | f0 64..100, f1, f2 0..12 (f1's 16 blocks exceed the slots) | f2 12..76 | f2 76..100, f3
+    SessionTest test(L"ZstdDecompressionSessionFailedDispatchTest", 64u, frameCount, 1);
+    SessionTest::Batch batch = test.Prepare(data, refs);
+    test.work.OpenCommandList();
+    uint64_t id = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(batch, id));
+    test.work.ExecuteAndWait();
+
+    const std::vector<uint32_t> status = test.ReadStatus(batch);
+    ASSERT_EQ(status.size(), 4u);
+    EXPECT_EQ(status[0], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[1], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[2], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[3], kzstdgpu_FrameStatus_Success);
+    EXPECT_EQ(test.ReadFrames(batch)[3], expected[3]);
+}
+
+// The inverse sizing returns the largest budget whose scratch fits.
+TEST_F(ZstdDecompressionTests, SessionBudgetForScratchInvertsRequirement)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionSessionSizingTest");
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+    for (uint32_t budget : {4096u, 1u << 20, 16u << 20, 256u << 20})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        uint64_t scratch = 0, upload = 0;
+        uint32_t descriptors = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&scratch, &upload, &descriptors, nullptr, persistent, budget, 64u, 0u, 2u));
+
+        uint32_t inverse = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&inverse, persistent, scratch, 64u, 0u));
+        EXPECT_GE(inverse, budget);
+
+        uint64_t inverseScratch = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&inverseScratch, &upload, &descriptors, nullptr, persistent, inverse, 64u, 0u, 2u));
+        EXPECT_LE(inverseScratch, scratch);
+        uint64_t aboveScratch = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&aboveScratch, &upload, &descriptors, nullptr, persistent, inverse + 1u, 64u, 0u, 2u));
+        EXPECT_GT(aboveScratch, scratch);
+    }
+
+    uint32_t none = 0;
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&none, persistent, 1u, 64u, 0u));
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}
+
+// Per-frame and per-block sizes are 32-bit; a frame count or slot allowance large enough to wrap them must be rejected,
+// not sized from wrapped (tiny) buffers.
+TEST_F(ZstdDecompressionTests, SessionSizingRejectsWrappingInputs)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionSessionWrapTest");
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+    const uint64_t plentyOfScratch = 1ull << 40;
+    uint32_t budget = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u << 10, 0u));
+    // 2^30 frames make every 4-byte per-frame buffer wrap to 0 bytes.
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u << 30, 0u));
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, (1u << 20) + 1u, 0u));
+
+    // A huge slot allowance only fits the smallest budgets; every budget it admits keeps the slots within the cap.
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u, 0xffffffffu));
+    EXPECT_LT(budget, 1u << 20);
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
 }

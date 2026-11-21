@@ -21,6 +21,7 @@ ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutBlockDestOffs          : re
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInBlockSizePrefix           : register(t0);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInPerFrameBlockCountAll     : register(t1);
 ZSTDGPU_RO_BUFFER(zstdgpu_OffsetAndSize)    ZstdInUnCompressedFramesRefs    : register(t2);
+ZSTDGPU_RW_BUFFER(uint32_t)                 ZstdInOutFrameResumeState       : register(u1);
 ZSTDGPU_RO_BUFFER(uint32_t)                 ZstdInDispatchArgs              : register(t3);
 
 typedef struct zstdgpu_ComputeDestBlockOffsets_Consts
@@ -28,11 +29,14 @@ typedef struct zstdgpu_ComputeDestBlockOffsets_Consts
     uint32_t    tgOffset;
     uint32_t    workItemCount;
     uint32_t    frameCount;
+    uint32_t    partialFrameIndex;
+    uint32_t    lastFrameLimit;
+    uint32_t    frameBase;
 } zstdgpu_ComputeDestBlockOffsets_Consts;
 
 ConstantBuffer<zstdgpu_ComputeDestBlockOffsets_Consts> ZstdConstants_ComputeDestBlockOffsets : register(b0);
 
-#define ZSTDGPU_SRT_RS_ComputeDestBlockOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_ComputeDestBlockOffsets "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", UAV(u1)" ", SRV(t3)" ", RootConstants(b0, num32BitConstants=6)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputeDestBlockOffsets_SRT) srt)
 {
@@ -40,10 +44,14 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputeDestBlockOffsets
     srt.inBlockSizePrefix           = ZstdInBlockSizePrefix;
     srt.inPerFrameBlockCountAll     = ZstdInPerFrameBlockCountAll;
     srt.inUnCompressedFramesRefs    = ZstdInUnCompressedFramesRefs;
+    srt.inoutFrameResumeState       = ZstdInOutFrameResumeState;
     srt.inDispatchArgs              = ZstdInDispatchArgs;
     srt.tgOffset                    = ZstdConstants_ComputeDestBlockOffsets.tgOffset;
     srt.workItemCount               = ZstdConstants_ComputeDestBlockOffsets.workItemCount;
     srt.frameCount                  = ZstdConstants_ComputeDestBlockOffsets.frameCount;
+    srt.partialFrameIndex           = ZstdConstants_ComputeDestBlockOffsets.partialFrameIndex;
+    srt.lastFrameLimit              = ZstdConstants_ComputeDestBlockOffsets.lastFrameLimit;
+    srt.frameBase                   = ZstdConstants_ComputeDestBlockOffsets.frameBase;
     // fixup code for executeIndirectWorkaround
     ZSTDGPU_BRANCH if (int32_t(srt.workItemCount) < 0)
     {
@@ -58,16 +66,23 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ComputeDestBlockOffsets
 static void zstdgpu_Srt_Fill(zstdgpu_ComputeDestBlockOffsets_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
                              uint32_t     tgOffset,
                              uint32_t     workItemCount,
-                             uint32_t     frameCount)
+                             uint32_t     frameCount,
+                             uint32_t     partialFrameIndex,
+                             uint32_t     lastFrameLimit,
+                             uint32_t     frameBase)
 {
     srt.inoutBlockDestOffs          = cpuRes.BlockDestOffs;
     srt.inBlockSizePrefix           = cpuRes.BlockSizePrefix;
     srt.inPerFrameBlockCountAll     = cpuRes.PerFrameBlockCountAll;
     srt.inUnCompressedFramesRefs    = cpuRes.UnCompressedFramesRefs;
+    srt.inoutFrameResumeState       = cpuRes.FrameResumeState;
     srt.inDispatchArgs              = cpuRes.DispatchArgs;
     srt.tgOffset                    = tgOffset;
     srt.workItemCount               = workItemCount;
     srt.frameCount                  = frameCount;
+    srt.partialFrameIndex           = partialFrameIndex;
+    srt.lastFrameLimit              = lastFrameLimit;
+    srt.frameBase                   = frameBase;
 }
 
 #endif

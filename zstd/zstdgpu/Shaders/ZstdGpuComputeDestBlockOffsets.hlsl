@@ -48,7 +48,18 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
         blockOffset = srt.inBlockSizePrefix[blockIdx - 1];
     }
 
-    srt.inoutBlockDestOffs[blockIdx] = srt.inUnCompressedFramesRefs[frameIdx].offs
-                                     + blockOffset
-                                     - firstFrameBlockOffset;
+    const uint32_t frameRelativeStart = srt.inoutFrameResumeState[zstdgpu_FrameResumeOutputCursor(frameIdx)]
+                                      + blockOffset
+                                      - firstFrameBlockOffset;
+
+    // A partial decode's last frame writes only up to its limit: the block that crosses the limit is written
+    // whole, and the blocks after it -- decoded because the window had to be chosen from lower bounds before
+    // their sizes were known -- are not written at all. `~0` tells the writers to skip a block.
+    if (frameIdx == srt.partialFrameIndex && frameRelativeStart >= srt.lastFrameLimit)
+    {
+        srt.inoutBlockDestOffs[blockIdx] = ~0u;
+        return;
+    }
+
+    srt.inoutBlockDestOffs[blockIdx] = srt.inUnCompressedFramesRefs[srt.frameBase + frameIdx].offs + frameRelativeStart;
 }

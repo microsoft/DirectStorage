@@ -39,6 +39,7 @@ struct TestConfig
     int idxMax = -1;                             // Forwarded to the demo as --idx-max (inclusive last frame index). < 0 = unset (demo runs all frames).
     int correctnessBatchMB = 256;                // Max total on-disk (compressed) size (MB) of clean files grouped into one correctness batch. Bounds each concatenated demo run: batching by file count alone lets large-texture batches reach multi-GB decompressed, overflowing the demo's int32 size fields (>2 GB) and exceeding a GPU buffer limit. <= 0 = no byte cap (count-only).
     int correctnessBatchCount = 64;              // Secondary cap: max number of files per correctness batch, regardless of size. <= 0 = no count cap (size-only).
+    int correctnessBatchDecompressedMB = 512;    // Max total DECOMPRESSED size (MB) of clean files grouped into one correctness batch. This is the cap that actually bounds GPU scratch: the single-submission arena is sized from decompressed bytes, so a compressed-byte cap alone does not bound it (highly compressible content decodes to far more). <= 0 = disabled.
 
     // --- Batched perf knobs ---
     // The perf tests tile a fixed-size frame batch across the perf-manifest's
