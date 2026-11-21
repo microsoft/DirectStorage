@@ -2194,10 +2194,30 @@ static uint32_t zstdgpu_SessionBlockSlotCount(uint32_t outputBudgetBytes, uint32
     return zstdgpu_MaxU32(slots > 0xffffffffull ? 0xffffffffu : (uint32_t)slots, kzstdgpu_MinCount_Blocks);
 }
 
+/*
+ *  Buffer element counts and byte sizes are 32-bit and computed without overflow checks, so the per-frame and
+ *  per-block inputs are capped where no count or byte size can wrap: the largest per-block buffer (a compressed block's
+ *  full FSE tables) stays below 4 GiB at the slot cap. Anything larger is rejected by the scratch ceiling anyway.
+ */
+static const uint32_t kzstdgpu_SessionMaxFramesPerBatch = 1u << 20;
+static const uint32_t kzstdgpu_SessionMaxBlockSlots     = 1u << 19;
+
+// Whether every buffer's byte size equals its element count times its element size, i.e. no size wrapped.
+static uint32_t zstdgpu_ResourceInfo_SizesAreExact(const zstdgpu_ResourceInfo *info)
+{
+    #define ZSTDGPU_BUFFER(type, name) \
+        if ((uint64_t)info->name##_Count * sizeof(type) != (uint64_t)info->name##_ByteSize) return 0;
+        ZSTDGPU_ALL_BUFFERS_LIST()
+    #undef ZSTDGPU_BUFFER
+    return 1;
+}
+
 // Sizes a session. Content-independent: depends only on the arguments and the adapter (FSE arena capacity).
 static uint32_t zstdgpu_SessionComputeSizing(zstdgpu_SessionSizing *out, const zstdgpu_PersistentContextImpl *persistent, uint32_t outputBudgetBytes, uint32_t maxFramesPerBatch, uint32_t blockSlotsPerMiB)
 {
-    if (0 == outputBudgetBytes || outputBudgetBytes > kzstdgpu_MaxRequestUncompressedByteSize || 0 == maxFramesPerBatch)
+    if (0 == outputBudgetBytes || outputBudgetBytes > kzstdgpu_MaxRequestUncompressedByteSize)
+        return 0;
+    if (0 == maxFramesPerBatch || maxFramesPerBatch > kzstdgpu_SessionMaxFramesPerBatch)
         return 0;
 
     zstdgpu_ResourceInfo *info = &out->resInfo;
@@ -2205,6 +2225,8 @@ static uint32_t zstdgpu_SessionComputeSizing(zstdgpu_SessionSizing *out, const z
     info->gpu2CpuDisabled = 1;
 
     out->blockSlots = zstdgpu_SessionBlockSlotCount(outputBudgetBytes, maxFramesPerBatch, blockSlotsPerMiB);
+    if (out->blockSlots > kzstdgpu_SessionMaxBlockSlots)
+        return 0;
 
     uint32_t cntLit, cntSeq, arenaBytes;
     zstdgpu_PartialDecodeLitSeqCountsForBudget(&cntLit, &cntSeq, &arenaBytes, outputBudgetBytes);
@@ -2215,6 +2237,8 @@ static uint32_t zstdgpu_SessionComputeSizing(zstdgpu_SessionSizing *out, const z
                                       zstdgpu_PartialFseArenaStreamCapacity(persistent->DecompressSequences_FseArenaStreamCapacity, out->blockSlots));
     zstdgpu_ResourceInfo_Stage_2_Init(info, cntLit, cntSeq, arenaBytes, 4u, maxFramesPerBatch);
 
+    if (!zstdgpu_ResourceInfo_SizesAreExact(info))
+        return 0;
     for (uint32_t stage = 0; stage < kzstdgpu_ResourceAllocation_StageCount; ++stage)
     {
         if (info->gpuOnly_ByteCount[stage] >= kzstdgpu_MaxScratchHeapByteCount)
@@ -2312,6 +2336,13 @@ static uint64_t zstdgpu_HeapByteCount(ID3D12Heap *heap)
     return heap->GetDesc().SizeInBytes;
 }
 
+// Whether `[offset, offset + size)` lies within `heap`, without forming `offset + size`, which can wrap.
+static uint32_t zstdgpu_HeapRangeFits(ID3D12Heap *heap, uint64_t offset, uint64_t size)
+{
+    const uint64_t heapSize = zstdgpu_HeapByteCount(heap);
+    return (offset <= heapSize && size <= heapSize - offset) ? 1u : 0u;
+}
+
 static uint64_t zstdgpu_BufferByteCount(ID3D12Resource *buffer)
 {
     return buffer->GetDesc().Width;
@@ -2349,8 +2380,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreateSessionContext(zstdgpu_SessionContext *outSes
     zstdgpu_SessionSizing sizing = {};
     proceed = proceed && zstdgpu_SessionComputeSizing(&sizing, inPersistentContext, outputBudgetBytes, maxFramesPerBatch, blockSlotsPerMiB);
     proceed = proceed && (NULL != uploadHeap);
-    proceed = proceed && (defaultHeapOffsetInBytes + sizing.defaultHeapByteCount <= zstdgpu_HeapByteCount(defaultHeap));
-    proceed = proceed && (uploadHeapOffsetInBytes + sizing.uploadHeapByteCount <= zstdgpu_HeapByteCount(uploadHeap));
+    proceed = proceed && zstdgpu_HeapRangeFits(defaultHeap, defaultHeapOffsetInBytes, sizing.defaultHeapByteCount);
+    proceed = proceed && zstdgpu_HeapRangeFits(uploadHeap, uploadHeapOffsetInBytes, sizing.uploadHeapByteCount);
     if (proceed)
     {
         const D3D12_DESCRIPTOR_HEAP_DESC heapDesc = shaderVisibleHeap->GetDesc();

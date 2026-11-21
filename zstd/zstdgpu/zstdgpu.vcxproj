@@ -262,7 +262,7 @@
     <Error Condition="!Exists('..\packages\Microsoft.Direct3D.DXC.1.8.2505.32\build\native\Microsoft.Direct3D.DXC.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Direct3D.DXC.1.8.2505.32\build\native\Microsoft.Direct3D.DXC.targets'))" />
   </Target>
   <!-- The CompileShaders target compiles all the shaders to ShaderDirectory -->
-  <Target Name="CompileShaders" BeforeTargets="PrepareForBuild" DependsOnTargets="CollectShaders;MakeShaderDirectory" Inputs="%(Shader.FullPath)" Outputs="$(ShaderDirectory)%(Shader.Filename).h">
+  <Target Name="CompileShaders" BeforeTargets="PrepareForBuild" DependsOnTargets="CollectShaders;MakeShaderDirectory" Inputs="%(Shader.FullPath);@(ShaderDependency)" Outputs="$(ShaderDirectory)%(Shader.Filename).h">
     <Message Importance="High" Text="Compiling %(Shader.FullPath) to %(Shader.Filename)" />
     <Exec Command="&quot;$(MSBuildBinPath)\Tracker.exe&quot; /d &quot;$(MSBuildBinPath)\FileTracker64.dll&quot; /i $(TLogLocation) /r &quot;%(Shader.FullPath)&quot; /c dxc.exe --version" />
     <Exec Command="&quot;$(MSBuildBinPath)\Tracker.exe&quot; /d &quot;$(MSBuildBinPath)\FileTracker64.dll&quot; /i $(TLogLocation) /r &quot;%(Shader.FullPath)&quot; /c dxc.exe %(Shader.FullPath) $(DxcOpts) /I &quot;srt_headers&quot; /T%(Shader.ShaderModel) %(Shader.Opts) /Emain /Fh$(ShaderDirectory)%(Shader.Filename).h /Fd$(ShaderDirectory)%(Shader.Filename).pdb /Vn g_%(Shader.Filename)" />
@@ -274,6 +274,9 @@
         <Opts>
         </Opts>
       </Shader>
+      <!-- Headers the shaders include: a shader is recompiled when any of them is newer than its output, not only when its own .hlsl changes. -->
+      <ShaderDependency Include="$(MSBuildThisFileDirectory)zstdgpu_shaders.h;$(MSBuildThisFileDirectory)zstdgpu_structs.h;$(MSBuildThisFileDirectory)zstdgpu_shared_structs.h;$(MSBuildThisFileDirectory)zstdgpu_assert.h;$(MSBuildThisFileDirectory)zstdgpu_lds*.h" />
+      <ShaderDependency Include="$(MSBuildThisFileDirectory)srt_headers\*.h;$(MSBuildThisFileDirectory)Shaders\*.hlsli;$(MSBuildThisFileDirectory)Shaders\ZstdGpuPrefixSum.hlsl" />
     </ItemGroup>
     <Message Text="%(Shader.FullPath)" />
   </Target>

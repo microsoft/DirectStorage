@@ -383,9 +383,10 @@ ZSTDGPU_API zstdgpu_Status zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestCo
  *        several dispatches, all recorded by one `zstdgpu_SubmitAllStagesWithExternalMemory` call; a frame larger
  *        than the budget is decoded over several of them. Scratch grows with the budget: 8/3 bytes per byte for
  *        literals and sequences, plus per-block metadata for the block slots.
- *      - `maxFramesPerBatch`: the most frames one batch may hold.
+ *      - `maxFramesPerBatch`: the most frames one batch may hold (at most 2^20).
  *      - `blockSlotsPerMiB`: per-block metadata allowance per MiB of budget (0 = default, one slot per 8 KiB of
  *        output). Content with smaller blocks than that fails loudly with `kzstdgpu_FrameStatus_BlockCountExceeded`.
+ *        The resulting block slots per dispatch (frames + budget-derived slots) are capped at 2^19.
  *      - `maxBatchesInFlight`: how many batches may be recorded before the caller retires the oldest
  *        (`zstdgpu_RetireSessionBatches`). Only the descriptor ring grows with it.
  *

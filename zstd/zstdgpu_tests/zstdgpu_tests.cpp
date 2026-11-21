@@ -1373,3 +1373,28 @@ TEST_F(ZstdDecompressionTests, SessionBudgetForScratchInvertsRequirement)
     uint32_t memorySize = 0;
     EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
 }
+
+// Per-frame and per-block sizes are 32-bit; a frame count or slot allowance large enough to wrap them must be rejected,
+// not sized from wrapped (tiny) buffers.
+TEST_F(ZstdDecompressionTests, SessionSizingRejectsWrappingInputs)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionSessionWrapTest");
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+    const uint64_t plentyOfScratch = 1ull << 40;
+    uint32_t budget = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u << 10, 0u));
+    // 2^30 frames make every 4-byte per-frame buffer wrap to 0 bytes.
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u << 30, 0u));
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, (1u << 20) + 1u, 0u));
+
+    // A huge slot allowance only fits the smallest budgets; every budget it admits keeps the slots within the cap.
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&budget, persistent, plentyOfScratch, 1u, 0xffffffffu));
+    EXPECT_LT(budget, 1u << 20);
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}
