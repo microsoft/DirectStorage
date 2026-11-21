@@ -36,9 +36,9 @@
  *  Single-threaded, and that is deliberate -- this loop only ever runs when the decode has already
  *  failed, so its cost is irrelevant. On the success path it is one comparison.
  */
-static void zstdgpu_MarkAllFramesFailed(ZSTDGPU_RW_BUFFER(uint32_t) inoutFrameStatus, uint32_t frameCount, uint32_t status, uint32_t keepSpecificFailures)
+static void zstdgpu_MarkAllFramesFailed(ZSTDGPU_RW_BUFFER(uint32_t) inoutFrameStatus, uint32_t frameBase, uint32_t frameCount, uint32_t status, uint32_t keepSpecificFailures)
 {
-    for (uint32_t frameIdx = 0; frameIdx < frameCount; ++frameIdx)
+    for (uint32_t frameIdx = frameBase; frameIdx < frameBase + frameCount; ++frameIdx)
     {
         if (0 == keepSpecificFailures || kzstdgpu_FrameStatus_Success == inoutFrameStatus[frameIdx])
         {
@@ -111,7 +111,7 @@ void main()
         // reason no status of this request exists yet, so every frame is overwritten.
         if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
         {
-            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_BlockCountExceeded, /* keepSpecificFailures */ 0u);
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameBase, srt.frameCount, kzstdgpu_FrameStatus_BlockCountExceeded, /* keepSpecificFailures */ 0u);
         }
     }
     else if (srt.stage == 1)
@@ -158,7 +158,7 @@ void main()
         // point, so a frame rejected on its own merits keeps that more specific reason.
         if (0 != predicateMask && 0 != srt.reportsScratchOverflow)
         {
-            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameCount, kzstdgpu_FrameStatus_ScratchExceeded, /* keepSpecificFailures */ 1u);
+            zstdgpu_MarkAllFramesFailed(srt.inoutFrameStatus, srt.frameBase, srt.frameCount, kzstdgpu_FrameStatus_ScratchExceeded, /* keepSpecificFailures */ 1u);
         }
     }
     else

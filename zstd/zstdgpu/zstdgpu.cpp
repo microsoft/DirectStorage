@@ -803,6 +803,15 @@ static uint32_t zstdgpu_ComputeFseArenaStreamCapacity(uint32_t totalLaneCount, u
     return zstdgpu_MaxU32(streamCount, kzstdgpu_FseArena_MinStreamCapacity);
 }
 
+static const uint32_t kzstdgpu_MaxTrackedStates = 96;
+
+typedef struct zstdgpu_TrackedState
+{
+    ID3D12Resource         *resource;
+    D3D12_RESOURCE_STATES   first;
+    D3D12_RESOURCE_STATES   last;
+} zstdgpu_TrackedState;
+
 struct zstdgpu_PerRequestContextImpl
 {
     void                    *thisMemoryBlock;
@@ -845,6 +854,21 @@ struct zstdgpu_PerRequestContextImpl
     uint32_t                partialOutputBudget;
     uint32_t                partialBlockSlots;
 
+    /*
+     *  Set by a session (`zstdgpu_SubmitAllStagesWithExternalMemory`), which records several requests over one
+     *  batch: `frameBase` is the request's first frame in the caller's batch-wide frame buffers, and the resume
+     *  record is valid for a request only if it holds `resumeTag`; a completed request writes `resumeTagNext`.
+     *  A per-request context uses 0 and 1 and 1.
+     */
+    uint32_t                frameBase;
+    uint32_t                resumeTag;
+    uint32_t                resumeTagNext;
+
+    // See `zstdgpu_TrackTransition`.
+    uint32_t                trackStates;
+    uint32_t                trackedStateCount;
+    zstdgpu_TrackedState    trackedStates[kzstdgpu_MaxTrackedStates];
+
     d3d12aid_Timestamps     timestamps;
 
     uint32_t                timestampSlot[kzstdgpu_KernelScope_Count];
@@ -880,6 +904,17 @@ struct zstdgpu_PerRequestContextImpl
     uint32_t                setupFlags;
 };
 
+// A partial decode's block slots are an over-provisioned allowance; sizing FSE tables for each would cost 5 KB per
+// slot. The arena kernel waits for a free arena slot, so a smaller arena only throttles concurrency: a quarter of the
+// block slots covers the blocks real content puts in a request.
+static uint32_t zstdgpu_PartialFseArenaStreamCapacity(uint32_t capacity, uint32_t blockSlots)
+{
+    if (0 == capacity)
+        return 0;
+    const uint32_t quarter = zstdgpu_AlignUp(zstdgpu_MaxU32(blockSlots / 4u, 1u), kzstdgpu_FseArena_StreamAlign);
+    return zstdgpu_MinU32(capacity, quarter);
+}
+
 // The FSE arena capacity the current batch is sized with, or 0 when it keeps every compressed block's FSE tables.
 // A batch the arena would not bound stays on the default kernel: its full tables take no more GPU memory than
 // an arena sized to the batch, and the default kernel decodes such batches faster.
@@ -887,13 +922,9 @@ static uint32_t zstdgpu_GetBatchFseArenaStreamCapacity(const zstdgpu_PerRequestC
 {
     const uint32_t capacity = req->DecompressSequences_FseArenaStreamCapacity;
     ZSTDGPU_ASSERT(0 == capacity || NULL != req->DecompressSequencesFseArena.ps);
-    if (0 != req->partialFlags && 0 != capacity)
+    if (0 != req->partialFlags)
     {
-        // A partial decode's block slots are an over-provisioned allowance; sizing FSE tables for each would
-        // cost 5 KB per slot. The arena kernel waits for a free arena slot, so a smaller arena only throttles
-        // concurrency: a quarter of the block slots covers the blocks real content puts in a request.
-        const uint32_t quarter = zstdgpu_AlignUp(zstdgpu_MaxU32(req->partialBlockSlots / 4u, 1u), kzstdgpu_FseArena_StreamAlign);
-        return zstdgpu_MinU32(capacity, quarter);
+        return zstdgpu_PartialFseArenaStreamCapacity(capacity, req->partialBlockSlots);
     }
     return zstdgpu_AlignUp(req->zstdCmpBlockCountMax, kzstdgpu_FseArena_StreamAlign) <= capacity ? 0u : capacity;
 }
@@ -1215,6 +1246,11 @@ ZSTDGPU_ENUM(Status) zstdgpu_CreatePerRequestContext(zstdgpu_PerRequestContext *
         context->partialLastFrameLimit              = 0;
         context->partialOutputBudget                = 0;
         context->partialBlockSlots                  = 0;
+        context->frameBase                          = 0;
+        context->resumeTag                          = 1;
+        context->resumeTagNext                      = 1;
+        context->trackStates                        = 0;
+        context->trackedStateCount                  = 0;
 
 #if ZSTDGPU_ENABLE_TIMESTAMPS
         d3d12aid_Timestamps_Create(&context->timestamps, context->device, kzstdgpu_KernelScope_Count * 2, 1);
@@ -1656,13 +1692,18 @@ static uint32_t zstdgpu_OutputSizeToSequenceCount(uint32_t size)
  *  it by at most one block's lower bound, and one block's lower bound is at most 128 KiB. The same joint bound
  *  as whole-request sizing then applies to `budget + 128 KiB`.
  */
-static void zstdgpu_PartialDecodeLitSeqCounts(uint32_t *outCntLit, uint32_t *outCntSeq, uint32_t *outArenaBytes, const zstdgpu_PerRequestContextImpl *req)
+static void zstdgpu_PartialDecodeLitSeqCountsForBudget(uint32_t *outCntLit, uint32_t *outCntSeq, uint32_t *outArenaBytes, uint32_t outputBudgetBytes)
 {
-    const uint64_t bytes64 = (uint64_t)req->partialOutputBudget + (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
+    const uint64_t bytes64 = (uint64_t)outputBudgetBytes + (uint64_t)kzstdgpu_MaxCount_LiteralBytes;
     const uint32_t bytes = bytes64 > 0xffffffffull ? 0xffffffffu : (uint32_t)bytes64;
     *outCntLit = zstdgpu_MaxU32(bytes, kzstdgpu_MinCount_UncompressedLitBytes);
     *outCntSeq = zstdgpu_MaxU32(zstdgpu_OutputSizeToSequenceCount(bytes), kzstdgpu_MinCount_UncompressedSeqElems);
     *outArenaBytes = zstdgpu_DecompressedSizeToArenaByteCount(bytes);
+}
+
+static void zstdgpu_PartialDecodeLitSeqCounts(uint32_t *outCntLit, uint32_t *outCntSeq, uint32_t *outArenaBytes, const zstdgpu_PerRequestContextImpl *req)
+{
+    zstdgpu_PartialDecodeLitSeqCountsForBudget(outCntLit, outCntSeq, outArenaBytes, req->partialOutputBudget);
 }
 
 /**
@@ -2104,117 +2145,539 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithExternalMemory(zstdgpu_PerRequestContext 
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
-ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(zstdgpu_PerRequestContext req,
-                                                               struct ID3D12GraphicsCommandList *cmdList,
-                                                               struct ID3D12Heap *defaultHeap,
-                                                               uint64_t defaultHeap_OffsetInBytes,
-                                                               struct ID3D12Heap *uploadHeap,
-                                                               uint64_t uploadHeap_OffsetInBytes,
-                                                               struct ID3D12Heap *readbackHeap,
-                                                               uint64_t readbackHeap_OffsetInBytes,
-                                                               struct ID3D12DescriptorHeap *shaderVisibleHeap,
-                                                               uint32_t shaderVisibileHeap_OffsetInDescriptors)
+static void zstdgpu_RestoreTrackedStates(zstdgpu_PerRequestContextImpl *req, ID3D12GraphicsCommandList *cmdList);
+
+/*
+ *  Session: one decompression command list, one scratch region and one descriptor ring, reused by every batch
+ *  (see `zstdgpu_CreateSessionContext`). Internally a session owns a per-request context whose scratch resources
+ *  are placed once, at creation, and sized for a partial decode of `outputBudgetBytes`; every batch is recorded as
+ *  a series of such partial requests over sub-ranges of the batch's frames.
+ */
+struct zstdgpu_SessionContextImpl
+{
+    void                           *thisMemoryBlock;
+    zstdgpu_PerRequestContextImpl   req;
+
+    ID3D12GraphicsCommandList      *cmdList;
+    ID3D12Resource                 *zeros;                 // upload buffer of zeros that clears the resume record once
+    uint32_t                        resumeRecordCleared;
+    ID3D12DescriptorHeap           *descriptorHeap;
+    uint32_t                        descriptorOffset;
+    uint32_t                        descriptorsPerBatch;
+
+    uint32_t                        outputBudgetBytes;
+    uint32_t                        maxFramesPerBatch;
+    uint32_t                        maxBatchesInFlight;
+    uint32_t                        nextResumeTag;
+
+    uint64_t                        nextBatchId;
+    uint64_t                        retiredBatchId;
+};
+
+typedef struct zstdgpu_SessionSizing
+{
+    zstdgpu_ResourceInfo    resInfo;
+    uint64_t                defaultHeapByteCount;   // all three stages plus the resume record
+    uint64_t                uploadHeapByteCount;
+    uint64_t                resumeRecordOffset;     // relative to the start of the session's default heap range
+    uint64_t                zerosOffset;            // relative to the start of the session's upload heap range
+    uint32_t                blockSlots;
+    uint32_t                descriptorsPerBatch;
+} zstdgpu_SessionSizing;
+
+static uint32_t zstdgpu_SessionBlockSlotCount(uint32_t outputBudgetBytes, uint32_t maxFramesPerBatch, uint32_t blockSlotsPerMiB)
+{
+    // The default is `zstdgpu_PartialDecodeBlockSlotCount`'s allowance: one slot per frame, one per 8 KiB of output, and a
+    // few for the resumed frame's re-parsed table-defining blocks and the block that crosses the limit.
+    const uint64_t perMiB = (0 != blockSlotsPerMiB) ? blockSlotsPerMiB : 128u;
+    const uint64_t slots = (uint64_t)maxFramesPerBatch + (((uint64_t)outputBudgetBytes * perMiB + (1u << 20) - 1u) >> 20) + 2u + 4u;
+    return zstdgpu_MaxU32(slots > 0xffffffffull ? 0xffffffffu : (uint32_t)slots, kzstdgpu_MinCount_Blocks);
+}
+
+// Sizes a session. Content-independent: depends only on the arguments and the adapter (FSE arena capacity).
+static uint32_t zstdgpu_SessionComputeSizing(zstdgpu_SessionSizing *out, const zstdgpu_PersistentContextImpl *persistent, uint32_t outputBudgetBytes, uint32_t maxFramesPerBatch, uint32_t blockSlotsPerMiB)
+{
+    if (0 == outputBudgetBytes || outputBudgetBytes > kzstdgpu_MaxRequestUncompressedByteSize || 0 == maxFramesPerBatch)
+        return 0;
+
+    zstdgpu_ResourceInfo *info = &out->resInfo;
+    zstdgpu_ResourceInfo_InitZero(info);
+    info->gpu2CpuDisabled = 1;
+
+    out->blockSlots = zstdgpu_SessionBlockSlotCount(outputBudgetBytes, maxFramesPerBatch, blockSlotsPerMiB);
+
+    uint32_t cntLit, cntSeq, arenaBytes;
+    zstdgpu_PartialDecodeLitSeqCountsForBudget(&cntLit, &cntSeq, &arenaBytes, outputBudgetBytes);
+
+    // The caller's buffers take no scratch; their views are sized per batch.
+    zstdgpu_ResourceInfo_Stage_0_Init(info, maxFramesPerBatch, 4u, /* externalData */ 1u);
+    zstdgpu_ResourceInfo_Stage_1_Init(info, out->blockSlots, out->blockSlots, out->blockSlots,
+                                      zstdgpu_PartialFseArenaStreamCapacity(persistent->DecompressSequences_FseArenaStreamCapacity, out->blockSlots));
+    zstdgpu_ResourceInfo_Stage_2_Init(info, cntLit, cntSeq, arenaBytes, 4u, maxFramesPerBatch);
+
+    for (uint32_t stage = 0; stage < kzstdgpu_ResourceAllocation_StageCount; ++stage)
+    {
+        if (info->gpuOnly_ByteCount[stage] >= kzstdgpu_MaxScratchHeapByteCount)
+            return 0;
+    }
+
+    out->resumeRecordOffset   = info->gpuOnly_ByteCount[0] + info->gpuOnly_ByteCount[1] + info->gpuOnly_ByteCount[2];
+    out->defaultHeapByteCount = out->resumeRecordOffset + ZSTDGPU_ALIGN_DEFAULT(kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+    out->zerosOffset          = info->cpu2Gpu_ByteCount[0] + info->cpu2Gpu_ByteCount[1] + info->cpu2Gpu_ByteCount[2];
+    out->uploadHeapByteCount  = out->zerosOffset + ZSTDGPU_ALIGN_DEFAULT(kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+    out->descriptorsPerBatch  = zstdgpu_Count_SRTs_Stage(0) + zstdgpu_Count_SRTs_Stage(1) + zstdgpu_Count_SRTs_Stage(2);
+    return 1;
+}
+
+uint32_t zstdgpu_GetSessionContextRequiredMemorySizeInBytes(void)
+{
+    return sizeof(zstdgpu_SessionContextImpl);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_GetSessionRequirement(uint64_t *outDefaultHeapByteCount,
+                                                   uint64_t *outUploadHeapByteCount,
+                                                   uint32_t *outShaderVisibleDescriptorCount,
+                                                   uint32_t *outSessionMemorySizeInBytes,
+                                                   zstdgpu_PersistentContext inPersistentContext,
+                                                   uint32_t outputBudgetBytes,
+                                                   uint32_t maxFramesPerBatch,
+                                                   uint32_t blockSlotsPerMiB,
+                                                   uint32_t maxBatchesInFlight)
 {
     uint32_t proceed = 1;
-    uint64_t defaultHeapMemReq = 0;
-    uint64_t uploadHeapMemReq = 0;
-    uint64_t readbackHeapMemReq = 0;
-    uint32_t shaderVisibleHeapDscCount = 0;
-    proceed = proceed && (0 == zstdgpu_IsAnyStageReadbackRequired(req));
-    proceed = proceed && (ZSTDGPU_ENUM_CONST(StatusSuccess) == zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapMemReq, &uploadHeapMemReq, &readbackHeapMemReq, &shaderVisibleHeapDscCount, req));
-    proceed = proceed && (NULL != cmdList);
-    proceed = proceed && (NULL != defaultHeap || 0 == defaultHeapMemReq);
-    proceed = proceed && (NULL != uploadHeap || 0 == uploadHeapMemReq);
-    proceed = proceed && (NULL != readbackHeap || 0 == readbackHeapMemReq);
-    proceed = proceed && (NULL != shaderVisibleHeap || 0 == shaderVisibleHeapDscCount);
-    proceed = proceed && zstdgpu_CountLimitsAreConsistent(req);
-    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(defaultHeap_OffsetInBytes);
-    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(uploadHeap_OffsetInBytes);
-    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(readbackHeap_OffsetInBytes);
+    proceed = proceed && (NULL != outDefaultHeapByteCount);
+    proceed = proceed && (NULL != outUploadHeapByteCount);
+    proceed = proceed && (NULL != outShaderVisibleDescriptorCount);
+    proceed = proceed && (NULL != inPersistentContext);
+    proceed = proceed && (inPersistentContext->thisMemoryBlock == (void *)inPersistentContext);
+    proceed = proceed && (maxBatchesInFlight > 0);
+
+    zstdgpu_SessionSizing sizing = {};
+    proceed = proceed && zstdgpu_SessionComputeSizing(&sizing, inPersistentContext, outputBudgetBytes, maxFramesPerBatch, blockSlotsPerMiB);
+    proceed = proceed && ((uint64_t)sizing.descriptorsPerBatch * maxBatchesInFlight <= 0xffffffffull);
     ZSTDGPU_ASSERT(proceed > 0);
+
     if (proceed)
     {
-        uint64_t defaultOffs = defaultHeap_OffsetInBytes;
-        uint64_t uploadOffs = uploadHeap_OffsetInBytes;
-        uint64_t readbackOffs = readbackHeap_OffsetInBytes;
-        zstdgpu_ResourceDataGpu_Term(&req->resData, 0);
-        zstdgpu_ResourceDataGpu_Term(&req->resData, 1);
-        zstdgpu_ResourceDataGpu_Term(&req->resData, 2);
-
-        for (uint32_t stageIndex = 0; stageIndex < ZSTDGPU_ENUM_CONST(ResourceAllocation_StageCount); ++stageIndex)
+        *outDefaultHeapByteCount = sizing.defaultHeapByteCount;
+        *outUploadHeapByteCount = sizing.uploadHeapByteCount;
+        *outShaderVisibleDescriptorCount = sizing.descriptorsPerBatch * maxBatchesInFlight;
+        if (NULL != outSessionMemorySizeInBytes)
         {
-            if (NULL != defaultHeap)
-                defaultHeap->AddRef();
-
-            if (NULL != uploadHeap)
-                uploadHeap->AddRef();
-
-            if (NULL != readbackHeap)
-                readbackHeap->AddRef();
-
-            req->resData.gpuOnly_Heap[stageIndex] = defaultHeap;
-            req->resData.gpuOnly_HeapOffset[stageIndex] = defaultOffs;
-
-            req->resData.cpu2Gpu_Heap[stageIndex] = uploadHeap;
-            req->resData.cpu2Gpu_HeapOffset[stageIndex] = uploadOffs;
-
-            req->resData.gpu2Cpu_Heap[stageIndex] = readbackHeap;
-            req->resData.gpu2Cpu_HeapOffset[stageIndex] = readbackOffs;
-
-            defaultOffs   += req->resInfo.gpuOnly_ByteCount[stageIndex];
-            uploadOffs    += req->resInfo.cpu2Gpu_ByteCount[stageIndex];
-            readbackOffs  += req->resInfo.gpu2Cpu_ByteCount[stageIndex];
-
-            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(defaultOffs));
-            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(uploadOffs));
-            ZSTDGPU_ASSERT(ZSTDGPU_IS_DEFAULT_ALIGNED(readbackOffs));
+            *outSessionMemorySizeInBytes = zstdgpu_GetSessionContextRequiredMemorySizeInBytes();
         }
-        ZSTDGPU_ASSERT(defaultHeapMemReq == defaultOffs - defaultHeap_OffsetInBytes);
-        ZSTDGPU_ASSERT(uploadHeapMemReq == uploadOffs - uploadHeap_OffsetInBytes);
-        ZSTDGPU_ASSERT(readbackHeapMemReq == readbackOffs - readbackHeap_OffsetInBytes);
-
-        uint32_t success = zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 0);
-        success = success && zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 1);
-        success = success && zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, 2);
-        if (!success)
-        {
-            zstdgpu_ResourceDataGpu_Term(&req->resData, 0);
-            zstdgpu_ResourceDataGpu_Term(&req->resData, 1);
-            zstdgpu_ResourceDataGpu_Term(&req->resData, 2);
-            return ZSTDGPU_ENUM_CONST(StatusResourceCreationFailed);
-        }
-
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsGpuMemory))
-        {
-            zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, req->compressedFramesData, req->compressedFramesRefs);
-        }
-        zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, req->uncompressedFramesData, req->uncompressedFramesRefs);
-
-        zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, req->frameStatus);
-
-        // NOTE(pamartis): we need to do call upload callback right after initialising resources of stage == 0
-        if (zstdgpu_HasFlag(req->setupFlags, kzstdgpu_SetupFlags_InputsCpuMemory))
-        {
-            req->uploadCallback(req->resData.cpu2Gpu.CompressedDataCpu, req->zstdCompressedFramesByteCount, req->resData.cpu2Gpu.FramesRefsCpu, req->zstdFrameCount, req->uploadUserdata);
-        }
-        memcpy(req->resData.cpu2Gpu.FseProbsDefaultCpu, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
-
-        D3D12AID_SAFE_RELEASE(req->srts.heap);
-        req->srts.heap = shaderVisibleHeap;
-        req->srts.heap->AddRef();
-        req->srts.heapOffset = shaderVisibileHeap_OffsetInDescriptors;
-        zstdgpu_Srt_InitBindGroups_Stage0(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
-        zstdgpu_Srt_InitBindGroups_Stage1(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
-        zstdgpu_Srt_InitBindGroups_Stage2(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
-
-        ZSTDGPU_ASSERT(shaderVisibleHeapDscCount == req->srts.heapOffset - shaderVisibileHeap_OffsetInDescriptors);
-        zstdgpu_SubmitStage0(req, cmdList);
-        zstdgpu_SubmitStage1(req, cmdList);
-        zstdgpu_SubmitStage2(req, cmdList);
-
         return ZSTDGPU_ENUM_CONST(StatusSuccess);
     }
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_GetSessionBudgetForScratch(uint32_t *outOutputBudgetBytes,
+                                                        zstdgpu_PersistentContext inPersistentContext,
+                                                        uint64_t defaultHeapByteCount,
+                                                        uint32_t maxFramesPerBatch,
+                                                        uint32_t blockSlotsPerMiB)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != outOutputBudgetBytes);
+    proceed = proceed && (NULL != inPersistentContext);
+    proceed = proceed && (inPersistentContext->thisMemoryBlock == (void *)inPersistentContext);
+    proceed = proceed && (maxFramesPerBatch > 0);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        // The requirement grows monotonically with the budget, so the largest budget that fits is found by bisection.
+        zstdgpu_SessionSizing sizing = {};
+        uint32_t lo = 0;
+        uint32_t hi = kzstdgpu_MaxRequestUncompressedByteSize;
+        while (lo < hi)
+        {
+            const uint32_t mid = lo + (hi - lo + 1u) / 2u;
+            if (zstdgpu_SessionComputeSizing(&sizing, inPersistentContext, mid, maxFramesPerBatch, blockSlotsPerMiB) && sizing.defaultHeapByteCount <= defaultHeapByteCount)
+                lo = mid;
+            else
+                hi = mid - 1u;
+        }
+        if (0 != lo)
+        {
+            *outOutputBudgetBytes = lo;
+            return ZSTDGPU_ENUM_CONST(StatusSuccess);
+        }
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+static uint64_t zstdgpu_HeapByteCount(ID3D12Heap *heap)
+{
+    return heap->GetDesc().SizeInBytes;
+}
+
+static uint64_t zstdgpu_BufferByteCount(ID3D12Resource *buffer)
+{
+    return buffer->GetDesc().Width;
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_CreateSessionContext(zstdgpu_SessionContext *outSession,
+                                                  zstdgpu_PersistentContext inPersistentContext,
+                                                  struct ID3D12GraphicsCommandList *cmdList,
+                                                  struct ID3D12Heap *defaultHeap,
+                                                  uint64_t defaultHeapOffsetInBytes,
+                                                  struct ID3D12Heap *uploadHeap,
+                                                  uint64_t uploadHeapOffsetInBytes,
+                                                  struct ID3D12DescriptorHeap *shaderVisibleHeap,
+                                                  uint32_t shaderVisibleHeapOffsetInDescriptors,
+                                                  uint32_t outputBudgetBytes,
+                                                  uint32_t maxFramesPerBatch,
+                                                  uint32_t blockSlotsPerMiB,
+                                                  uint32_t maxBatchesInFlight,
+                                                  void *memoryBlock,
+                                                  uint32_t memoryBlockSizeInBytes)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != outSession);
+    proceed = proceed && (NULL != inPersistentContext);
+    proceed = proceed && (inPersistentContext->thisMemoryBlock == (void *)inPersistentContext);
+    proceed = proceed && (NULL != cmdList);
+    proceed = proceed && (NULL != defaultHeap);
+    proceed = proceed && (NULL != shaderVisibleHeap);
+    proceed = proceed && (maxBatchesInFlight > 0);
+    proceed = proceed && (NULL != memoryBlock);
+    proceed = proceed && (memoryBlockSizeInBytes >= zstdgpu_GetSessionContextRequiredMemorySizeInBytes());
+    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(defaultHeapOffsetInBytes);
+    proceed = proceed && ZSTDGPU_IS_DEFAULT_ALIGNED(uploadHeapOffsetInBytes);
+
+    zstdgpu_SessionSizing sizing = {};
+    proceed = proceed && zstdgpu_SessionComputeSizing(&sizing, inPersistentContext, outputBudgetBytes, maxFramesPerBatch, blockSlotsPerMiB);
+    proceed = proceed && (NULL != uploadHeap);
+    proceed = proceed && (defaultHeapOffsetInBytes + sizing.defaultHeapByteCount <= zstdgpu_HeapByteCount(defaultHeap));
+    proceed = proceed && (uploadHeapOffsetInBytes + sizing.uploadHeapByteCount <= zstdgpu_HeapByteCount(uploadHeap));
+    if (proceed)
+    {
+        const D3D12_DESCRIPTOR_HEAP_DESC heapDesc = shaderVisibleHeap->GetDesc();
+        proceed = proceed && (D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV == heapDesc.Type);
+        proceed = proceed && (0 != (heapDesc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE));
+        proceed = proceed && ((uint64_t)shaderVisibleHeapOffsetInDescriptors + (uint64_t)sizing.descriptorsPerBatch * maxBatchesInFlight <= heapDesc.NumDescriptors);
+    }
+    ZSTDGPU_ASSERT(proceed > 0);
+    if (!proceed)
+    {
+        return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+    }
+
+    zstdgpu_SessionContextImpl *session = (zstdgpu_SessionContextImpl *)memoryBlock;
+    zstdgpu_PerRequestContext req = NULL;
+    if (ZSTDGPU_ENUM_CONST(StatusSuccess) != zstdgpu_CreatePerRequestContext(&req, inPersistentContext, &session->req, sizeof(session->req)))
+    {
+        return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+    }
+
+    req->setupFlags = kzstdgpu_SetupFlags_InputsGpuMemory | kzstdgpu_SetupFlags_HasSingleSubmission;
+    req->partialOutputBudget = outputBudgetBytes;
+    req->partialBlockSlots = sizing.blockSlots;
+    req->partialFlags = kzstdgpu_PartialDecodeFlag_LastFramePartial | kzstdgpu_PartialDecodeFlag_KeepResumedStatus;
+    req->trackStates = 1;
+    req->resInfo = sizing.resInfo;
+
+    uint64_t defaultOffs = defaultHeapOffsetInBytes;
+    uint64_t uploadOffs = uploadHeapOffsetInBytes;
+    for (uint32_t stage = 0; stage < kzstdgpu_ResourceAllocation_StageCount; ++stage)
+    {
+        defaultHeap->AddRef();
+        req->resData.gpuOnly_Heap[stage] = defaultHeap;
+        req->resData.gpuOnly_HeapOffset[stage] = defaultOffs;
+        defaultOffs += req->resInfo.gpuOnly_ByteCount[stage];
+
+        uploadHeap->AddRef();
+        req->resData.cpu2Gpu_Heap[stage] = uploadHeap;
+        req->resData.cpu2Gpu_HeapOffset[stage] = uploadOffs;
+        uploadOffs += req->resInfo.cpu2Gpu_ByteCount[stage];
+    }
+
+    uint32_t success = 1;
+    for (uint32_t stage = 0; stage < kzstdgpu_ResourceAllocation_StageCount; ++stage)
+    {
+        success = success && zstdgpu_ResourceDataGpu_Init(&req->resData, &req->resInfo, req->device, stage);
+    }
+
+    if (success)
+    {
+        D3D12_RESOURCE_DESC bufDesc;
+        d3d12aid_Resource_InitAsBuffer(&bufDesc, kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+        bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        req->resumeRecord = d3d12aid_Resource_CreatePlaced(req->device, defaultHeap, defaultHeapOffsetInBytes + sizing.resumeRecordOffset, &bufDesc, D3D12_RESOURCE_STATE_COMMON);
+        success = NULL != req->resumeRecord;
+        if (success)
+        {
+            req->resumeRecord->SetName(L"ResumeRecord_Session");
+        }
+    }
+
+    ID3D12Resource *zeros = NULL;
+    if (success)
+    {
+        D3D12_RESOURCE_DESC bufDesc;
+        d3d12aid_Resource_InitAsBuffer(&bufDesc, kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+        zeros = d3d12aid_Resource_CreatePlaced(req->device, uploadHeap, uploadHeapOffsetInBytes + sizing.zerosOffset, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ);
+        void *mapped = (NULL != zeros) ? d3d12aid_Resource_MapWrite(zeros) : NULL;
+        success = NULL != mapped;
+        if (success)
+        {
+            memset(mapped, 0, kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+            zeros->SetName(L"Zeros_Session");
+        }
+    }
+
+    if (!success)
+    {
+        D3D12AID_SAFE_RELEASE(zeros);
+        zstdgpu_DestroyPerRequestContext(NULL, NULL, req);
+        return ZSTDGPU_ENUM_CONST(StatusResourceCreationFailed);
+    }
+
+    memcpy(req->resData.cpu2Gpu.FseProbsDefaultCpu, kzstdgpuFseProbsDefault, sizeof(kzstdgpuFseProbsDefault));
+
+    session->thisMemoryBlock = memoryBlock;
+    session->cmdList = cmdList;
+    session->cmdList->AddRef();
+    session->zeros = zeros;
+    session->resumeRecordCleared = 0;
+    session->descriptorHeap = shaderVisibleHeap;
+    session->descriptorHeap->AddRef();
+    session->descriptorOffset = shaderVisibleHeapOffsetInDescriptors;
+    session->descriptorsPerBatch = sizing.descriptorsPerBatch;
+    session->outputBudgetBytes = outputBudgetBytes;
+    session->maxFramesPerBatch = maxFramesPerBatch;
+    session->maxBatchesInFlight = maxBatchesInFlight;
+    session->nextResumeTag = 1;
+    session->nextBatchId = 1;
+    session->retiredBatchId = 0;
+
+    *outSession = session;
+    return ZSTDGPU_ENUM_CONST(StatusSuccess);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_DestroySessionContext(void **outMemoryBlock, uint32_t *outMemoryBlockSizeInBytes, zstdgpu_SessionContext inSession)
+{
+    const uint32_t proceed = (NULL != inSession) && (inSession->thisMemoryBlock == (void *)inSession);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        zstdgpu_DestroyPerRequestContext(NULL, NULL, &inSession->req);
+        D3D12AID_SAFE_RELEASE(inSession->zeros);
+        D3D12AID_SAFE_RELEASE(inSession->cmdList);
+        D3D12AID_SAFE_RELEASE(inSession->descriptorHeap);
+
+        if (NULL != outMemoryBlock)
+            *outMemoryBlock = inSession->thisMemoryBlock;
+
+        if (NULL != outMemoryBlockSizeInBytes)
+            *outMemoryBlockSizeInBytes = zstdgpu_GetSessionContextRequiredMemorySizeInBytes();
+
+        inSession->thisMemoryBlock = NULL;
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_RetireSessionBatches(zstdgpu_SessionContext inSession, uint64_t completedBatchId)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != inSession);
+    proceed = proceed && (inSession->thisMemoryBlock == (void *)inSession);
+    proceed = proceed && (completedBatchId < inSession->nextBatchId);
+    ZSTDGPU_ASSERT(proceed > 0);
+
+    if (proceed)
+    {
+        if (completedBatchId > inSession->retiredBatchId)
+        {
+            inSession->retiredBatchId = completedBatchId;
+        }
+        return ZSTDGPU_ENUM_CONST(StatusSuccess);
+    }
+    return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+}
+
+static uint32_t zstdgpu_NextResumeTag(uint32_t tag)
+{
+    // 0 never names a valid record.
+    return (0xffffffffu == tag) ? 1u : tag + 1u;
+}
+
+static void zstdgpu_SessionGlobalUavBarrier(ID3D12GraphicsCommandList *cmdList)
+{
+    D3D12_RESOURCE_BARRIER barrier;
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.UAV.pResource = NULL;
+    cmdList->ResourceBarrier(1, &barrier);
+}
+
+// Records one request of a batch: frames `[frameBase, frameBase + frameCount)`, the first resumed when `resumeFirstFrame`
+// is non-zero, the last decoded up to `lastFrameLimit` bytes from its start.
+static void zstdgpu_SessionRecordRequest(zstdgpu_SessionContextImpl *session, uint32_t frameBase, uint32_t frameCount, uint32_t resumeFirstFrame, uint32_t lastFrameLimit)
+{
+    zstdgpu_PerRequestContextImpl *req = &session->req;
+    ID3D12GraphicsCommandList *cmdList = session->cmdList;
+
+    const uint32_t tag = session->nextResumeTag;
+    session->nextResumeTag = zstdgpu_NextResumeTag(tag);
+
+    req->frameBase = frameBase;
+    req->zstdFrameCount = frameCount;
+    req->zstdUncompressedFrameCount = frameCount;
+    req->partialFlags = kzstdgpu_PartialDecodeFlag_LastFramePartial
+                      | kzstdgpu_PartialDecodeFlag_KeepResumedStatus
+                      | ((0 != resumeFirstFrame) ? kzstdgpu_PartialDecodeFlag_ResumeFirstFrame : 0u);
+    req->partialLastFrameLimit = lastFrameLimit;
+    req->resumeTag = tag;
+    req->resumeTagNext = session->nextResumeTag;
+
+    // The previous request (of this batch or of an earlier one) wrote the same scratch, and its output is this
+    // request's match history.
+    zstdgpu_SessionGlobalUavBarrier(cmdList);
+
+    zstdgpu_SubmitStage0(req, cmdList);
+    zstdgpu_SubmitStage1(req, cmdList);
+    zstdgpu_SubmitStage2(req, cmdList);
+
+    zstdgpu_RestoreTrackedStates(req, cmdList);
+}
+
+ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithExternalMemory(uint64_t *outBatchId,
+                                                               zstdgpu_SessionContext inSession,
+                                                               struct ID3D12Resource *inFramesMemory,
+                                                               uint32_t inFramesMemorySizeInBytes,
+                                                               struct ID3D12Resource *inFrames,
+                                                               uint32_t frameCount,
+                                                               struct ID3D12Resource *outFramesMemory,
+                                                               uint32_t outFramesMemorySizeInBytes,
+                                                               struct ID3D12Resource *outFrames,
+                                                               const zstdgpu_OffsetAndSize *outFramesCpu,
+                                                               struct ID3D12Resource *frameStatus)
+{
+    uint32_t proceed = 1;
+    proceed = proceed && (NULL != outBatchId);
+    proceed = proceed && (NULL != inSession);
+    proceed = proceed && (inSession->thisMemoryBlock == (void *)inSession);
+    proceed = proceed && (frameCount > 0);
+    proceed = proceed && (NULL != inSession && frameCount <= inSession->maxFramesPerBatch);
+    proceed = proceed && (NULL != inFramesMemory && inFramesMemorySizeInBytes > 0);
+    proceed = proceed && (NULL != inFrames);
+    proceed = proceed && (NULL != outFramesMemory && outFramesMemorySizeInBytes > 0);
+    proceed = proceed && (NULL != outFrames);
+    proceed = proceed && (NULL != outFramesCpu);
+    proceed = proceed && (NULL != frameStatus);
+    // The views the library creates must lie within the caller's buffers.
+    proceed = proceed && (zstdgpu_BufferByteCount(inFramesMemory) >= zstdgpu_AlignUp64(inFramesMemorySizeInBytes, 4));
+    proceed = proceed && (zstdgpu_BufferByteCount(inFrames) >= (uint64_t)frameCount * sizeof(zstdgpu_OffsetAndSize));
+    proceed = proceed && (zstdgpu_BufferByteCount(outFramesMemory) >= outFramesMemorySizeInBytes);
+    proceed = proceed && (zstdgpu_BufferByteCount(outFrames) >= (uint64_t)frameCount * sizeof(zstdgpu_OffsetAndSize));
+    proceed = proceed && (zstdgpu_BufferByteCount(frameStatus) >= (uint64_t)frameCount * sizeof(uint32_t));
+    for (uint32_t i = 0; proceed && i < frameCount; ++i)
+    {
+        proceed = proceed && ((uint64_t)outFramesCpu[i].offs + outFramesCpu[i].size <= outFramesMemorySizeInBytes);
+    }
+    ZSTDGPU_ASSERT(proceed > 0);
+    if (!proceed)
+    {
+        return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
+    }
+
+    // The CPU-written part of a batch (descriptors) lives in a ring of `maxBatchesInFlight` slots; refuse rather than
+    // overwrite a slot the GPU may still read.
+    if (inSession->nextBatchId - 1u - inSession->retiredBatchId >= inSession->maxBatchesInFlight)
+    {
+        return ZSTDGPU_ENUM_CONST(StatusBusy);
+    }
+    const uint32_t ringSlot = (uint32_t)((inSession->nextBatchId - 1u) % inSession->maxBatchesInFlight);
+
+    zstdgpu_PerRequestContextImpl *req = &inSession->req;
+
+    uint32_t stageCount = 0;
+    zstdgpu_SetupInputsAsFramesInGpuMemory(&stageCount, req, inFramesMemory, inFramesMemorySizeInBytes, inFrames, frameCount);
+    zstdgpu_SetupOutputs(req, outFramesMemory, outFramesMemorySizeInBytes, outFrames, frameCount, frameStatus);
+    zstdgpu_ResourceDataGpu_ReInitInputExternal(&req->resData, inFramesMemory, inFrames);
+    zstdgpu_ResourceDataGpu_ReInitOutputsExternal(&req->resData, outFramesMemory, outFrames);
+    zstdgpu_ResourceDataGpu_ReInitFrameStatusExternal(&req->resData, frameStatus);
+
+    // Views of the caller's buffers cover the whole batch; each request addresses its frames through `frameBase`.
+    zstdgpu_ResourceInfo *info = &req->resInfo;
+    info->CompressedData_Count          = (inFramesMemorySizeInBytes + 3u) / 4u;
+    info->CompressedData_ByteSize       = info->CompressedData_Count * (uint32_t)sizeof(uint32_t);
+    info->FramesRefs_Count              = frameCount;
+    info->FramesRefs_ByteSize           = frameCount * (uint32_t)sizeof(zstdgpu_OffsetAndSize);
+    info->FrameStatus_Count             = frameCount;
+    info->FrameStatus_ByteSize          = frameCount * (uint32_t)sizeof(uint32_t);
+    info->UnCompressedFramesData_Count  = outFramesMemorySizeInBytes;
+    info->UnCompressedFramesData_ByteSize = outFramesMemorySizeInBytes;
+    info->UnCompressedFramesRefs_Count  = frameCount;
+    info->UnCompressedFramesRefs_ByteSize = frameCount * (uint32_t)sizeof(zstdgpu_OffsetAndSize);
+
+    D3D12AID_SAFE_RELEASE(req->srts.heap);
+    req->srts.heap = inSession->descriptorHeap;
+    req->srts.heap->AddRef();
+    const uint32_t descriptorStart = inSession->descriptorOffset + ringSlot * inSession->descriptorsPerBatch;
+    req->srts.heapOffset = descriptorStart;
+    zstdgpu_Srt_InitBindGroups_Stage0(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
+    zstdgpu_Srt_InitBindGroups_Stage1(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
+    zstdgpu_Srt_InitBindGroups_Stage2(req->srts, req->device, req->resInfo, req->resData.gpuOnly);
+    ZSTDGPU_ASSERT(req->srts.heapOffset - descriptorStart == inSession->descriptorsPerBatch);
+
+    // A resume record is valid only if it holds the tag the next request expects. Tags grow with every request, so a
+    // stale record written by this session never matches; the record's initial contents are cleared once.
+    if (0 == inSession->resumeRecordCleared)
+    {
+        ID3D12GraphicsCommandList *cmdList = inSession->cmdList;
+        cmdList->CopyBufferRegion(req->resumeRecord, 0, inSession->zeros, 0, kzstdgpu_ResumeRecordDwordCount * sizeof(uint32_t));
+        D3D12_RESOURCE_BARRIER barrier;
+        d3d12aid_Resource_TransitionBarrier(&barrier, req->resumeRecord, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdList->ResourceBarrier(1, &barrier);
+        inSession->resumeRecordCleared = 1;
+    }
+
+    /*
+     *  Plan the batch from the frames' output sizes alone. Each request takes at most `outputBudgetBytes` of output:
+     *  whole frames while they fit, then the next frame up to the remaining budget. The following request resumes
+     *  that frame. Every request takes at least one byte or one (empty) frame, so the plan terminates.
+     */
+    const uint32_t budget = inSession->outputBudgetBytes;
+    uint32_t frame = 0;
+    uint32_t frameOffset = 0;   // output of `frame` already taken by earlier requests
+    while (frame < frameCount)
+    {
+        const uint32_t requestFirst = frame;
+        const uint32_t resume = (0 != frameOffset) ? 1u : 0u;
+        uint32_t budgetLeft = budget;
+        uint32_t lastLimit = 0;
+        uint32_t requestLast = frame;
+        for (;;)
+        {
+            requestLast = frame;
+            const uint32_t frameSize = outFramesCpu[frame].size;
+            const uint32_t remaining = frameSize - frameOffset;
+            if (remaining > budgetLeft)
+            {
+                lastLimit = frameOffset + budgetLeft;
+                frameOffset = lastLimit;
+                break;
+            }
+            budgetLeft -= remaining;
+            lastLimit = frameSize;
+            frameOffset = 0;
+            ++frame;
+            if (frame == frameCount || 0 == budgetLeft)
+                break;
+        }
+        zstdgpu_SessionRecordRequest(inSession, requestFirst, requestLast - requestFirst + 1u, resume, lastLimit);
+    }
+
+    // Every write to the output and the frame status is complete for whatever the caller records next.
+    zstdgpu_SessionGlobalUavBarrier(inSession->cmdList);
+
+    *outBatchId = inSession->nextBatchId++;
+    return ZSTDGPU_ENUM_CONST(StatusSuccess);
 }
 
 ZSTDGPU_ENUM(Status) zstdgpu_SubmitWithInternalMemory(zstdgpu_PerRequestContext req, uint32_t stageIndex, struct ID3D12GraphicsCommandList *cmdList)
@@ -2627,6 +3090,56 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
     return ZSTDGPU_ENUM_CONST(StatusInvalidArgument);
 }
 
+/*
+ *  Resource-state tracking for requests recorded back to back into one command list (a session). Each request
+ *  leaves some scratch buffers in a state other than the one it found them in: a fresh request relies on
+ *  buffers starting in COMMON and being promoted implicitly, but within one command list nothing decays. While
+ *  tracking is on, every explicit transition records the resource's state before its first transition and after
+ *  its last one; `zstdgpu_RestoreTrackedStates` then returns each resource to the state it entered the request in.
+ */
+static void zstdgpu_TrackTransition(zstdgpu_PerRequestContextImpl *req, const D3D12_RESOURCE_BARRIER &barrier)
+{
+    if (0 == req->trackStates)
+        return;
+
+    ID3D12Resource *resource = barrier.Transition.pResource;
+    for (uint32_t i = 0; i < req->trackedStateCount; ++i)
+    {
+        if (req->trackedStates[i].resource == resource)
+        {
+            req->trackedStates[i].last = barrier.Transition.StateAfter;
+            return;
+        }
+    }
+    ZSTDGPU_ASSERT(req->trackedStateCount < kzstdgpu_MaxTrackedStates);
+    if (req->trackedStateCount < kzstdgpu_MaxTrackedStates)
+    {
+        zstdgpu_TrackedState &entry = req->trackedStates[req->trackedStateCount++];
+        entry.resource = resource;
+        entry.first = barrier.Transition.StateBefore;
+        entry.last = barrier.Transition.StateAfter;
+    }
+}
+
+static void zstdgpu_RestoreTrackedStates(zstdgpu_PerRequestContextImpl *req, ID3D12GraphicsCommandList *cmdList)
+{
+    D3D12_RESOURCE_BARRIER barriers[kzstdgpu_MaxTrackedStates];
+    uint32_t bc = 0;
+    for (uint32_t i = 0; i < req->trackedStateCount; ++i)
+    {
+        const zstdgpu_TrackedState &entry = req->trackedStates[i];
+        if (entry.first != entry.last)
+        {
+            d3d12aid_Resource_TransitionBarrier(&barriers[bc++], entry.resource, entry.last, entry.first);
+        }
+    }
+    if (bc > 0)
+    {
+        cmdList->ResourceBarrier(bc, barriers);
+    }
+    req->trackedStateCount = 0;
+}
+
 #define setResourceState(barriers, index, resource, stateNameBefore, stateNameAfter)    \
     do                                                                                  \
     {                                                                                   \
@@ -2637,6 +3150,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         barriers[slot].Transition.Subresource  = 0;                                     \
         barriers[slot].Transition.StateBefore  = D3D12_RESOURCE_STATE_##stateNameBefore;\
         barriers[slot].Transition.StateAfter   = D3D12_RESOURCE_STATE_##stateNameAfter; \
+        zstdgpu_TrackTransition(req, barriers[slot]);                                   \
     }                                                                                   \
     while(0)
 
@@ -2651,6 +3165,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         barriers[slot].Transition.StateBefore  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; \
         barriers[slot].Transition.StateAfter   = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE\
                                                | D3D12_RESOURCE_STATE_COPY_SOURCE;      \
+        zstdgpu_TrackTransition(req, barriers[slot]);                                   \
     }                                                                                   \
     while(0)
 
@@ -2666,6 +3181,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
                                                | D3D12_RESOURCE_STATE_COPY_SOURCE       \
                                                | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;\
         barriers[slot].Transition.StateAfter   = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; \
+        zstdgpu_TrackTransition(req, barriers[slot]);                                   \
     }                                                                                   \
     while(0)
 
@@ -2681,6 +3197,7 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
         barriers[slot].Transition.StateAfter   = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE\
                                                | D3D12_RESOURCE_STATE_COPY_SOURCE       \
                                                | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;\
+        zstdgpu_TrackTransition(req, barriers[slot]);                                   \
     }                                                                                   \
     while(0)
 
@@ -2695,7 +3212,8 @@ ZSTDGPU_ENUM(Status) zstdgpu_SubmitAllStagesWithInternalMemory(zstdgpu_PerReques
     while(0)
 
 #ifndef zstdgpu_PushReadback
-#define zstdgpu_PushReadback(name) if (0 != req->resInfo.name##_ByteSizeInternal) cmdList->CopyResource(req->resData.gpu2Cpu.name, req->resData.gpuOnly.name)
+// A buffer has no read-back copy when read-backs are disabled (a session allocates none).
+#define zstdgpu_PushReadback(name) if (0 != req->resInfo.name##_ByteSizeInternal && NULL != req->resData.gpu2Cpu.name) cmdList->CopyResource(req->resData.gpu2Cpu.name, req->resData.gpuOnly.name)
 #endif
 
 #if ZSTDGPU_ENABLE_TIMESTAMPS == 0
@@ -2879,7 +3397,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         const uint32_t countBlocksOnly = 1;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Count Blocks]");
 
-        zstdgpu_Bind_ParseFrames_Stage0(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->partialFlags, req->partialLastFrameLimit, (0 != req->partialFlags) ? req->partialBlockSlots : ~0u);
+        zstdgpu_Bind_ParseFrames_Stage0(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->partialFlags, req->partialLastFrameLimit, (0 != req->partialFlags) ? req->partialBlockSlots : ~0u, req->frameBase, req->resumeTag);
         ZSTDGPU_KERNEL_SCOPE(ParseFrames_CountBlocks, cmdList,
             cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_ParseCompressedBlocks), 1, 1);
         );
@@ -2899,7 +3417,7 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         cmdList->ResourceBarrier(_countof(barriers), barriers);
 
         zstdgpu_Bind_ParseFrames_Stage0(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, /* countBlocksOnly */ 1u,
-                                        req->partialFlags | kzstdgpu_PartialDecodeFlag_PlanLastFrame, req->partialLastFrameLimit, req->partialBlockSlots);
+                                        req->partialFlags | kzstdgpu_PartialDecodeFlag_PlanLastFrame, req->partialLastFrameLimit, req->partialBlockSlots, req->frameBase, req->resumeTag);
         cmdList->Dispatch(1, 1, 1);
         PIXEndEvent(cmdList);
     }
@@ -2997,7 +3515,8 @@ void zstdgpu_SubmitStage0(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             // `SetPredication` condition below exactly: where readback is required the host re-sizes
             // from the counters it read back, so predication is never applied and there is nothing to
             // hide. Reporting there would be a false alarm.
-            (0 == zstdgpu_IsReadbackRequired(req, 0)) ? 1u : 0u
+            (0 == zstdgpu_IsReadbackRequired(req, 0)) ? 1u : 0u,
+            req->frameBase
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage0, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -3169,7 +3688,7 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         const uint32_t countBlocksOnly = 0;
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Parse Frames :: Collect Blocks]");
 
-        zstdgpu_Bind_ParseFrames_Stage1(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->partialFlags, req->partialLastFrameLimit, (0 != req->partialFlags) ? req->partialBlockSlots : ~0u);
+        zstdgpu_Bind_ParseFrames_Stage1(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->resInfo.CompressedData_ByteSize, countBlocksOnly, req->partialFlags, req->partialLastFrameLimit, (0 != req->partialFlags) ? req->partialBlockSlots : ~0u, req->frameBase, req->resumeTag);
         ZSTDGPU_KERNEL_SCOPE(ParseFrames, cmdList,
             cmdList->Dispatch(ZSTDGPU_TG_COUNT(req->zstdFrameCount, kzstdgpu_TgSizeX_ParseCompressedBlocks), 1, 1);
         );
@@ -3374,7 +3893,8 @@ void zstdgpu_SubmitStage1(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             arenaByteCount,
             req->zstdFrameCount,
             // Matches the stage 2 `SetPredication` condition -- see the stage 0 site for why.
-            (0 == zstdgpu_IsReadbackRequired(req, 1)) ? 1u : 0u
+            (0 == zstdgpu_IsReadbackRequired(req, 1)) ? 1u : 0u,
+            req->frameBase
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_Stage1, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -3552,7 +4072,8 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
             req->executeIndirectWorkaround,
             /* arenaByteCount,  unused for stage == 2 */0,
             req->zstdFrameCount,
-            /* reportsScratchOverflow: stage 2 performs no overflow check */0u
+            /* reportsScratchOverflow: stage 2 performs no overflow check */0u,
+            req->frameBase
         );
         ZSTDGPU_KERNEL_SCOPE(UpdateDispatchArgs_DecompressLiterals, cmdList,
             cmdList->Dispatch(1, 1, 1);
@@ -3834,7 +4355,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         PIXBeginEvent(cmdList, PIX_COLOR_DEFAULT, L"[Compute Dest Block Offsets]");
 
         zstdgpu_Bind_ComputeDestBlockOffsets(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount,
-                                             (0 != req->partialFlags) ? req->zstdFrameCount - 1u : ~0u, req->partialLastFrameLimit);
+                                             (0 != req->partialFlags) ? req->zstdFrameCount - 1u : ~0u, req->partialLastFrameLimit, req->frameBase);
         // NOTE: Slots 0 (tgOffset) and 1 (workItemCount) are set by command signature via indirect dispatch
 
         ZSTDGPU_KERNEL_SCOPE(ComputeDestBlockOffsets, cmdList,
@@ -3871,7 +4392,7 @@ void zstdgpu_SubmitStage2(zstdgpu_PerRequestContext req, ID3D12GraphicsCommandLi
         setResourceUavSync(barriers, 2, req->resData.gpuOnly.FrameStatus);
         cmdList->ResourceBarrier(_countof(barriers), barriers);
 
-        zstdgpu_Bind_WriteFrameResume(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->partialFlags, req->partialLastFrameLimit);
+        zstdgpu_Bind_WriteFrameResume(cmdList, req->srts, req->resData.gpuOnly, req->zstdFrameCount, req->partialFlags, req->partialLastFrameLimit, req->frameBase, req->resumeTag, req->resumeTagNext);
         ZSTDGPU_KERNEL_SCOPE(WriteFrameResume, cmdList,
             cmdList->Dispatch(1, 1, 1);
         );

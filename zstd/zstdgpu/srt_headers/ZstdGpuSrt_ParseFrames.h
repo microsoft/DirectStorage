@@ -27,11 +27,13 @@ typedef struct zstdgpu_ParseFrames_Consts
     uint32_t    partialFlags;
     uint32_t    lastFrameLimit;
     uint32_t    blockSlotCap;
+    uint32_t    frameBase;
+    uint32_t    resumeTag;
 } zstdgpu_ParseFrames_Consts;
 
 ConstantBuffer<zstdgpu_ParseFrames_Consts> ZstdConstants_ParseFrames : register(b0);
 
-#define ZSTDGPU_SRT_RS_ParseFrames ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames ", RootConstants(b0, num32BitConstants=6)"
+#define ZSTDGPU_SRT_RS_ParseFrames ZSTDGPU_SRT_RS_BIND_GROUP_ParseFrames ", RootConstants(b0, num32BitConstants=8)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt)
 {
@@ -43,6 +45,8 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_ParseFrames_SRT) srt)
     srt.partialFlags                = ZstdConstants_ParseFrames.partialFlags;
     srt.lastFrameLimit              = ZstdConstants_ParseFrames.lastFrameLimit;
     srt.blockSlotCap                = ZstdConstants_ParseFrames.blockSlotCap;
+    srt.frameBase                   = ZstdConstants_ParseFrames.frameBase;
+    srt.resumeTag                   = ZstdConstants_ParseFrames.resumeTag;
 }
 
 #else
@@ -53,7 +57,9 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseFrames_SRT &srt, const zstdgpu_Resourc
                              uint32_t     countBlocksOnly,
                              uint32_t     partialFlags,
                              uint32_t     lastFrameLimit,
-                             uint32_t     blockSlotCap)
+                             uint32_t     blockSlotCap,
+                             uint32_t     frameBase,
+                             uint32_t     resumeTag)
 {
     zstdgpu_Srt_FillBindGroup_ParseFrames(srt, cpuRes);
     srt.frameCount                  = frameCount;
@@ -62,6 +68,8 @@ static void zstdgpu_Srt_Fill(zstdgpu_ParseFrames_SRT &srt, const zstdgpu_Resourc
     srt.partialFlags                = partialFlags;
     srt.lastFrameLimit              = lastFrameLimit;
     srt.blockSlotCap                = blockSlotCap;
+    srt.frameBase                   = frameBase;
+    srt.resumeTag                   = resumeTag;
 }
 
 #endif

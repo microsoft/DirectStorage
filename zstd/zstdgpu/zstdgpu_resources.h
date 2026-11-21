@@ -185,6 +185,9 @@ typedef struct zstdgpu_ResourceInfo
     // The number of sequence streams the FSE arena holds tables for (0 when the arena is unused).
     uint32_t FseArena_StreamCount;
 
+    // Non-zero when no read-back buffers are allocated at all (a session never reads GPU results back).
+    uint32_t gpu2CpuDisabled;
+
     // declare byte offsets
     #define ZSTDGPU_BUFFER(type, name) uint64_t name##_gpuOnlyByteOffset;
         ZSTDGPU_ALL_BUFFERS_LIST()
@@ -264,6 +267,8 @@ typedef struct zstdgpu_ResourceDataCpu
 
 static void zstdgpu_ResourceInfo_InitZero(zstdgpu_ResourceInfo *outInfo)
 {
+    outInfo->gpu2CpuDisabled = 0;
+
     #define ZSTDGPU_BUFFER(type, name)  \
         outInfo->name##_Count = 0;      \
         outInfo->name##_ByteSize = 0;   \
@@ -506,11 +511,12 @@ static void zstdgpu_ResourceInfo_Stage_2_InitOffsetCpu2Gpu(zstdgpu_ResourceInfo 
 
 // Byte size of one read-back buffer; zero when it is skipped (only Counters is kept when read-backs are disabled).
 #if ZSTDGPU_ENABLE_GPU_RESULTS_READBACK
-#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name) ((info)->name##_ByteSizeInternal)
+#define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name) ((0 != (info)->gpu2CpuDisabled) ? 0u : (info)->name##_ByteSizeInternal)
 #else
 #define ZSTDGPU_GPU2CPU_BYTE_SIZE(info, name)                                                            \
-    (offsetof(zstdgpu_ResourceInfo, name##_gpu2CpuByteOffset) ==                                         \
-     offsetof(zstdgpu_ResourceInfo, Counters_gpu2CpuByteOffset) ? (info)->name##_ByteSizeInternal : 0u)
+    ((0 == (info)->gpu2CpuDisabled &&                                                                    \
+      offsetof(zstdgpu_ResourceInfo, name##_gpu2CpuByteOffset) ==                                        \
+      offsetof(zstdgpu_ResourceInfo, Counters_gpu2CpuByteOffset)) ? (info)->name##_ByteSizeInternal : 0u)
 #endif
 
 // A skipped read-back buffer takes no memory.

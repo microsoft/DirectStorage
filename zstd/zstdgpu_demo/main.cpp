@@ -825,7 +825,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
 
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* partialFlags, lastFrameLimit, blockSlotCap: the CPU reference always decodes whole frames */ 0, 0, ~0u);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 1 - means we are going to count blocks only */ 1, /* partialFlags, lastFrameLimit, blockSlotCap: the CPU reference always decodes whole frames */ 0, 0, ~0u, /* frameBase, resumeTag */ 0, 1);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -888,7 +888,7 @@ static void zstdgpu_Validate_GpuDecompressOnCpu(zstdgpu_ResourceDataCpu & zstdCp
     zstdCpu.FrameStatus = cpuFrameStatusScratch;
     {
         zstdgpu_ParseFrames_SRT srt = {};
-        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* partialFlags, lastFrameLimit, blockSlotCap: the CPU reference always decodes whole frames */ 0, 0, ~0u);
+        zstdgpu_Srt_Fill(srt, zstdCpu, zstdFrameCount, zstdInfo.CompressedData_ByteSize, /* countBlocksOnly, 0 - means we are going to output per-block information */ 0, /* partialFlags, lastFrameLimit, blockSlotCap: the CPU reference always decodes whole frames */ 0, 0, ~0u, /* frameBase, resumeTag */ 0, 1);
 
         for (uint32_t i = 0; i < zstdFrameCount; ++i)
         {
@@ -1173,6 +1173,12 @@ struct DemoCtx
     d3d12aid_MappedBuffer       zstdUnCompressedFramesRefs;
     d3d12aid_MappedBuffer       zstdFrameStatus;
     d3d12aid_MappedBuffer       zstdResumeRecord;
+    zstdgpu_SessionContext      session;
+    d3d12aid_MappedBuffer       sessionInput;
+    d3d12aid_MappedBuffer       sessionInputRefs;
+    ID3D12Heap                 *sessionDefaultHeap;
+    ID3D12Heap                 *sessionUploadHeap;
+    ID3D12DescriptorHeap       *sessionDescriptorHeap;
     ID3D12Heap                 *readbackHeap[3];
     ID3D12Heap                 *uploadHeap[3];
     ID3D12Heap                 *defaultHeap[3];
@@ -1197,6 +1203,19 @@ static void demoCleanup(DemoCtx *ctx)
         zstdgpu_DestroyPerRequestContext(&memory, NULL, ctx->perRequestContext);
         free(memory);
     }
+    if (NULL != ctx->session)
+    {
+        void *memory = NULL;
+        zstdgpu_DestroySessionContext(&memory, NULL, ctx->session);
+        free(memory);
+    }
+    D3D12AID_SAFE_RELEASE(ctx->sessionDescriptorHeap);
+    D3D12AID_SAFE_RELEASE(ctx->sessionUploadHeap);
+    D3D12AID_SAFE_RELEASE(ctx->sessionDefaultHeap);
+    if (NULL != ctx->sessionInput.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->sessionInput);
+    if (NULL != ctx->sessionInputRefs.bufGpu)
+        d3d12aid_MappedBuffer_Release(&ctx->sessionInputRefs);
     if (NULL != ctx->persistentContext)
     {
         void *memory = NULL;
@@ -1726,7 +1745,7 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--d3d-gbv                 [Optional] Enables D3D12 GPU-Based Validation (implies --d3d-dbg).\n");
                 debugPrint(L"\t--d3d-gfx                 [Optional] Enables D3D12 Graphics queue (DIRECT), otherwise COMPUTE (by default).\n");
                 debugPrint(L"\t--run-cnt <count>         [Optional] The number of times to repeat the experiment.\n");
-                debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them.\n");
+                debugPrint(L"\t--ext-mem                 [Optional] Enables external heaps so the library doesn't create them. With --ssm, --seq-cnt or --out-kb, decodes through a session (zstdgpu_CreateSessionContext): one zstdgpu_SubmitAllStagesWithExternalMemory call per batch, which plans and records the batch's dispatches itself.\n");
                 debugPrint(L"\t--blk-cnt                 [Optional] Uses SetupFrameInfoConstants path (user-specified block counts from CPU pre-scan).\n");
     debugPrint(L"\t--force-est-blk           [Optional, diagnostic] Forces '--ssm' to use ESTIMATED block counts instead of the exact\n");
     debugPrint(L"\t                                     pre-scan. The estimate is unsound, so the decode is expected to be WRONG; the\n");
@@ -1741,8 +1760,8 @@ static int demoRun(void *demoCtx)
                 debugPrint(L"\t--out-csv <path to .csv>  [Optional] Outputs performance information into CSV file.\n");
                 debugPrint(L"\t--ssm                     [Optional] Forces single-submission mode. Uses exact block counts from the cheap block-header pre-scan plus a provable literal/sequence scratch bound derived from the decompressed size.\n");
                 debugPrint(L"\t--warmup                  [Optional] Runs a fixed warmup period (~10s) before measuring; warmup runs are excluded from the [PERF] stdout statistics.\n");
-                debugPrint(L"\t--out-kb <KB>             [Optional] Partial decode: each request produces at most <KB> KiB of output (plus the block that crosses the limit), resuming a frame across requests (zstdgpu_SetupPartialDecode). Requests are planned from frame sizes only. With --chk-gpu, every frame is compared with the reference after its batch's last request.\n");
-                debugPrint(L"\t--out-slots <count>       [Optional] With --out-kb, the block slots of every request (default: zstdgpu_PartialDecodeBlockSlotCount). Content with more blocks than that per request reports BlockCountExceeded.\n");
+                debugPrint(L"\t--out-kb <KB>             [Optional] Partial decode: each request produces at most <KB> KiB of output (plus the block that crosses the limit), resuming a frame across requests (zstdgpu_SetupPartialDecode; with --ext-mem, the session's output budget per dispatch). Requests are planned from frame sizes only. With --chk-gpu, every frame is compared with the reference after its batch's last request.\n");
+                debugPrint(L"\t--out-slots <count>       [Optional] With --out-kb, the block slots of every request (default: zstdgpu_PartialDecodeBlockSlotCount; with a session, roughly the slots of each dispatch). Content with more blocks than that per request reports BlockCountExceeded.\n");
                 if (badArg)
                 {
                     ctx->retv = 1;
@@ -1934,8 +1953,15 @@ static int demoRun(void *demoCtx)
     zstdgpu_OffsetAndSize *batchOutRefs   = (zstdgpu_OffsetAndSize *)malloc(sizeof(zstdgpu_OffsetAndSize) * frameCapacity);
     zstdgpu_FrameInfo     *batchFrameInfo = (zstdgpu_FrameInfo *)malloc(sizeof(zstdgpu_FrameInfo) * frameCapacity);
 
-    // --out-kb: every batch is decoded as a series of partial-decode requests (see the batch loop).
-    const bool partial = 0 != outBudgetBytes;
+    /*
+     *  --ext-mem with single submission (--ssm, --seq-cnt or --out-kb) decodes through a session
+     *  (zstdgpu_CreateSessionContext): one zstdgpu_SubmitAllStagesWithExternalMemory call per batch, which splits the
+     *  batch into dispatches of the session's output budget itself.
+     */
+    const bool useSession = extMem && !perStage && (ssm || seqCnt || 0 != outBudgetBytes);
+
+    // --out-kb without a session: every batch is decoded as a series of partial-decode requests (see the batch loop).
+    const bool partial = 0 != outBudgetBytes && !useSession;
 
     debugPrint(L"[INFO] Working set: frames [%u..%u] (%u frames), %u batch(es) of up to %u frames each.\n",
                workingLo, workingHi, workingFrames, numBatches, effBatchFrames);
@@ -1964,7 +1990,8 @@ static int demoRun(void *demoCtx)
 
     #define ZSTDGPU_TS_LIST()   \
         ZSTDGPU_TS(Readback0)   \
-        ZSTDGPU_TS(Readback1)
+        ZSTDGPU_TS(Readback1)   \
+        ZSTDGPU_TS(Session)
 
     d3d12aid_Timestamps_Create(&timestamps, device, 0
         /** NOTE(pamartis): generate timestamp counting using macro list */
@@ -2107,6 +2134,72 @@ static int demoRun(void *demoCtx)
         d3d12aid_MappedBuffer_Create(&zstdResumeRecord, device, 1, sizeof(uint32_t) * kzstdgpu_ResumeRecordDwordCount, D3D12_HEAP_TYPE_READBACK);
     }
 
+    if (useSession)
+    {
+        // Without --out-kb a dispatch covers the largest batch, so every batch takes one dispatch.
+        const uint32_t sessionBudget = (0 != outBudgetBytes) ? outBudgetBytes : zstdgpu_MinU32(maxBatchDecompBytes, kzstdgpu_MaxRequestUncompressedByteSize);
+
+        // The block-slot allowance: --out-slots, or -- when the exact counts are known (the demo's host pre-scan, a test
+        // convenience) -- enough slots for every block of the densest batch. Otherwise the library default.
+        uint64_t slotTarget = outSlots;
+        if (0 == slotTarget && blkCnt)
+        {
+            for (uint32_t b = 0; b < numBatches; ++b)
+            {
+                const uint32_t bLo = workingLo + b * effBatchFrames;
+                uint32_t       bHi = bLo + effBatchFrames - 1;
+                if (bHi > workingHi) bHi = workingHi;
+                const uint32_t byteStart = zstdInFrameRefs[bLo].offs;
+                const uint32_t byteEnd   = zstdInFrameRefs[bHi].offs + zstdInFrameRefs[bHi].size;
+                zstdgpu_CountFramesAndBlocksInfo batchInfo;
+                zstdgpu_CountFramesAndBlocks(&batchInfo, (char *)zstdData + byteStart, zstdgpu_AlignUp(byteEnd - byteStart, 4), byteEnd - byteStart);
+                slotTarget = (batchInfo.rawBlockCount > slotTarget) ? batchInfo.rawBlockCount : slotTarget;
+                slotTarget = (batchInfo.rleBlockCount > slotTarget) ? batchInfo.rleBlockCount : slotTarget;
+                slotTarget = (batchInfo.cmpBlockCount > slotTarget) ? batchInfo.cmpBlockCount : slotTarget;
+            }
+        }
+        uint32_t slotsPerMiB = 0;
+        if (0 != slotTarget)
+        {
+            const uint64_t perMiB = (slotTarget * (1u << 20) + sessionBudget - 1u) / sessionBudget;
+            slotsPerMiB = (perMiB > 0xffffffffull) ? 0xffffffffu : (uint32_t)perMiB;
+        }
+
+        static const uint32_t kSessionBatchesInFlight = 2;
+        uint64_t sessionDefaultBytes = 0, sessionUploadBytes = 0;
+        uint32_t sessionDescriptors = 0, sessionMemoryBytes = 0;
+        if (ZSTDGPU_ENUM_CONST(StatusSuccess) != zstdgpu_GetSessionRequirement(&sessionDefaultBytes, &sessionUploadBytes, &sessionDescriptors, &sessionMemoryBytes,
+                                                                             persistentContext, sessionBudget, maxBatchFrames, slotsPerMiB, kSessionBatchesInFlight))
+        {
+            debugPrint(L"[ERROR] zstdgpu_GetSessionRequirement failed (budget %u bytes, %u frames per batch).\n", sessionBudget, maxBatchFrames);
+            ctx->retv = 1;
+            return 0;
+        }
+        ctx->sessionDefaultHeap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, sessionDefaultBytes, 0, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+        ctx->sessionUploadHeap = d3d12aid_Heap_Create_WithHeapTypeAndFlags(device, sessionUploadBytes, 0, D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+        ctx->sessionDescriptorHeap = d3d12aid_DescriptorHeap_Create(device, sessionDescriptors, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+        void *sessionMemory = malloc(sessionMemoryBytes);
+        const ZSTDGPU_ENUM(Status) sessionStatus = zstdgpu_CreateSessionContext(&ctx->session, persistentContext, cmdQueue.cmdLists[0],
+                                                                               ctx->sessionDefaultHeap, 0, ctx->sessionUploadHeap, 0,
+                                                                               ctx->sessionDescriptorHeap, 0,
+                                                                               sessionBudget, maxBatchFrames, slotsPerMiB, kSessionBatchesInFlight,
+                                                                               sessionMemory, sessionMemoryBytes);
+        if (ZSTDGPU_ENUM_CONST(StatusSuccess) != sessionStatus)
+        {
+            free(sessionMemory);
+            ctx->session = NULL;
+            debugPrint(L"[ERROR] zstdgpu_CreateSessionContext failed (status %u).\n", (uint32_t)sessionStatus);
+            ctx->retv = 1;
+            return 0;
+        }
+        debugPrint(L"[INFO] Session: %u-byte output budget per dispatch, %u block slots per MiB, %llu bytes of scratch.\n",
+                   sessionBudget, slotsPerMiB, sessionDefaultBytes);
+
+        // One spare dword so a batch that fills the buffer exactly keeps the append cursor resettable (see maxRefsSizeInBytes).
+        d3d12aid_MappedBuffer_Create(&ctx->sessionInput, device, 1u, maxBatchSpanAligned + 4u, D3D12_HEAP_TYPE_UPLOAD);
+        d3d12aid_MappedBuffer_Create(&ctx->sessionInputRefs, device, 1u, maxRefsSizeInBytes, D3D12_HEAP_TYPE_UPLOAD);
+    }
+
     uint64_t readbackHeapSize[3] = { 0, 0, 0 };
     uint64_t uploadHeapSize[3] = {0, 0, 0 };
     uint64_t defaultHeapSize[3] = {0, 0, 0};
@@ -2128,7 +2221,8 @@ static int demoRun(void *demoCtx)
     uint32_t       warmupSweeps      = 0;
     uint32_t       dispatchIdx       = 0;
     // GPU latency/bandwidth come from zstdgpu timestamps; without them they are reported as n/a, not as zero.
-    const bool     timestampsEnabled = 0 != zstdgpu_AreTimestampsEnabled();
+    // A session is timed by the demo's own timestamps, which do not depend on the library's.
+    const bool     timestampsEnabled = useSession || 0 != zstdgpu_AreTimestampsEnabled();
     if (!timestampsEnabled)
     {
         debugPrint(L"[WARN] GPU timestamps are unavailable (zstdgpu built with ZSTDGPU_ENABLE_TIMESTAMPS=0). Latency and bandwidth are reported as n/a.\n");
@@ -2264,6 +2358,14 @@ static int demoRun(void *demoCtx)
 
             d3d12aid_MappedBuffer_Append(&zstdUnCompressedFramesRefs, 0, (void *)(batchOutRefs + reqLo), sizeof(zstdgpu_OffsetAndSize) * reqCount);
 
+            if (useSession && fbInfo.frameCount > maxBatchFrames)
+            {
+                debugPrint(L"[ERROR] Batch %u has %u frames; the session holds at most %u.\n", b, fbInfo.frameCount, maxBatchFrames);
+                ctx->retv = 1;
+                return 0;
+            }
+            if (!useSession)
+            {
             defaultUploadCallbackUserData[0] = (void *)stagedPtr;
             defaultUploadCallbackUserData[1] = (void *)(batchInRefs + reqLo);
             zstdgpu_SetupInputsAsFramesInCpuMemory(&stageCount, perRequestContext, reqCount, batchSpanAl, zstdgpu_DefaultUploadCallback, defaultUploadCallbackUserData);
@@ -2301,6 +2403,7 @@ static int demoRun(void *demoCtx)
                 }
             }
             zstdgpu_SetupOutputs(perRequestContext, zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, reqCount, zstdFrameStatus.bufGpu);
+            }
 
             perBatchFrames[b] = fbInfo.frameCount;
             perBatchBytes[b]  = zstdUnCompressedFramesMemorySizeInBytes;
@@ -2324,6 +2427,7 @@ static int demoRun(void *demoCtx)
             #define ZSTDGPU_TS(name) uint32_t name##_Stamp = ~0u;
                 ZSTDGPU_TS_LIST()
             #undef ZSTDGPU_TS
+            uint64_t sessionBatchId = 0;
 
 
             ID3D12GraphicsCommandList *cmdList = d3d12aid_CmdQueue_StartCmdList(&cmdQueue, 0 /** cmdListId */);
@@ -2334,7 +2438,7 @@ static int demoRun(void *demoCtx)
                 // they are re-homed each time: transition the destination back to
                 // COPY_DEST first (the previous dispatch's EndTransfer left it in the
                 // shader-read state), copy, then transition to the shader-read state.
-                D3D12_RESOURCE_BARRIER barriers[4];
+                D3D12_RESOURCE_BARRIER barriers[5];
                 uint32_t bufferCount = 0;
 
                 if (testSourceInGpuMemory > 0 && dispatchIdx == 0)
@@ -2353,6 +2457,24 @@ static int demoRun(void *demoCtx)
                 }
                 d3d12aid_MappedBuffer_Transfer(cmdList, &zstdUnCompressedFramesRefs, 0);
                 d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &zstdUnCompressedFramesRefs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                if (useSession)
+                {
+                    // A session reads its inputs from GPU memory; upload this batch's compressed bytes and frame refs.
+                    if (dispatchIdx > 0)
+                    {
+                        D3D12_RESOURCE_BARRIER toCopyDest[2];
+                        d3d12aid_Resource_TransitionBarrier(&toCopyDest[0], ctx->sessionInput.bufGpu, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                        d3d12aid_Resource_TransitionBarrier(&toCopyDest[1], ctx->sessionInputRefs.bufGpu, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                        cmdList->ResourceBarrier(2u, toCopyDest);
+                    }
+                    d3d12aid_MappedBuffer_Append(&ctx->sessionInput, 0, stagedPtr, batchSpanAl);
+                    d3d12aid_MappedBuffer_Append(&ctx->sessionInputRefs, 0, batchInRefs, sizeof(zstdgpu_OffsetAndSize) * fbInfo.frameCount);
+                    d3d12aid_MappedBuffer_Transfer(cmdList, &ctx->sessionInput, 0);
+                    d3d12aid_MappedBuffer_Transfer(cmdList, &ctx->sessionInputRefs, 0);
+                    d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &ctx->sessionInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    d3d12aid_MappedBuffer_EndTransfer(&barriers[bufferCount ++], &ctx->sessionInputRefs, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
 
                 cmdList->ResourceBarrier(bufferCount, barriers);
             }
@@ -2381,34 +2503,27 @@ static int demoRun(void *demoCtx)
                 D3D12_HEAP_TYPE defaultType = D3D12_HEAP_TYPE_DEFAULT;
                 D3D12_HEAP_TYPE uploadType = D3D12_HEAP_TYPE_UPLOAD;
                 D3D12_HEAP_TYPE readbackType = D3D12_HEAP_TYPE_READBACK;
-                if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext) && !perStage)
+                if (useSession)
                 {
-                    if (extMem /** a scenario with supplying external memory */)
+                    ZSTDGPU_ENUM(Status) submitStatus = ZSTDGPU_ENUM_CONST(StatusSuccess);
+                    d3d12aid_Timestamp_PushScope(Session_Stamp, timestamps, cmdList,
+                        submitStatus = zstdgpu_SubmitAllStagesWithExternalMemory(&sessionBatchId, ctx->session,
+                            ctx->sessionInput.bufGpu, batchSpanAl, ctx->sessionInputRefs.bufGpu, fbInfo.frameCount,
+                            zstdUnCompressedFramesMemory.bufGpu, zstdUnCompressedFramesMemorySizeInBytes, zstdUnCompressedFramesRefs.bufGpu, batchOutRefs,
+                            zstdFrameStatus.bufGpu);
+                    );
+                    if (ZSTDGPU_ENUM_CONST(StatusSuccess) != submitStatus)
                     {
-                        uint64_t defaultHeapSizeReq = 0;
-                        uint64_t uploadHeapSizeReq = 0;
-                        uint64_t readbackHeapSizeReq = 0;
-                        uint32_t descriptorCountReq = 0;
-
-                        zstdgpu_GetAllStageGpuMemoryRequirement(&defaultHeapSizeReq, &uploadHeapSizeReq, &readbackHeapSizeReq, &descriptorCountReq, perRequestContext);
-
-                        RECREATE_HEAP(default, 0)
-                        RECREATE_HEAP(upload, 0)
-                        RECREATE_HEAP(readback, 0)
-
-                        if (descriptorCountReq > descriptorCount[0])
-                        {
-                            D3D12AID_SAFE_RELEASE(descriptorHeap[0]);
-                            descriptorHeap[0] =  d3d12aid_DescriptorHeap_Create(device, descriptorCountReq, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-                            descriptorCount[0] = descriptorCountReq;
-                        }
-
-                        zstdgpu_SubmitAllStagesWithExternalMemory(perRequestContext, cmdList, defaultHeap[0], 0, uploadHeap[0], 0, readbackHeap[0], 0, descriptorHeap[0], 0);
+                        debugPrint(L"[FAIL] zstdgpu_SubmitAllStagesWithExternalMemory failed (status %u, batch %u).\n", (uint32_t)submitStatus, b);
+                        ctx->retv = 1;
+                        return 0;
                     }
-                    else
-                    {
-                        zstdgpu_SubmitAllStagesWithInternalMemory(perRequestContext, cmdList);
-                    }
+                }
+                else if (0 == zstdgpu_IsAnyStageReadbackRequired(perRequestContext) && !perStage)
+                {
+                    // Single submission into external memory goes through the session above.
+                    ZSTDGPU_ASSERT(!extMem);
+                    zstdgpu_SubmitAllStagesWithInternalMemory(perRequestContext, cmdList);
                 }
                 else
                 {
@@ -2471,14 +2586,21 @@ static int demoRun(void *demoCtx)
                     d3d12aid_Resource_TransitionBarrier(&backToUav, zstdUnCompressedFramesMemory.bufGpu, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     cmdList->ResourceBarrier(1u, &backToUav);
                 }
-                zstdgpu_ReadbackTimestamps(perRequestContext, cmdList);
-                if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation && !partial)
+                if (!useSession)
+                {
+                    zstdgpu_ReadbackTimestamps(perRequestContext, cmdList);
+                }
+                if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation && !partial && !useSession)
                 {
                     zstdgpu_ReadbackGpuResults(perRequestContext, cmdList);
                 }
                 d3d12aid_Timestamps_AdvanceFrame(&timestamps, cmdList);
                 d3d12aid_CmdQueue_SubmitCmdList(&cmdQueue, 0);
                 d3d12aid_CmdQueue_CpuWaitForGpuIdle(&cmdQueue);
+                if (useSession)
+                {
+                    zstdgpu_RetireSessionBatches(ctx->session, sessionBatchId);
+                }
 
                 if (sweep == 0)
                 {
@@ -2529,8 +2651,8 @@ static int demoRun(void *demoCtx)
                 if ((simGpu || chkGpu) && sweep == 0 && !skipRefValidation && (!partial || partialLastForBatch))
                 {
                     zstdgpu_ResourceDataCpu gpuData;
-                    const uint32_t gpuDataAvailable = partial ? 0u : zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
-                    if (0 == gpuDataAvailable && 0 == b && !partial)
+                    const uint32_t gpuDataAvailable = (partial || useSession) ? 0u : zstdgpu_RetrieveGpuResults(&gpuData, perRequestContext);
+                    if (0 == gpuDataAvailable && 0 == b && !partial && !useSession)
                     {
                         debugPrint(L"[WARN] GPU intermediate results are unavailable (zstdgpu built with ZSTDGPU_ENABLE_GPU_RESULTS_READBACK=0). Skipping per-stage checks; only decompressed frames are validated.\n");
                     }
@@ -2756,65 +2878,77 @@ static int demoRun(void *demoCtx)
                         fwprintf_s((file), L"n/a,");                                    \
                     }
 
-                // Write the CSV header once, alongside the first dispatch (CSV only).
-                if (NULL != csvFile && 0 == dispatchIdx)
+                if (useSession)
                 {
-                    fwprintf_s(csvFile, L"RunIdx,");
+                    // A session is timed as a whole by the demo's own timestamps; its dispatches are not split by stage.
+                    if (NULL != csvFile && 0 == dispatchIdx)
+                        fwprintf_s(csvFile, L"RunIdx,Session (us),Bandwidth (GB/s)\n");
+                    clksAll = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Session_Stamp);
+                    if (NULL != csvFile)
+                        fwprintf_s(csvFile, L"%u,%llu,", dispatchIdx, (freqGpuClocks != 0) ? (clksAll * 1000000) / freqGpuClocks : 0ull);
+                }
+                else
+                {
+                    // Write the CSV header once, alongside the first dispatch (CSV only).
+                    if (NULL != csvFile && 0 == dispatchIdx)
+                    {
+                        fwprintf_s(csvFile, L"RunIdx,");
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 0", timestampScopeCount, timestampScopeNames);
+                        if (Readback0_Stamp != ~0u)
+                        {
+                            WRITE_CSV_HEADER(csvFile, L"Readback 0", 0, timestampScopeNames);
+                        }
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 1", timestampScopeCount, timestampScopeNames);
+                        if (Readback1_Stamp != ~0u)
+                        {
+                            WRITE_CSV_HEADER(csvFile, L"Readback 1", 0, timestampScopeNames);
+                        }
+
+                        timestampScopeCount = _countof(timestampScopeClocks);
+                        zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
+                        WRITE_CSV_HEADER(csvFile, L"Stage 2", timestampScopeCount, timestampScopeNames);
+                        fwprintf_s(csvFile, L"Bandwidth (GB/s)\n");
+                    }
+
+                    // Always retrieve the per-stage GPU timestamps and accumulate the
+                    // total marker time. The CSV columns are written only when a CSV is
+                    // active; the accumulated clocks feed the aggregate stdout metrics.
+                    if (NULL != csvFile)
+                        fwprintf_s(csvFile, L"%u,", dispatchIdx);
 
                     timestampScopeCount = _countof(timestampScopeClocks);
-                    zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
-                    WRITE_CSV_HEADER(csvFile, L"Stage 0", timestampScopeCount, timestampScopeNames);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
+                    clksAll = clks;
+                    WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                     if (Readback0_Stamp != ~0u)
                     {
-                        WRITE_CSV_HEADER(csvFile, L"Readback 0", 0, timestampScopeNames);
+                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback0_Stamp);
+                        clksAll += clks;
+                        WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
                     }
 
                     timestampScopeCount = _countof(timestampScopeClocks);
-                    zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
-                    WRITE_CSV_HEADER(csvFile, L"Stage 1", timestampScopeCount, timestampScopeNames);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
+                    clksAll += clks;
+                    WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                     if (Readback1_Stamp != ~0u)
                     {
-                        WRITE_CSV_HEADER(csvFile, L"Readback 1", 0, timestampScopeNames);
+                        clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback1_Stamp);
+                        clksAll += clks;
+                        WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
                     }
 
                     timestampScopeCount = _countof(timestampScopeClocks);
-                    zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
-                    WRITE_CSV_HEADER(csvFile, L"Stage 2", timestampScopeCount, timestampScopeNames);
-                    fwprintf_s(csvFile, L"Bandwidth (GB/s)\n");
-                }
-
-                // Always retrieve the per-stage GPU timestamps and accumulate the
-                // total marker time. The CSV columns are written only when a CSV is
-                // active; the accumulated clocks feed the aggregate stdout metrics.
-                if (NULL != csvFile)
-                    fwprintf_s(csvFile, L"%u,", dispatchIdx);
-
-                timestampScopeCount = _countof(timestampScopeClocks);
-                clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 0);
-                clksAll = clks;
-                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
-                if (Readback0_Stamp != ~0u)
-                {
-                    clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback0_Stamp);
+                    clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
                     clksAll += clks;
-                    WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
+                    WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                 }
-
-                timestampScopeCount = _countof(timestampScopeClocks);
-                clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 1);
-                clksAll += clks;
-                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
-                if (Readback1_Stamp != ~0u)
-                {
-                    clks = d3d12aid_Timestamps_GetScopeDelta(&timestamps, kBackBufferIndex, Readback1_Stamp);
-                    clksAll += clks;
-                    WRITE_CSV_DATA(csvFile, clks, 0, timestampScopeClocks);
-                }
-
-                timestampScopeCount = _countof(timestampScopeClocks);
-                clks = zstdgpu_RetrieveTimestamps(timestampScopeNames, timestampScopeClocks, &timestampScopeCount, perRequestContext, 2);
-                clksAll += clks;
-                WRITE_CSV_STAGE(csvFile, clks, timestampScopeCount, timestampScopeClocks);
                 #undef WRITE_CSV_STAGE
                 #undef WRITE_CSV_DATA
                 #undef WRITE_CSV_HEADER

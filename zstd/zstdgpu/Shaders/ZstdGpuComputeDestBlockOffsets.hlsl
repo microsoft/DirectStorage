@@ -61,5 +61,5 @@ void main(uint2 groupId : SV_GroupId, uint threadId : SV_GroupThreadId)
         return;
     }
 
-    srt.inoutBlockDestOffs[blockIdx] = srt.inUnCompressedFramesRefs[frameIdx].offs + frameRelativeStart;
+    srt.inoutBlockDestOffs[blockIdx] = srt.inUnCompressedFramesRefs[srt.frameBase + frameIdx].offs + frameRelativeStart;
 }

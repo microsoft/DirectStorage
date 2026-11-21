@@ -41,6 +41,8 @@ typedef struct zstdgpu_ParseFrames_SRT
     uint32_t                                                partialFlags;
     uint32_t                                                lastFrameLimit;
     uint32_t                                                blockSlotCap;
+    uint32_t                                                frameBase;
+    uint32_t                                                resumeTag;
 } zstdgpu_ParseFrames_SRT;
 
 typedef struct zstdgpu_Memset_SRT
@@ -139,6 +141,7 @@ typedef struct zstdgpu_UpdateDispatchArgs_SRT
     uint32_t                                                arenaByteCount;
     uint32_t                                                frameCount;
     uint32_t                                                reportsScratchOverflow;
+    uint32_t                                                frameBase;
 } zstdgpu_UpdateDispatchArgs_SRT;
 
 typedef struct zstdgpu_DecompressHuffmanWeights_SRT
@@ -240,6 +243,7 @@ typedef struct zstdgpu_ComputeDestBlockOffsets_SRT
     uint32_t                                                frameCount;
     uint32_t                                                partialFrameIndex;
     uint32_t                                                lastFrameLimit;
+    uint32_t                                                frameBase;
 } zstdgpu_ComputeDestBlockOffsets_SRT;
 
 typedef struct zstdgpu_WriteFrameResume_SRT
@@ -263,6 +267,9 @@ typedef struct zstdgpu_WriteFrameResume_SRT
     uint32_t                                                frameCount;
     uint32_t                                                partialFlags;
     uint32_t                                                lastFrameLimit;
+    uint32_t                                                frameBase;
+    uint32_t                                                resumeTag;
+    uint32_t                                                resumeTagNext;
 } zstdgpu_WriteFrameResume_SRT;
 
 typedef struct zstdgpu_ExecuteSequences_SRT

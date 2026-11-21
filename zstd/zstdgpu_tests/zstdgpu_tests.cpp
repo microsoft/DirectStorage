@@ -624,6 +624,50 @@ public:
         return bytes;
     }
 
+    void Upload(ID3D12Resource* buffer, uint8_t* bytes, size_t size)
+    {
+        CopyToResource(buffer, bytes, size);
+    }
+
+    ID3D12GraphicsCommandList* CommandList()
+    {
+        return m_commandList.get();
+    }
+
+    void OpenCommandList()
+    {
+        m_commandList->Reset(m_commandAllocator.get(), nullptr);
+    }
+
+    void ExecuteAndWait()
+    {
+        m_commandList->Close();
+        ExecuteCommandListsSynchronously(m_commandList.get());
+    }
+
+    com_ptr<ID3D12Heap> NewHeap(uint64_t size, D3D12_HEAP_TYPE type)
+    {
+        D3D12_HEAP_DESC desc = {};
+        desc.SizeInBytes = size;
+        desc.Properties.Type = type;
+        desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        com_ptr<ID3D12Heap> heap;
+        check_hresult(m_device->CreateHeap(&desc, IID_PPV_ARGS(heap.put())));
+        return heap;
+    }
+
+    com_ptr<ID3D12DescriptorHeap> NewShaderVisibleHeap(uint32_t count)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        desc.NumDescriptors = count;
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        com_ptr<ID3D12DescriptorHeap> heap;
+        check_hresult(m_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(heap.put())));
+        return heap;
+    }
+
     // Arguments of zstdgpu_SetupPartialDecode.
     struct PartialArgs
     {
@@ -1042,5 +1086,290 @@ TEST_F(ZstdDecompressionTests, BlockConstantsWithoutFrameConstantsDecode)
     void* memory = nullptr;
     uint32_t memorySize = 0;
     EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPerRequestContext(&memory, &memorySize, req));
+    EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+}
+
+// A session (zstdgpu_CreateSessionContext) over one command list, with its memory in test-owned heaps.
+class SessionTest
+{
+public:
+    // One batch's caller-owned buffers, uploaded before any command list is opened for the session.
+    struct Batch
+    {
+        com_ptr<ID3D12Resource> input;
+        com_ptr<ID3D12Resource> inputRefs;
+        com_ptr<ID3D12Resource> output;
+        com_ptr<ID3D12Resource> outputRefs;
+        com_ptr<ID3D12Resource> status;
+        std::vector<uint8_t> data;
+        OffsetsAndSizes refs;
+    };
+
+    SessionTest(const wchar_t* name, uint32_t budget, uint32_t maxFrames, uint32_t maxBatchesInFlight, uint32_t slotsPerMiB = 0)
+        : work(FindDefaultAdapter().Device.get(), name)
+    {
+        persistentMemory.resize(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+        uint64_t defaultBytes = 0, uploadBytes = 0;
+        uint32_t descriptors = 0, memoryBytes = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&defaultBytes, &uploadBytes, &descriptors, &memoryBytes, persistent, budget, maxFrames, slotsPerMiB, maxBatchesInFlight));
+        defaultHeap = work.NewHeap(defaultBytes, D3D12_HEAP_TYPE_DEFAULT);
+        uploadHeap = work.NewHeap(uploadBytes, D3D12_HEAP_TYPE_UPLOAD);
+        descriptorHeap = work.NewShaderVisibleHeap(descriptors);
+        sessionMemory.resize(memoryBytes);
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreateSessionContext(&session, persistent, work.CommandList(), defaultHeap.get(), 0, uploadHeap.get(), 0,
+                                                                     descriptorHeap.get(), 0, budget, maxFrames, slotsPerMiB, maxBatchesInFlight,
+                                                                     sessionMemory.data(), static_cast<uint32_t>(sessionMemory.size())));
+    }
+
+    ~SessionTest()
+    {
+        void* memory = nullptr;
+        uint32_t memorySize = 0;
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroySessionContext(&memory, &memorySize, session));
+        EXPECT_EQ(memory, static_cast<void*>(sessionMemory.data()));
+        EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
+    }
+
+    Batch Prepare(const std::vector<uint8_t>& data, const OffsetsAndSizes& refs)
+    {
+        Batch batch;
+        batch.data = data;
+        batch.refs = refs;
+        const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+        const uint32_t refsBytes = frameCount * sizeof(zstdgpu_OffsetAndSize);
+        batch.input = work.NewBuffer(batch.data.size(), L"Session Input");
+        work.Upload(batch.input.get(), batch.data.data(), batch.data.size());
+        batch.inputRefs = work.NewBuffer(refsBytes, L"Session Input Refs");
+        work.Upload(batch.inputRefs.get(), reinterpret_cast<uint8_t*>(batch.refs.InputOffsets.data()), refsBytes);
+        batch.output = work.NewBuffer(refs.UnCompressedFramesMemorySizeInBytes, L"Session Output");
+        batch.outputRefs = work.NewBuffer(refsBytes, L"Session Output Refs");
+        work.Upload(batch.outputRefs.get(), reinterpret_cast<uint8_t*>(batch.refs.OutputOffsets.data()), refsBytes);
+        batch.status = work.NewBuffer(frameCount * sizeof(uint32_t), L"Session Frame Status");
+        return batch;
+    }
+
+    zstdgpu_Status Submit(Batch& batch, uint64_t& outBatchId)
+    {
+        return zstdgpu_SubmitAllStagesWithExternalMemory(&outBatchId, session,
+            batch.input.get(), static_cast<uint32_t>(batch.data.size()), batch.inputRefs.get(), static_cast<uint32_t>(batch.refs.InputOffsets.size()),
+            batch.output.get(), batch.refs.UnCompressedFramesMemorySizeInBytes, batch.outputRefs.get(), batch.refs.OutputOffsets.data(),
+            batch.status.get());
+    }
+
+    Frames ReadFrames(Batch& batch)
+    {
+        const std::vector<uint8_t> decoded = work.Read(batch.output.get());
+        Frames frames;
+        for (const zstdgpu_OffsetAndSize& ref : batch.refs.OutputOffsets)
+        {
+            frames.emplace_back(decoded.begin() + ref.offs, decoded.begin() + ref.offs + ref.size);
+        }
+        return frames;
+    }
+
+    std::vector<uint32_t> ReadStatus(Batch& batch)
+    {
+        const std::vector<uint8_t> bytes = work.Read(batch.status.get());
+        return std::vector<uint32_t>(reinterpret_cast<const uint32_t*>(bytes.data()),
+                                     reinterpret_cast<const uint32_t*>(bytes.data()) + batch.refs.InputOffsets.size());
+    }
+
+    ReusedContextWork work;
+    std::vector<uint8_t> persistentMemory;
+    std::vector<uint8_t> sessionMemory;
+    zstdgpu_PersistentContext persistent = nullptr;
+    zstdgpu_SessionContext session = nullptr;
+    com_ptr<ID3D12Heap> defaultHeap;
+    com_ptr<ID3D12Heap> uploadHeap;
+    com_ptr<ID3D12DescriptorHeap> descriptorHeap;
+};
+
+static void BuildMixedFrames(std::vector<uint8_t>& data, OffsetsAndSizes& refs, Frames& expected, uint8_t seed)
+{
+    AppendRawRleFrame(data, refs, expected, {1000, 1000, 1000, 1000, 1000}, {false, true, false, true, false}, seed);
+    AppendRawRleFrame(data, refs, expected, {300}, {false}, static_cast<uint8_t>(seed + 0x10));
+    AppendRawRleFrame(data, refs, expected, {700, 700, 700, 700, 700, 700, 700}, {true, false, false, true, false, true, false}, static_cast<uint8_t>(seed + 0x20));
+    AppendRawRleFrame(data, refs, expected, {1}, {true}, static_cast<uint8_t>(seed + 0x30));
+    AppendRawRleFrame(data, refs, expected, {4000, 17, 2500}, {false, true, false}, static_cast<uint8_t>(seed + 0x40));
+}
+
+// One call decodes a whole batch, split by the library into dispatches of at most the session's output budget --
+// ending mid-block, on block and frame boundaries, and in one dispatch -- and must reproduce every frame.
+TEST_F(ZstdDecompressionTests, SessionDecodeMatchesWholeDecode)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    BuildMixedFrames(data, refs, expected, 0x10);
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    for (uint32_t budget : {600u, 1000u, 1500u, 2500u, 5000u, 5300u, 100000u})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        SessionTest test(L"ZstdDecompressionSessionTest", budget, frameCount, 1);
+        SessionTest::Batch batch = test.Prepare(data, refs);
+
+        test.work.OpenCommandList();
+        uint64_t batchId = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(batch, batchId));
+        EXPECT_EQ(batchId, 1u);
+        test.work.ExecuteAndWait();
+
+        EXPECT_EQ(test.ReadStatus(batch), std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(batch);
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+    }
+}
+
+// Batches recorded back to back into one command list share the session's scratch with no CPU synchronisation, and a
+// later command list continues on the same session.
+TEST_F(ZstdDecompressionTests, SessionRecordsBatchesBackToBack)
+{
+    std::vector<uint8_t> dataA, dataB;
+    OffsetsAndSizes refsA{}, refsB{};
+    Frames expectedA, expectedB;
+    BuildMixedFrames(dataA, refsA, expectedA, 0x10);
+    BuildMixedFrames(dataB, refsB, expectedB, 0x80);
+    AppendRawRleFrame(dataB, refsB, expectedB, {2000, 2000}, {true, false}, 0xC0);
+    const uint32_t maxFrames = static_cast<uint32_t>(refsB.InputOffsets.size());
+
+    SessionTest test(L"ZstdDecompressionSessionBackToBackTest", 1500u, maxFrames, 3);
+    SessionTest::Batch a = test.Prepare(dataA, refsA);
+    SessionTest::Batch b = test.Prepare(dataB, refsB);
+    SessionTest::Batch c = test.Prepare(dataA, refsA);
+
+    test.work.OpenCommandList();
+    uint64_t idA = 0, idB = 0, idC = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(a, idA));
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(b, idB));
+    test.work.ExecuteAndWait();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_RetireSessionBatches(test.session, idB));
+
+    test.work.OpenCommandList();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(c, idC));
+    test.work.ExecuteAndWait();
+    EXPECT_EQ(idA, 1u);
+    EXPECT_EQ(idB, 2u);
+    EXPECT_EQ(idC, 3u);
+
+    struct Check { SessionTest::Batch* batch; const Frames* expected; } checks[] = {{&a, &expectedA}, {&b, &expectedB}, {&c, &expectedA}};
+    for (const Check& check : checks)
+    {
+        EXPECT_EQ(test.ReadStatus(*check.batch), std::vector<uint32_t>(check.expected->size(), kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(*check.batch);
+        ASSERT_EQ(frames.size(), check.expected->size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], (*check.expected)[i]) << "frame " << i;
+        }
+    }
+}
+
+// With every descriptor ring slot holding a batch the caller has not retired, a submit records nothing and says so.
+TEST_F(ZstdDecompressionTests, SessionBusyUntilRetired)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    BuildMixedFrames(data, refs, expected, 0x10);
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    SessionTest test(L"ZstdDecompressionSessionBusyTest", 2500u, frameCount, 1);
+    SessionTest::Batch first = test.Prepare(data, refs);
+    SessionTest::Batch second = test.Prepare(data, refs);
+
+    test.work.OpenCommandList();
+    uint64_t id = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(first, id));
+    EXPECT_EQ(kzstdgpu_StatusBusy, test.Submit(second, id));
+    test.work.ExecuteAndWait();
+
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_RetireSessionBatches(test.session, 1u));
+    test.work.OpenCommandList();
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(second, id));
+    EXPECT_EQ(id, 2u);
+    test.work.ExecuteAndWait();
+
+    for (SessionTest::Batch* batch : {&first, &second})
+    {
+        EXPECT_EQ(test.ReadStatus(*batch), std::vector<uint32_t>(frameCount, kzstdgpu_FrameStatus_Success));
+        const Frames frames = test.ReadFrames(*batch);
+        ASSERT_EQ(frames.size(), expected.size());
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            EXPECT_EQ(frames[i], expected[i]) << "frame " << i;
+        }
+    }
+}
+
+// A dispatch whose frames exceed the block slots is skipped as a whole. A frame it started and a later dispatch resumes
+// must stay reported as failed -- the resuming dispatch has nothing to resume from -- while frames entirely in later
+// dispatches still decode.
+TEST_F(ZstdDecompressionTests, SessionFailedDispatchKeepsResumedFrameFailed)
+{
+    std::vector<uint8_t> data;
+    OffsetsAndSizes refs{};
+    Frames expected;
+    AppendRawRleFrame(data, refs, expected, {25, 25, 25, 25}, {false, false, false, false}, 0x10);  // split by dispatches 1 and 2
+    AppendRawRleFrame(data, refs, expected, std::vector<uint32_t>(16, 1u), std::vector<bool>(16, true), 0x20);  // more blocks than slots
+    AppendRawRleFrame(data, refs, expected, {25, 25, 25, 25}, {false, false, false, false}, 0x30);  // starts in failed dispatch 2
+    AppendRawRleFrame(data, refs, expected, {30}, {false}, 0x40);  // entirely in dispatch 4
+    const uint32_t frameCount = static_cast<uint32_t>(refs.InputOffsets.size());
+
+    // 64-byte dispatches: [f0 0..64) | f0 64..100, f1, f2 0..12 (f1's 16 blocks exceed the slots) | f2 12..76 | f2 76..100, f3
+    SessionTest test(L"ZstdDecompressionSessionFailedDispatchTest", 64u, frameCount, 1);
+    SessionTest::Batch batch = test.Prepare(data, refs);
+    test.work.OpenCommandList();
+    uint64_t id = 0;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, test.Submit(batch, id));
+    test.work.ExecuteAndWait();
+
+    const std::vector<uint32_t> status = test.ReadStatus(batch);
+    ASSERT_EQ(status.size(), 4u);
+    EXPECT_EQ(status[0], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[1], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[2], kzstdgpu_FrameStatus_BlockCountExceeded);
+    EXPECT_EQ(status[3], kzstdgpu_FrameStatus_Success);
+    EXPECT_EQ(test.ReadFrames(batch)[3], expected[3]);
+}
+
+// The inverse sizing returns the largest budget whose scratch fits.
+TEST_F(ZstdDecompressionTests, SessionBudgetForScratchInvertsRequirement)
+{
+    ReusedContextWork work(FindDefaultAdapter().Device.get(), L"ZstdDecompressionSessionSizingTest");
+    std::vector<uint8_t> persistentMemory(zstdgpu_GetPersistentContextRequiredMemorySizeInBytes());
+    zstdgpu_PersistentContext persistent = nullptr;
+    ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_CreatePersistentContext(&persistent, work.GetDevice(), persistentMemory.data(), static_cast<uint32_t>(persistentMemory.size())));
+
+    for (uint32_t budget : {4096u, 1u << 20, 16u << 20, 256u << 20})
+    {
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        uint64_t scratch = 0, upload = 0;
+        uint32_t descriptors = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&scratch, &upload, &descriptors, nullptr, persistent, budget, 64u, 0u, 2u));
+
+        uint32_t inverse = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionBudgetForScratch(&inverse, persistent, scratch, 64u, 0u));
+        EXPECT_GE(inverse, budget);
+
+        uint64_t inverseScratch = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&inverseScratch, &upload, &descriptors, nullptr, persistent, inverse, 64u, 0u, 2u));
+        EXPECT_LE(inverseScratch, scratch);
+        uint64_t aboveScratch = 0;
+        ASSERT_EQ(kzstdgpu_StatusSuccess, zstdgpu_GetSessionRequirement(&aboveScratch, &upload, &descriptors, nullptr, persistent, inverse + 1u, 64u, 0u, 2u));
+        EXPECT_GT(aboveScratch, scratch);
+    }
+
+    uint32_t none = 0;
+    EXPECT_EQ(kzstdgpu_StatusInvalidArgument, zstdgpu_GetSessionBudgetForScratch(&none, persistent, 1u, 64u, 0u));
+
+    void* memory = nullptr;
+    uint32_t memorySize = 0;
     EXPECT_EQ(kzstdgpu_StatusSuccess, zstdgpu_DestroyPersistentContext(&memory, &memorySize, persistent));
 }

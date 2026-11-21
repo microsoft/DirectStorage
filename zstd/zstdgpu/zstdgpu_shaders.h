@@ -758,8 +758,11 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
 
     if (frameIdx < srt.frameCount)
     {
+        // Caller buffers (input refs, frame status) hold the whole batch; this dispatch's frames start at `frameBase`.
+        const uint32_t callerFrameIdx = srt.frameBase + frameIdx;
+
         zstdgpu_Forward_BitBuffer bits;
-        zstdgpu_Forward_BitBuffer_InitWithSegment(bits, srt.inCompressedData, srt.inFramesRefs[frameIdx], srt.compressedBufferSizeInBytes);
+        zstdgpu_Forward_BitBuffer_InitWithSegment(bits, srt.inCompressedData, srt.inFramesRefs[callerFrameIdx], srt.compressedBufferSizeInBytes);
 
         uint32_t magic = zstdgpu_Forward_BitBuffer_Get(bits, 32);
 
@@ -790,9 +793,12 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
             uint32_t frameBlockLimit = 0;
             uint32_t def0 = ~0u, def1 = ~0u, def2 = ~0u, def3 = ~0u;
             uint32_t cursorStart = 0;
+            uint32_t resumeSkipped = 0;
             if (0 != isResumed)
             {
-                if (0 != srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid])
+                // The record is valid only if the previous request wrote it for this one (`resumeTag`). A request
+                // whose stage 2 was skipped (count checks) leaves an older record behind, which must not be resumed.
+                if (0 != srt.resumeTag && srt.resumeTag == srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid])
                 {
                     frameBlockStart = srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_NextOrdinal];
                     cursorStart     = srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Cursor];
@@ -804,6 +810,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 else
                 {
                     frameBlockStart = kzstdgpu_BlockWindowSkipFrame;
+                    resumeSkipped = 1u;
                 }
             }
 
@@ -917,11 +924,15 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 const uint32_t frameCount = WaveActiveCountBits(true);
 
                 // Request-size limit check (see kzstdgpu_MaxRequestUncompressedByteSize). Only accepted
-                // frames produce output. Sizes are clamped per lane and per wave to (limit + 1), so the
+                // frames produce output, and a partial decode's resumed and last frames produce only the part
+                // of the frame this request takes. Sizes are clamped per lane and per wave to (limit + 1), so the
                 // 64-bit wave sum cannot wrap and each atomic add is at most 2^30. The add that first takes
                 // the running total past the limit therefore sees an exact (unwrapped) previous total.
                 const uint64_t sizeLimitPlusOne = (uint64_t)kzstdgpu_MaxRequestUncompressedByteSize + 1u;
-                const uint64_t acceptedSize = (kzstdgpu_FrameStatus_Success == frameStatus) ? frameInfo.uncompSize : 0u;
+                const uint64_t portionEnd = (0 != isLastPartial && (uint64_t)srt.lastFrameLimit < (uint64_t)frameInfo.uncompSize) ? (uint64_t)srt.lastFrameLimit : (uint64_t)frameInfo.uncompSize;
+                const uint64_t portionStart = (0 == isResumed) ? 0u : ((0 != resumeSkipped) ? portionEnd : (uint64_t)cursorStart);
+                const uint64_t portionSize = portionEnd > portionStart ? portionEnd - portionStart : 0u;
+                const uint64_t acceptedSize = (kzstdgpu_FrameStatus_Success == frameStatus) ? portionSize : 0u;
                 const uint64_t laneClampedSize = acceptedSize < sizeLimitPlusOne ? acceptedSize : sizeLimitPlusOne;
                 const uint64_t waveClampedSize = WaveActiveSum(laneClampedSize);
                 const uint32_t acceptedByteCount = (uint32_t)(waveClampedSize < sizeLimitPlusOne ? waveClampedSize : sizeLimitPlusOne);
@@ -955,7 +966,14 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
                 {
                     status = kzstdgpu_FrameStatus_RequestTooLarge;
                 }
-                srt.inoutFrameStatus[frameIdx] = status;
+                // In a session the status buffer spans the batch, so a resumed frame's slot was written by the request
+                // that started the frame; keep a failure reported there (for example a count check that skipped that
+                // request's decode) rather than overwrite it.
+                const uint32_t keepEarlierFailure = (0 != isResumed && 0 != (partialFlags & kzstdgpu_PartialDecodeFlag_KeepResumedStatus)) ? 1u : 0u;
+                if (0 == keepEarlierFailure || kzstdgpu_FrameStatus_Success == srt.inoutFrameStatus[callerFrameIdx])
+                {
+                    srt.inoutFrameStatus[callerFrameIdx] = status;
+                }
             }
         }
         else if (0 == planLastFrame)
@@ -974,7 +992,7 @@ static inline void zstdgpu_ShaderEntry_ParseFrames(ZSTDGPU_PARAM_INOUT(zstdgpu_P
             else
             {
                 // Real pass: record the reject status (written exactly once per frame).
-                srt.inoutFrameStatus[frameIdx] = kzstdgpu_FrameStatus_NotZstdFrame;
+                srt.inoutFrameStatus[srt.frameBase + frameIdx] = kzstdgpu_FrameStatus_NotZstdFrame;
             }
         }
     }
@@ -4435,13 +4453,18 @@ static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_Wri
     const uint32_t frameIdx = srt.frameCount - 1u;
     const uint32_t isResumed = (0 != (srt.partialFlags & kzstdgpu_PartialDecodeFlag_ResumeFirstFrame) && 0u == frameIdx) ? 1u : 0u;
 
-    // A resumed frame whose record is no longer valid was already finished; nothing of it was decoded.
-    if (0 != isResumed && 0 == srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid])
+    // A resumed frame whose record is not valid for this request was already finished, or the request that wrote
+    // the record did not complete; nothing of it was decoded.
+    if (0 != isResumed && (0 == srt.resumeTag || srt.resumeTag != srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid]))
+    {
+        srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid] = 0u;
         return;
+    }
 
     // A frame the frame parser rejected (not a zstd frame, an unsupported header, or the request-size limit) has
     // no position to resume from. A count check never gets here: it skips this pass along with the rest of stage 2.
-    if (kzstdgpu_FrameStatus_Success != srt.inoutFrameStatus[frameIdx])
+    const uint32_t callerFrameIdx = srt.frameBase + frameIdx;
+    if (kzstdgpu_FrameStatus_Success != srt.inoutFrameStatus[callerFrameIdx])
     {
         srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid] = 0u;
         return;
@@ -4479,13 +4502,13 @@ static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_Wri
     // even when its blocks produce fewer bytes than its header declares, which a whole-frame decode accepts too.
     // Otherwise the window stopped short: exactly at the limit (resume after it), or before it because the
     // request ran out of block slots.
-    const uint32_t frameSize = srt.inUnCompressedFramesRefs[frameIdx].size;
+    const uint32_t frameSize = srt.inUnCompressedFramesRefs[callerFrameIdx].size;
     if (nextBlockIdx == blockCount)
     {
         const uint32_t frameComplete = (0 != srt.inoutPartialDecodeState[kzstdgpu_PartialDecode_WindowReachesEnd] || nextCursor >= frameSize) ? 1u : 0u;
-        if (0 == frameComplete && nextCursor < limit && kzstdgpu_FrameStatus_Success == srt.inoutFrameStatus[frameIdx])
+        if (0 == frameComplete && nextCursor < limit && kzstdgpu_FrameStatus_Success == srt.inoutFrameStatus[callerFrameIdx])
         {
-            srt.inoutFrameStatus[frameIdx] = kzstdgpu_FrameStatus_BlockCountExceeded;
+            srt.inoutFrameStatus[callerFrameIdx] = kzstdgpu_FrameStatus_BlockCountExceeded;
         }
         if (0 != frameComplete || nextCursor < limit)
         {
@@ -4534,7 +4557,7 @@ static void zstdgpu_ShaderEntry_WriteFrameResume(ZSTDGPU_PARAM_INOUT(zstdgpu_Wri
         defMLen = (0 != (defs & kzstdgpu_BlockTableDef_MLen)) ? ordinal : defMLen;
     }
 
-    srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid]       = 1u;
+    srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Valid]       = srt.resumeTagNext;
     srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_NextOrdinal] = windowStart + (nextBlockIdx - windowBlockIdx);
     srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Offset1]     = offset1;
     srt.inoutPartialDecodeState[kzstdgpu_ResumeRecord_Offset2]     = offset2;

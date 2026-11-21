@@ -39,11 +39,14 @@ typedef struct zstdgpu_WriteFrameResume_Consts
     uint32_t    frameCount;
     uint32_t    partialFlags;
     uint32_t    lastFrameLimit;
+    uint32_t    frameBase;
+    uint32_t    resumeTag;
+    uint32_t    resumeTagNext;
 } zstdgpu_WriteFrameResume_Consts;
 
 ConstantBuffer<zstdgpu_WriteFrameResume_Consts> ZstdConstants_WriteFrameResume : register(b0);
 
-#define ZSTDGPU_SRT_RS_WriteFrameResume "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", UAV(u1)" ", SRV(t8)" ", SRV(t9)" ", SRV(t10)" ", SRV(t11)" ", SRV(t12)" ", UAV(u2)" ", RootConstants(b0, num32BitConstants=3)"
+#define ZSTDGPU_SRT_RS_WriteFrameResume "UAV(u0)" ", SRV(t0)" ", SRV(t1)" ", SRV(t2)" ", SRV(t3)" ", SRV(t4)" ", SRV(t5)" ", SRV(t6)" ", SRV(t7)" ", UAV(u1)" ", SRV(t8)" ", SRV(t9)" ", SRV(t10)" ", SRV(t11)" ", SRV(t12)" ", UAV(u2)" ", RootConstants(b0, num32BitConstants=6)"
 
 static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_WriteFrameResume_SRT) srt)
 {
@@ -66,6 +69,9 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_WriteFrameResume_SRT) s
     srt.frameCount                      = ZstdConstants_WriteFrameResume.frameCount;
     srt.partialFlags                    = ZstdConstants_WriteFrameResume.partialFlags;
     srt.lastFrameLimit                  = ZstdConstants_WriteFrameResume.lastFrameLimit;
+    srt.frameBase                       = ZstdConstants_WriteFrameResume.frameBase;
+    srt.resumeTag                       = ZstdConstants_WriteFrameResume.resumeTag;
+    srt.resumeTagNext                   = ZstdConstants_WriteFrameResume.resumeTagNext;
 }
 
 #else
@@ -73,7 +79,10 @@ static void zstdgpu_Srt_Fill(ZSTDGPU_PARAM_INOUT(zstdgpu_WriteFrameResume_SRT) s
 static void zstdgpu_Srt_Fill(zstdgpu_WriteFrameResume_SRT &srt, const zstdgpu_ResourceDataCpu &cpuRes,
                              uint32_t     frameCount,
                              uint32_t     partialFlags,
-                             uint32_t     lastFrameLimit)
+                             uint32_t     lastFrameLimit,
+                             uint32_t     frameBase,
+                             uint32_t     resumeTag,
+                             uint32_t     resumeTagNext)
 {
     srt.inoutFrameResumeState           = cpuRes.FrameResumeState;
     srt.inBlockSizePrefix               = cpuRes.BlockSizePrefix;
@@ -94,6 +103,9 @@ static void zstdgpu_Srt_Fill(zstdgpu_WriteFrameResume_SRT &srt, const zstdgpu_Re
     srt.frameCount                      = frameCount;
     srt.partialFlags                    = partialFlags;
     srt.lastFrameLimit                  = lastFrameLimit;
+    srt.frameBase                       = frameBase;
+    srt.resumeTag                       = resumeTag;
+    srt.resumeTagNext                   = resumeTagNext;
 }
 
 #endif

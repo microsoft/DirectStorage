@@ -861,7 +861,7 @@ static void zstdgpu_Bind_MemsetMemcpy_MemsetRLE_Stage2(ID3D12GraphicsCommandList
     cmdList->SetComputeRoot32BitConstant(8 /* Consts */, flags, 2 /* flags */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap)
+static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap, uint32_t frameBase, uint32_t resumeTag)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -872,9 +872,11 @@ static void zstdgpu_Bind_ParseFrames_Stage0(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, partialFlags, 3 /* partialFlags */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockSlotCap, 5 /* blockSlotCap */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameBase, 6 /* frameBase */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, resumeTag, 7 /* resumeTag */);
 }
 
-static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap)
+static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &, uint32_t frameCount, uint32_t compressedBufferSizeInBytes, uint32_t countBlocksOnly, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t blockSlotCap, uint32_t frameBase, uint32_t resumeTag)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ParseFrames, cmdList);
     cmdList->SetDescriptorHeaps(1, &srts.heap);
@@ -885,6 +887,8 @@ static void zstdgpu_Bind_ParseFrames_Stage1(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, partialFlags, 3 /* partialFlags */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
     cmdList->SetComputeRoot32BitConstant(1 /* Consts */, blockSlotCap, 5 /* blockSlotCap */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, frameBase, 6 /* frameBase */);
+    cmdList->SetComputeRoot32BitConstant(1 /* Consts */, resumeTag, 7 /* resumeTag */);
 }
 
 static void zstdgpu_Bind_InitHuffmanTableAndDecompressLiterals_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t streamsPerGroup)
@@ -928,7 +932,7 @@ static void zstdgpu_Bind_PrefixSequenceOffsets(ID3D12GraphicsCommandList *cmdLis
     cmdList->SetComputeRoot32BitConstant(12 /* Consts */, frameCount, 2 /* frameCount */);
 }
 
-static void zstdgpu_Bind_UpdateDispatchArgs(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t decompressSequences_StreamsPerTG, uint32_t stage, uint32_t cmpBlockCountMax, uint32_t rawBlockCountMax, uint32_t rleBlockCountMax, uint32_t litByteCountMax, uint32_t seqElemCountMax, uint32_t executeIndirectWorkaround, uint32_t arenaByteCount, uint32_t frameCount, uint32_t reportsScratchOverflow)
+static void zstdgpu_Bind_UpdateDispatchArgs(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t decompressSequences_StreamsPerTG, uint32_t stage, uint32_t cmpBlockCountMax, uint32_t rawBlockCountMax, uint32_t rleBlockCountMax, uint32_t litByteCountMax, uint32_t seqElemCountMax, uint32_t executeIndirectWorkaround, uint32_t arenaByteCount, uint32_t frameCount, uint32_t reportsScratchOverflow, uint32_t frameBase)
 {
     d3d12aid_ComputeRsPs_Set(&srts.UpdateDispatchArgs, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* Counters */, b.Counters->GetGPUVirtualAddress());
@@ -947,6 +951,7 @@ static void zstdgpu_Bind_UpdateDispatchArgs(ID3D12GraphicsCommandList *cmdList, 
     cmdList->SetComputeRoot32BitConstant(5 /* Consts */, arenaByteCount, 8 /* arenaByteCount */);
     cmdList->SetComputeRoot32BitConstant(5 /* Consts */, frameCount, 9 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(5 /* Consts */, reportsScratchOverflow, 10 /* reportsScratchOverflow */);
+    cmdList->SetComputeRoot32BitConstant(5 /* Consts */, frameBase, 11 /* frameBase */);
 }
 
 static void zstdgpu_Bind_DecompressHuffmanWeights_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b)
@@ -1025,7 +1030,7 @@ static void zstdgpu_Bind_InitFseTable_Stage2(ID3D12GraphicsCommandList *cmdList,
     cmdList->SetComputeRoot32BitConstant(5 /* Consts */, tableType, 2 /* tableType */);
 }
 
-static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFrameIndex, uint32_t lastFrameLimit)
+static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFrameIndex, uint32_t lastFrameLimit, uint32_t frameBase)
 {
     d3d12aid_ComputeRsPs_Set(&srts.ComputeDestBlockOffsets, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* BlockDestOffs */, b.BlockDestOffs->GetGPUVirtualAddress());
@@ -1037,9 +1042,10 @@ static void zstdgpu_Bind_ComputeDestBlockOffsets(ID3D12GraphicsCommandList *cmdL
     cmdList->SetComputeRoot32BitConstant(6 /* Consts */, frameCount, 2 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(6 /* Consts */, partialFrameIndex, 3 /* partialFrameIndex */);
     cmdList->SetComputeRoot32BitConstant(6 /* Consts */, lastFrameLimit, 4 /* lastFrameLimit */);
+    cmdList->SetComputeRoot32BitConstant(6 /* Consts */, frameBase, 5 /* frameBase */);
 }
 
-static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFlags, uint32_t lastFrameLimit)
+static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t frameCount, uint32_t partialFlags, uint32_t lastFrameLimit, uint32_t frameBase, uint32_t resumeTag, uint32_t resumeTagNext)
 {
     d3d12aid_ComputeRsPs_Set(&srts.WriteFrameResume, cmdList);
     cmdList->SetComputeRootUnorderedAccessView(0 /* FrameResumeState */, b.FrameResumeState->GetGPUVirtualAddress());
@@ -1061,6 +1067,9 @@ static void zstdgpu_Bind_WriteFrameResume(ID3D12GraphicsCommandList *cmdList, co
     cmdList->SetComputeRoot32BitConstant(16 /* Consts */, frameCount, 0 /* frameCount */);
     cmdList->SetComputeRoot32BitConstant(16 /* Consts */, partialFlags, 1 /* partialFlags */);
     cmdList->SetComputeRoot32BitConstant(16 /* Consts */, lastFrameLimit, 2 /* lastFrameLimit */);
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, frameBase, 3 /* frameBase */);
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, resumeTag, 4 /* resumeTag */);
+    cmdList->SetComputeRoot32BitConstant(16 /* Consts */, resumeTagNext, 5 /* resumeTagNext */);
 }
 
 static void zstdgpu_Bind_ExecuteSequences_Stage2(ID3D12GraphicsCommandList *cmdList, const zstdgpu_Srts &srts, const zstdgpu_GpuOnlyBuffers &b, uint32_t ArenaTopDwords)

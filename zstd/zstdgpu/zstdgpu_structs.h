@@ -1950,7 +1950,8 @@ static inline uint32_t zstdgpu_BlockWindowContains(uint32_t blockOrdinal, uint32
  *  the caller between requests and laid out as below. Block positions are frame-relative ORDINALS, so the
  *  record stays valid wherever the frame's bytes sit in the next request's input buffer.
  *
- *   - `Valid`: the frame is incomplete and the next request resumes it.
+ *   - `Valid`: the frame is incomplete and the next request resumes it. Holds the tag the next request expects
+ *     (`resumeTag`), or 0; a record whose tag does not match is treated as invalid.
  *   - `NextOrdinal`: the first block the next request decodes.
  *   - `Offset1..3`, `Cursor`: repeat offsets on entry to that block (biased by 3, as `PerSeqStreamFinalOffset*`)
  *     and its output offset within the frame. They are consecutive and in the order of the per-frame resume
@@ -1986,6 +1987,7 @@ static inline uint32_t zstdgpu_BlockWindowContains(uint32_t blockOrdinal, uint32
 #define kzstdgpu_PartialDecodeFlag_ResumeFirstFrame 1u  // frame 0 resumes from the record
 #define kzstdgpu_PartialDecodeFlag_LastFramePartial 2u  // the last frame stops at `lastFrameLimit`
 #define kzstdgpu_PartialDecodeFlag_PlanLastFrame    4u  // this dispatch chooses the last frame's window
+#define kzstdgpu_PartialDecodeFlag_KeepResumedStatus 8u // frame status spans the batch: a resumed frame keeps an earlier failure
 
 // Which entropy tables a compressed block defines rather than reuses (`BlockTableDefs`).
 #define kzstdgpu_BlockTableDef_Huf  1u
